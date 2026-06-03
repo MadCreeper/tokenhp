@@ -1,0 +1,24 @@
+{
+  "claude-opus-4-8":   { "input": 5,     "output": 25, "cache_read": 0.50,    "cache_create": 6.25,  "cache_create_1h": 10 },
+  "claude-opus-4-7":   { "input": 5,     "output": 25, "cache_read": 0.50,    "cache_create": 6.25,  "cache_create_1h": 10 },
+  "claude-opus-4-6":   { "input": 5,     "output": 25, "cache_read": 0.50,    "cache_create": 6.25,  "cache_create_1h": 10 },
+  "claude-opus-4-5":   { "input": 5,     "output": 25, "cache_read": 0.50,    "cache_create": 6.25,  "cache_create_1h": 10 },
+  "claude-opus-4-1":   { "input": 15,    "output": 75, "cache_read": 1.50,    "cache_create": 18.75, "cache_create_1h": 30 },
+  "claude-opus-4":     { "input": 15,    "output": 75, "cache_read": 1.50,    "cache_create": 18.75, "cache_create_1h": 30 },
+
+  "claude-sonnet-4-6": { "input": 3,     "output": 15, "cache_read": 0.30,    "cache_create": 3.75,  "cache_create_1h": 6 },
+  "claude-sonnet-4-5": { "input": 3,     "output": 15, "cache_read": 0.30,    "cache_create": 3.75,  "cache_create_1h": 6 },
+  "claude-sonnet-4":   { "input": 3,     "output": 15, "cache_read": 0.30,    "cache_create": 3.75,  "cache_create_1h": 6 },
+
+  "claude-haiku-4-5":  { "input": 1,     "output": 5,  "cache_read": 0.10,    "cache_create": 1.25,  "cache_create_1h": 2 },
+
+  "claude-3-5-sonnet": { "input": 3,     "output": 15, "cache_read": 0.30,    "cache_create": 3.75,  "cache_create_1h": 6 },
+  "claude-3-5-haiku":  { "input": 0.80,  "output": 4,  "cache_read": 0.08,    "cache_create": 1.00,  "cache_create_1h": 1.60 },
+
+  "kimi-k2.6":         { "input": 0.90,  "output": 3.75, "cache_read": 0.15,    "cache_create": 0 },
+  "deepseek-v4-pro":   { "input": 0.435, "output": 0.87, "cache_read": 0.003625, "cache_create": 0 },
+  "deepseek-v4-flash": { "input": 0.14,  "output": 0.28, "cache_read": 0.0028,   "cache_create": 0 },
+  "minimax-m2.7":      { "input": 0.30,  "output": 1.20, "cache_read": 0.06,    "cache_create": 0.375 },
+  "minimax-m2.5":      { "input": 0.30,  "output": 1.20, "cache_read": 0.06,    "cache_create": 0.375 },
+  "doubao-seed-code":  { "input": 0.194, "output": 1.67, "cache_read": 0.019,   "cache_create": 0 }
+}

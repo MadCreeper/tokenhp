@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Test, Build, Package
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcode-select -p
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Run unit tests (swift test, HPBarKit)
+        run: swift test --package-path HPBarKit
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # CI runners don't have the developer's "HPBar Dev" code-signing
+      # identity, so override to ad-hoc signing for the build. The released
+      # binary is unsigned-for-distribution — users must right-click → Open
+      # (or run `xattr -dr com.apple.quarantine HPBar.app`) the first time.
+      - name: Build app (Release, ad-hoc signed)
+        run: |
+          xcodebuild \
+            -project HPBar.xcodeproj \
+            -scheme HPBar \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+
+      - name: Package as zip
+        run: |
+          APP="build/Build/Products/Release/HPBar.app"
+          test -d "$APP" || { echo "App not found"; exit 1; }
+          ditto -c -k --sequesterRsrc --keepParent "$APP" HPBar.zip
+          ls -lh HPBar.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HPBar
+          path: HPBar.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: HPBar.zip
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            1. Download `HPBar.zip`, unzip → `HPBar.app`.
+            2. Because this build is not notarized, macOS Gatekeeper will
+               block it. Either:
+                  - Right-click → **Open**, then confirm in the dialog, **or**
+                  - Run `xattr -dr com.apple.quarantine HPBar.app` once.
+            3. Launch `HPBar.app`. The first read of Claude Code's Keychain
+               item will prompt for your login password — click **Always Allow**.
+
+            See the repo for what each tab shows and how to add custom model
+            pricing (`~/Library/Application Support/HPBar/pricing.json`).
