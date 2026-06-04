@@ -12,6 +12,10 @@ jobs:
   build:
     name: Test, Build, Package
     runs-on: macos-15
+    # `contents: write` is required so softprops/action-gh-release can create
+    # a Release on tag pushes. Read-only is the default for new repos.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
