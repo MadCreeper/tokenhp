@@ -74,32 +74,61 @@ jobs:
           # Mark `-alpha` / `-beta` / `-rc` tags as prereleases automatically.
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
           body: |
-            ## Install (macOS 14 / 15)
+            ## 安装(macOS 14 Sonoma / 15 Sequoia)
 
-            1. Download `HPBar.zip`, double-click to unzip → `HPBar.app`.
-            2. Drag `HPBar.app` to `/Applications`.
-            3. **Bypass Gatekeeper** — this build is not notarized, so macOS
-               will refuse it first. Pick one:
+            1. 下载 `HPBar.zip`,双击解压得到 `HPBar.app`。
+            2. 把 `HPBar.app` 拖进 `/Applications`。
+            3. **绕过 Gatekeeper** —— 这个版本没有 notarize,macOS 第一次会拒绝打开。任选一种:
 
-               **Terminal (works on every macOS, easiest):**
+               **方法 A — 终端(一行,所有 macOS 通用):**
                ```bash
                xattr -dr com.apple.quarantine /Applications/HPBar.app
                ```
 
-               **System Settings (macOS Sequoia 15):**
-               - Try to open `HPBar.app` → macOS shows "blocked" dialog.
-               - **System Settings → Privacy & Security**, scroll to the
-                 "Security" block → click **"Open Anyway"** next to HPBar.
-               - Confirm the next prompt.
+               **方法 B — 系统设置(macOS 15 Sequoia):**
+               - 从 Finder 双击 `HPBar.app` → 弹"已阻止打开"对话框,关掉它。
+               - 打开 **系统设置 → 隐私与安全性**,滚到底部 **安全** 区块。
+               - 点 HPBar 右侧的 **"仍要打开"**,在下一步弹窗里确认。
 
-               *(Right-click → Open no longer works on Sequoia — Apple
-               removed that shortcut for unsigned apps.)*
+               *(macOS 14 Sonoma 还可以右键 → 打开。Sequoia 起 Apple 砍了这个捷径,只能用 A 或 B。)*
 
-            4. Launch HPBar. A bolt ⚡ icon appears in the menu bar.
+            4. 启动 HPBar,菜单栏会出现一个 ♥ 心形图标。
+            5. 第一次读 Claude Code 的 Keychain 凭证时,会弹框问**登录密码**,点 **"始终允许"**。
+               *(每隔几小时会再弹一次,见 README Caveats 段。)*
+
+            完整说明:[README](https://github.com/MadCreeper/tokenhp#readme) —— 主题、定价配置、源码构建。
+
+            ---
+
+            ## Install (macOS 14 Sonoma / 15 Sequoia)
+
+            1. Download `HPBar.zip`, double-click to unzip → `HPBar.app`.
+            2. Drag `HPBar.app` to `/Applications`.
+            3. **Bypass Gatekeeper** — this build is not notarized, so
+               macOS will refuse it first. Pick one:
+
+               **A — Terminal (one line, works on every macOS):**
+               ```bash
+               xattr -dr com.apple.quarantine /Applications/HPBar.app
+               ```
+
+               **B — System Settings (macOS 15 Sequoia):**
+               - Try to open `HPBar.app` from Finder → macOS shows the
+                 "blocked" dialog. Close it.
+               - Open **System Settings → Privacy & Security**, scroll to
+                 the bottom **Security** section.
+               - Click **"Open Anyway"** next to HPBar, confirm the
+                 follow-up prompt.
+
+               *(macOS 14 Sonoma also allowed right-click → Open. Apple
+               removed that shortcut on Sequoia for unsigned apps.)*
+
+            4. Launch HPBar. A ♥ heart icon appears in your menu bar.
             5. The first read of Claude Code's Keychain credential will
                prompt for your login password — click **"Always Allow"**.
+               *(This prompt reappears every few hours; see README
+               Caveats.)*
 
-            ### See full README
-
-            [README on GitHub](https://github.com/MadCreeper/tokenhp#readme) —
-            themes, pricing customization, build from source.
+            Full README:
+            [tokenhp on GitHub](https://github.com/MadCreeper/tokenhp#readme)
+            — themes, pricing customization, build from source.

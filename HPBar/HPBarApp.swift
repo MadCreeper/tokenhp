@@ -12,7 +12,7 @@ struct HPBarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("HP Bar", systemImage: "bolt.fill") {
+        MenuBarExtra("HP Bar", systemImage: "heart.fill") {
             MenuBarPopover(model: model)
                 .frame(width: 340)
                 .fixedSize(horizontal: false, vertical: true)
@@ -52,7 +52,7 @@ struct MenuBarPopover: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: "bolt.fill").foregroundStyle(.yellow)
+            Image(systemName: "heart.fill").foregroundStyle(.red)
             Text("Claude Quota").font(.headline)
             Spacer()
             if model.isLoading { ProgressView().controlSize(.small) }
