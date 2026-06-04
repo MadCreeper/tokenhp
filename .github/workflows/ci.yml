@@ -67,16 +67,35 @@ jobs:
         with:
           files: HPBar.zip
           generate_release_notes: true
+          # Mark `-alpha` / `-beta` / `-rc` tags as prereleases automatically.
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
           body: |
-            ## Install
+            ## Install (macOS 14 / 15)
 
-            1. Download `HPBar.zip`, unzip → `HPBar.app`.
-            2. Because this build is not notarized, macOS Gatekeeper will
-               block it. Either:
-                  - Right-click → **Open**, then confirm in the dialog, **or**
-                  - Run `xattr -dr com.apple.quarantine HPBar.app` once.
-            3. Launch `HPBar.app`. The first read of Claude Code's Keychain
-               item will prompt for your login password — click **Always Allow**.
+            1. Download `HPBar.zip`, double-click to unzip → `HPBar.app`.
+            2. Drag `HPBar.app` to `/Applications`.
+            3. **Bypass Gatekeeper** — this build is not notarized, so macOS
+               will refuse it first. Pick one:
 
-            See the repo for what each tab shows and how to add custom model
-            pricing (`~/Library/Application Support/HPBar/pricing.json`).
+               **Terminal (works on every macOS, easiest):**
+               ```bash
+               xattr -dr com.apple.quarantine /Applications/HPBar.app
+               ```
+
+               **System Settings (macOS Sequoia 15):**
+               - Try to open `HPBar.app` → macOS shows "blocked" dialog.
+               - **System Settings → Privacy & Security**, scroll to the
+                 "Security" block → click **"Open Anyway"** next to HPBar.
+               - Confirm the next prompt.
+
+               *(Right-click → Open no longer works on Sequoia — Apple
+               removed that shortcut for unsigned apps.)*
+
+            4. Launch HPBar. A bolt ⚡ icon appears in the menu bar.
+            5. The first read of Claude Code's Keychain credential will
+               prompt for your login password — click **"Always Allow"**.
+
+            ### See full README
+
+            [README on GitHub](https://github.com/MadCreeper/tokenhp#readme) —
+            themes, pricing customization, build from source.

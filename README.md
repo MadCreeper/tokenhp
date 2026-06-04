@@ -1,5 +1,9 @@
 # tokenhp
 
+> **Status: alpha.** Works for me, but it's a side project — expect rough
+> edges and breaking changes. Read [the limitations](#caveats) before
+> relying on it.
+
 A macOS menu-bar app that turns your Claude Code usage into HP/MP/EXP bars.
 
 - **Live quota** — the same 5-hour / weekly / extra-usage numbers Claude Code's
@@ -11,18 +15,76 @@ A macOS menu-bar app that turns your Claude Code usage into HP/MP/EXP bars.
   Doubao). Click any model in the picker to inspect it; the picker defaults
   to whoever you used most.
 
-## Install
+## Install (macOS 14 Sonoma / 15 Sequoia)
 
-1. Grab the latest `HPBar.zip` from
-   [Releases](https://github.com/MadCreeper/tokenhp/releases) and unzip it.
-2. The build isn't notarized (no paid Apple Developer Program), so macOS
-   Gatekeeper will block it on first launch. Either:
-   - **Right-click → Open**, confirm the dialog, _or_
-   - run `xattr -dr com.apple.quarantine HPBar.app` once.
-3. Launch `HPBar.app`. The first read of Claude Code's Keychain item will
-   prompt for your login password — click **Always Allow**.
+1. **Download.** Get `HPBar.zip` from the latest
+   [Release](https://github.com/MadCreeper/tokenhp/releases) — double-click
+   to unzip.
 
-The bolt icon will appear in your menu bar.
+2. **Move to `/Applications`.** Drag `HPBar.app` into your Applications
+   folder. (Optional but recommended.)
+
+3. **Bypass Gatekeeper.** This build isn't notarized (see [Caveats](#caveats)),
+   so macOS will refuse to open it the first time. Pick one:
+
+   **Option A — Terminal (one line, works on every macOS version):**
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/HPBar.app
+   ```
+
+   **Option B — System Settings (macOS 15 Sequoia):**
+
+   - Try to open `HPBar.app` from Finder → macOS shows a "blocked" dialog.
+     Dismiss it.
+   - Open **System Settings → Privacy & Security**, scroll down to the
+     **Security** section.
+   - Click **"Open Anyway"** next to HPBar, then confirm the follow-up
+     prompt with Touch ID / password.
+
+   *(On macOS 14 Sonoma you could also right-click → **Open**. Apple
+   removed that shortcut on Sequoia for unsigned apps — use A or B.)*
+
+4. **Launch HPBar.** A ⚡ bolt icon appears in the menu bar. Click it.
+
+5. **First Keychain prompt.** The first time HPBar reads Claude Code's
+   stored OAuth token, macOS will ask for your **login password** to
+   authorize access. Click **"Always Allow"**. *(See [Caveats](#caveats) —
+   this prompt comes back every few hours and there's currently no fix.)*
+
+### Auto-launch on login
+
+System Settings → **General → Login Items → Open at Login** → click `+`,
+add `HPBar.app`.
+
+### Updating
+
+1. Quit HPBar (click the menu bar icon → bottom of the menu → **Quit**, or
+   just `pkill -x HPBar`).
+2. Download the new `HPBar.zip`, replace `HPBar.app` in `/Applications`.
+3. Re-run the `xattr` line from step 3 above — the new bundle is
+   quarantined too. Then launch.
+
+## Caveats
+
+This is alpha-quality software for personal use:
+
+- **Apple Silicon only.** CI builds for `arm64`; the release zip won't run
+  on Intel Macs. [Build from source](#build-from-source) if you need
+  x86_64.
+- **Requires macOS 14+** (Sonoma or later).
+- **The Keychain prompt re-appears every few hours.** Claude Code rotates
+  its OAuth token, which rewrites the Keychain item and resets its ACL —
+  wiping the "Always Allow" you clicked. Working around this requires
+  HPBar to run its own OAuth flow, which is on the maybe-someday list.
+- **Non-Anthropic prices are best-effort.** Bundled rates for Kimi /
+  DeepSeek / MiniMax / Doubao are looked up from vendor docs and can
+  drift. Override via your own `pricing.json` if you have your real
+  billed rates.
+- **Reads Claude Code's Keychain item directly.** If Anthropic changes how
+  the CLI stores credentials, HPBar will break until it's updated.
+- **No code signing / no notarization.** No $99/yr Apple Developer
+  membership for a side project — hence the one-time Gatekeeper bypass.
 
 ## Themes
 
@@ -63,7 +125,7 @@ All prices are USD per million tokens. Fields:
 - `cache_create_1h` — optional, only Anthropic charges separately for 1-hour
   cache writes (2× input). If omitted, 1-hour writes use `cache_create`.
 
-The user file is _merged_ on top of the bundled defaults — anything you don't
+The user file is *merged* on top of the bundled defaults — anything you don't
 override stays at the built-in value.
 
 Restart the app to pick up changes.
@@ -94,7 +156,7 @@ swift test --package-path HPBarKit
 
 ## Architecture
 
-```
+```text
 HPBarKit/Sources/HPBarKit/
 ├── HealthBar.swift           # thin View that delegates to the theme
 ├── HealthBarTheme.swift      # protocol: Classic + Neutral + Minecraft variants
