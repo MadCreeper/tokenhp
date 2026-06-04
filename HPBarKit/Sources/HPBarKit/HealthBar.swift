@@ -1,9 +1,12 @@
 import SwiftUI
 
-public enum BarContext { case app, widget }
+public enum BarContext: Sendable { case app, widget }
 
+/// A health-bar-shaped UI primitive. The actual rendering is delegated to the
+/// active `HealthBarTheme` (set via `.healthBarTheme(_:)`), so a custom theme
+/// can replace the rectangle with hearts, an XP bar, or anything else.
 public struct HealthBar: View {
-    public enum Kind: CaseIterable {
+    public enum Kind: CaseIterable, Sendable {
         case hp, mp, exp
 
         public var label: String {
@@ -15,17 +18,14 @@ public struct HealthBar: View {
         }
     }
 
+    @Environment(\.healthBarTheme) private var theme
+
     public let kind: Kind
     public let value: Double
     public let context: BarContext
-    /// Optional override for the label shown on the left.
     public let title: String?
-    /// Optional override for the right-hand text (defaults to remaining %).
     public let trailing: String?
-    /// Optional small caption under the bar (e.g. reset time).
     public let caption: String?
-
-    @Environment(\.healthBarTheme) private var theme
 
     public init(
         kind: Kind,
@@ -44,13 +44,33 @@ public struct HealthBar: View {
     }
 
     public var body: some View {
+        theme.makeBar(
+            value: value,
+            title: title ?? kind.label,
+            trailing: trailing ?? "\(Int(value * 100))%",
+            caption: caption,
+            context: context
+        )
+    }
+}
+
+/// The standard rectangle render — what `DefaultTheme` and `NeutralTheme` use.
+struct StandardBarView: View {
+    let value: Double
+    let title: String?
+    let trailing: String?
+    let caption: String?
+    let context: BarContext
+    let theme: any HealthBarTheme
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title ?? kind.label)
+                Text(title ?? "")
                     .font(.system(.caption, design: .monospaced, weight: .semibold))
                     .foregroundStyle(.primary)
                 Spacer()
-                Text(trailing ?? "\(Int(value * 100))%")
+                Text(trailing ?? "")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }

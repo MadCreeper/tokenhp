@@ -17,6 +17,17 @@ public protocol HealthBarTheme: Sendable {
     func color(for value: Double) -> Color
     /// The style painted into the bar. Defaults to a vertical gradient of `color(for:)`.
     func fillStyle(for value: Double) -> AnyShapeStyle
+
+    /// Build the entire bar view. Default implementation renders the standard
+    /// rectangle. Override in custom themes (e.g. hearts, XP bars) to draw
+    /// something completely different.
+    @MainActor func makeBar(
+        value: Double,
+        title: String?,
+        trailing: String?,
+        caption: String?,
+        context: BarContext
+    ) -> AnyView
 }
 
 public extension HealthBarTheme {
@@ -33,6 +44,19 @@ public extension HealthBarTheme {
                 endPoint: .bottom
             )
         )
+    }
+
+    @MainActor func makeBar(
+        value: Double,
+        title: String?,
+        trailing: String?,
+        caption: String?,
+        context: BarContext
+    ) -> AnyView {
+        AnyView(StandardBarView(
+            value: value, title: title, trailing: trailing,
+            caption: caption, context: context, theme: self
+        ))
     }
 }
 

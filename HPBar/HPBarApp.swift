@@ -5,10 +5,17 @@ import HPBarKit
 struct HPBarApp: App {
     @State private var model = UsageViewModel()
 
+    init() {
+        // Pull bundled pixel font into the process so .font(.custom(...))
+        // can resolve it in the Minecraft theme.
+        FontRegistry.registerBundledFonts()
+    }
+
     var body: some Scene {
         MenuBarExtra("HP Bar", systemImage: "bolt.fill") {
             MenuBarPopover(model: model)
-                .frame(width: 340, height: 360)
+                .frame(width: 340)
+                .fixedSize(horizontal: false, vertical: true)
                 .onAppear {
                     model.startPolling()
                     Task { await model.refresh() }
@@ -20,6 +27,19 @@ struct HPBarApp: App {
 
 struct MenuBarPopover: View {
     @Bindable var model: UsageViewModel
+    @AppStorage("visualTheme") private var visualThemeId: String = "classic"
+
+    private var isMinecraft: Bool { visualThemeId == "minecraft" }
+
+    /// Theme for quota (drain) bars — Live tab.
+    private var quotaTheme: any HealthBarTheme {
+        isMinecraft ? MinecraftHeartsTheme() : DefaultTheme()
+    }
+
+    /// Theme for magnitude (fill) bars — Local breakdown.
+    private var magnitudeTheme: any HealthBarTheme {
+        isMinecraft ? MinecraftXPTheme() : NeutralTheme()
+    }
 
     var body: some View {
         VStack(spacing: 14) {
@@ -36,6 +56,16 @@ struct MenuBarPopover: View {
             Text("Claude Quota").font(.headline)
             Spacer()
             if model.isLoading { ProgressView().controlSize(.small) }
+            Menu {
+                Picker("Theme", selection: $visualThemeId) {
+                    Text("Classic").tag("classic")
+                    Text("Minecraft").tag("minecraft")
+                }
+            } label: {
+                Image(systemName: "paintbrush.fill")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             Button {
                 Task { await model.refresh() }
             } label: {
@@ -58,15 +88,16 @@ struct MenuBarPopover: View {
     @ViewBuilder
     private var content: some View {
         if let report = model.report {
-            VStack(spacing: 12) {
-                switch report.body {
-                case .windows(let windows):
+            switch report.body {
+            case .windows(let windows):
+                VStack(spacing: 12) {
                     ForEach(Array(windows.enumerated()), id: \.offset) { _, w in
                         windowBar(w)
                     }
-                case .models(let models):
-                    modelView(models)
                 }
+                .healthBarTheme(quotaTheme)
+            case .models(let models):
+                modelView(models)
             }
             footer(report)
         } else if let error = model.errorMessage {
@@ -143,7 +174,7 @@ struct MenuBarPopover: View {
                 breakdownBar("Cache R", current.cacheRead,   current.cost?.cacheRead,   current.maxComponent)
                 breakdownBar("Cache W", current.cacheCreate, current.cost?.cacheCreate, current.maxComponent)
             }
-            .healthBarTheme(NeutralTheme())
+            .healthBarTheme(magnitudeTheme)
         } else {
             Text("No model activity in this window.")
                 .font(.caption).foregroundStyle(.secondary)
