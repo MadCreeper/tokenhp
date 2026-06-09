@@ -1,5 +1,4 @@
-/* Monocraft — the bundled Minecraft pixel font (SIL OFL 1.1).
-   Served from public/ at the web root. */
+/* Monocraft — the bundled Minecraft pixel font (SIL OFL 1.1). */
 @font-face {
   font-family: "Monocraft";
   src: url("/Monocraft.ttf") format("truetype");
@@ -15,6 +14,16 @@
   --panel-text: #404040;
   --panel-text-dim: #6a6a6a;
   --error: #8b1a1a;
+  /* Stone buttons */
+  --btn-face: #86868c;
+  --btn-hover: #9698a1;
+  --btn-pressed: #6b6b72;
+  --btn-text-shadow: #3f3f3f;
+  /* XP bar */
+  --xp-green: #80eb0f;
+  --xp-dark-green: #4d9e0a;
+  --xp-track: #141414;
+  --seg-ink: rgba(0, 0, 0, 0.55);
 }
 
 * {
@@ -25,7 +34,9 @@
 
 html,
 body {
-  height: 100%;
+  /* Match the panel's outer frame so any unpainted area blends while the
+     window resizes to content height. */
+  background: var(--frame);
   overflow: hidden;
   font-family: "Monocraft", ui-monospace, monospace;
   -webkit-user-select: none;
@@ -33,10 +44,10 @@ body {
   cursor: default;
 }
 
-/* The whole window is one raised Minecraft GUI panel:
-   dark outer frame + light top-left / dark bottom-right bevel. */
+/* One raised Minecraft GUI panel: dark frame + light/dark bevel. Height is
+   driven by content; the Rust window resizes to match (top-anchored, grows
+   downward). */
 .panel {
-  height: 100%;
   background: var(--panel-face);
   border: 3px solid var(--frame);
   box-shadow:
@@ -49,78 +60,224 @@ body {
   color: var(--panel-text);
 }
 
+/* --- Header --- */
 .header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
   border-bottom: 2px solid var(--bevel-shadow);
   padding-bottom: 6px;
 }
-
 .title {
   font-size: 13px;
   color: var(--panel-text);
+  margin-right: auto; /* push spinner + refresh to the right */
 }
-
 .title::before {
   content: "♥ ";
   color: #e01c1c;
 }
-
-.source {
-  font-size: 9px;
+.spinner {
+  font-size: 12px;
   color: var(--panel-text-dim);
 }
 
-.bars {
+/* --- Stone buttons + segments --- */
+.mc-btn {
+  font-family: inherit;
+  font-size: 11px;
+  color: #fff;
+  text-shadow: 1px 1px 0 var(--btn-text-shadow);
+  background: var(--btn-face);
+  border: 2px solid var(--frame);
+  box-shadow:
+    inset 2px 2px 0 rgba(255, 255, 255, 0.45),
+    inset -2px -2px 0 rgba(0, 0, 0, 0.35);
+  padding: 5px 9px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.mc-btn:hover {
+  background: var(--btn-hover);
+}
+.mc-btn.selected {
+  background: var(--btn-pressed);
+  box-shadow:
+    inset 2px 2px 0 rgba(0, 0, 0, 0.4),
+    inset -2px -2px 0 rgba(255, 255, 255, 0.22);
+}
+.mc-btn.icon {
+  padding: 4px 7px;
+  font-size: 13px;
+}
+.seg {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  gap: 6px;
+}
+.seg .mc-btn {
+  flex: 1;
+  text-align: center;
 }
 
+/* --- Live: heart bars --- */
 .bar-head {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   margin-bottom: 5px;
 }
-
 .bar-title {
   font-size: 10px;
   color: var(--panel-text);
 }
-
 .bar-trailing {
   font-size: 10px;
   color: var(--panel-text-dim);
 }
-
+.bar + .bar {
+  margin-top: 12px;
+}
 .hearts {
   display: flex;
   gap: 2px;
 }
-
-/* Each heart is a crisp pixel SVG. image-rendering keeps it sharp when scaled. */
 .heart {
   width: 18px;
   height: 18px;
   image-rendering: pixelated;
   display: block;
 }
-
 .bar-caption {
   font-size: 8px;
   color: var(--panel-text-dim);
   margin-top: 4px;
 }
 
-.status {
-  margin-top: auto;
-  font-size: 9px;
-  color: var(--panel-text-dim);
-  min-height: 12px;
+/* --- Local: dropdown + cost + XP bars --- */
+.dropdown {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dd-current {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+.chev {
+  font-size: 8px;
+}
+.dd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 168px;
+  overflow-y: auto;
 }
 
-.status.error {
+.cost-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+}
+.model-id {
+  font-size: 8px;
+  color: var(--panel-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cost-total {
+  font-size: 11px;
+  color: var(--panel-text);
+}
+
+.xp-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 4px;
+}
+.xp-title {
+  font-size: 10px;
+  color: var(--panel-text);
+  margin-bottom: 3px;
+}
+.xp-cluster {
+  position: relative;
+  height: 24px;
+}
+.xp-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 11px;
+  background: var(--xp-track);
+  border: 2px solid #000;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.xp-fill {
+  height: 100%;
+  background: linear-gradient(
+    to bottom,
+    var(--xp-green) 0,
+    var(--xp-green) 55%,
+    var(--xp-dark-green) 55%,
+    var(--xp-dark-green) 100%
+  );
+}
+/* 20 segment dividers (every 5%), painted over the fill. */
+.xp-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to right,
+    transparent 0 calc(5% - 1px),
+    var(--seg-ink) calc(5% - 1px) 5%
+  );
+}
+.xp-level {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--xp-green);
+  text-shadow:
+    1px 0 #000,
+    -1px 0 #000,
+    0 1px #000,
+    0 -1px #000;
+}
+
+/* --- Misc --- */
+.msg {
+  font-size: 10px;
+  color: var(--panel-text-dim);
+  text-align: center;
+  padding: 14px 0;
+}
+.msg.error {
   color: var(--error);
+}
+.footer {
+  border-top: 2px solid var(--bevel-shadow);
+  padding-top: 6px;
+  text-align: center;
+}
+.src-label {
+  font-size: 10px;
+  color: var(--panel-text);
+}
+.updated {
+  font-size: 9px;
+  color: var(--panel-text-dim);
 }

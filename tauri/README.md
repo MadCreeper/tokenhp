@@ -62,12 +62,27 @@ cargo run --manifest-path src-tauri/Cargo.toml --example check
 npm run tauri build    # produces a .app / .dmg (macOS), .deb/.AppImage (Linux), .msi (Windows)
 ```
 
+Cross-platform bundles are also built in CI: push a `tauri-v*` tag (e.g.
+`tauri-v0.1.0`) and `.github/workflows/tauri-release.yml` builds macOS
+(universal), Linux, and Windows artifacts into a draft prerelease.
+
+## Features
+
+- **Live quota** — 5h / weekly / extra-usage windows as draining Minecraft
+  hearts (pixel-exact port of `MinecraftHeartsBar`), with reset captions.
+- **Local activity** — per-model token + cost breakdown from
+  `~/.claude/projects/**/*.jsonl`, over 24h / 7d / 30d, as Minecraft XP bars
+  (port of `LocalStatsDataSource` + `Pricing` + `MinecraftXPBar`). Model picker
+  via a stone dropdown.
+- **Open at Login** toggle in the tray's right-click menu (off by default).
+- Popover anchors under the tray icon and resizes to content height.
+
 ## Status
 
-MVP working and verified against the live endpoint: tray heart, popover with
-draining hearts, Monocraft font, reset captions. **Live quota** source only so
-far — the Swift app's "Local activity" per-model breakdown (Pricing /
-LocalStatsDataSource) is not yet ported. See the in-repo TODOs.
+Feature-complete vs. the Swift app's Minecraft theme and verified against live
+data on macOS. Not yet done: the "Classic" (non-Minecraft) visual theme, code
+signing/notarization, and real-world testing of the Linux/Windows bundles
+(they compile via CI but haven't been run on those OSes).
 
 ## Regenerating icons
 
