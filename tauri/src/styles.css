@@ -1,0 +1,126 @@
+/* Monocraft — the bundled Minecraft pixel font (SIL OFL 1.1).
+   Served from public/ at the web root. */
+@font-face {
+  font-family: "Monocraft";
+  src: url("/Monocraft.ttf") format("truetype");
+  font-display: block;
+}
+
+:root {
+  /* MinecraftPalette, ported from MinecraftThemes.swift */
+  --panel-face: #c6c6c6;
+  --frame: #1e1e1e;
+  --bevel-light: #ffffff;
+  --bevel-shadow: #555555;
+  --panel-text: #404040;
+  --panel-text-dim: #6a6a6a;
+  --error: #8b1a1a;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  font-family: "Monocraft", ui-monospace, monospace;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+/* The whole window is one raised Minecraft GUI panel:
+   dark outer frame + light top-left / dark bottom-right bevel. */
+.panel {
+  height: 100%;
+  background: var(--panel-face);
+  border: 3px solid var(--frame);
+  box-shadow:
+    inset 3px 3px 0 var(--bevel-light),
+    inset -3px -3px 0 var(--bevel-shadow);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--panel-text);
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 2px solid var(--bevel-shadow);
+  padding-bottom: 6px;
+}
+
+.title {
+  font-size: 13px;
+  color: var(--panel-text);
+}
+
+.title::before {
+  content: "♥ ";
+  color: #e01c1c;
+}
+
+.source {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+}
+
+.bars {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 5px;
+}
+
+.bar-title {
+  font-size: 10px;
+  color: var(--panel-text);
+}
+
+.bar-trailing {
+  font-size: 10px;
+  color: var(--panel-text-dim);
+}
+
+.hearts {
+  display: flex;
+  gap: 2px;
+}
+
+/* Each heart is a crisp pixel SVG. image-rendering keeps it sharp when scaled. */
+.heart {
+  width: 18px;
+  height: 18px;
+  image-rendering: pixelated;
+  display: block;
+}
+
+.bar-caption {
+  font-size: 8px;
+  color: var(--panel-text-dim);
+  margin-top: 4px;
+}
+
+.status {
+  margin-top: auto;
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  min-height: 12px;
+}
+
+.status.error {
+  color: var(--error);
+}

@@ -1,0 +1,10 @@
+# Frontend
+node_modules/
+dist/
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# icons/ and app-icon.png ARE committed (Tauri convention) so the project
+# builds from a fresh clone without regenerating them.

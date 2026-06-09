@@ -1,0 +1,34 @@
+[package]
+name = "hpbar"
+version = "0.1.0"
+description = "HP Bar — Claude subscription usage in your menu bar / tray"
+authors = ["MadCreeper"]
+edition = "2021"
+rust-version = "1.77"
+
+# The Tauri 2 convention: a lib crate holds the app (so mobile targets can reuse
+# it) and a thin main.rs calls into it. We only ship desktop, but keep the shape.
+[lib]
+name = "hpbar_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# rustls so we don't depend on the system OpenSSL — keeps Linux builds simple.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["time", "rt-multi-thread", "macros"] }
+dirs = "5"
+
+# Keychain access is macOS-only; Linux/Windows read a plaintext file instead.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[profile.release]
+opt-level = "s"   # optimise for size — this is a tiny menu-bar utility
+lto = true
+strip = true
