@@ -24,8 +24,8 @@ tray / menu bar — click the ♥ for the popover, right-click for the menu.
 
 ### macOS (`.dmg`)
 
-1. Download `HPBar_<version>_aarch64.dmg` (Apple Silicon), open it, and drag
-   **HPBar** to Applications.
+1. Download `HPBar_<version>_universal.dmg` (Intel + Apple Silicon), open it,
+   and drag **HPBar** to Applications.
 2. First launch is blocked by Gatekeeper (unsigned). Do one of:
    - **Right-click** HPBar.app → **Open** → **Open**, or
    - `xattr -dr com.apple.quarantine /Applications/HPBar.app`, or
@@ -41,8 +41,12 @@ Needs a webkit2gtk 4.1 runtime and an AppIndicator-style system tray.
 
 - **Debian / Ubuntu (`.deb`):**
   ```sh
-  sudo apt install ./hpbar_<version>_amd64.deb
+  sudo apt install ./HPBar_<version>_amd64.deb
   # if deps are missing: sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+  ```
+- **Fedora / RHEL (`.rpm`):**
+  ```sh
+  sudo dnf install ./HPBar-<version>-1.x86_64.rpm
   ```
 - **AppImage (any distro):**
   ```sh
