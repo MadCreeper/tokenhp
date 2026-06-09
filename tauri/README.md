@@ -12,6 +12,57 @@ SwiftUI hearts) is Apple-only. Tauri gives a single codebase with a real system
 tray on all three OSes and tiny binaries (uses the OS-native webview, not a
 bundled Chromium like Electron).
 
+## Install
+
+Pre-built bundles are attached to each [release](../../releases) (tags like
+`tauri-v0.1.0`). They are **unsigned**, so every OS shows a "this is from an
+unidentified developer" warning on first launch — how to get past each is below.
+
+HPBar reads the token from your existing Claude Code login, so **sign in with the
+Claude Code CLI first** (`claude` / `claude login`). It then lives in the system
+tray / menu bar — click the ♥ for the popover, right-click for the menu.
+
+### macOS (`.dmg`)
+
+1. Download `HPBar_<version>_aarch64.dmg` (Apple Silicon), open it, and drag
+   **HPBar** to Applications.
+2. First launch is blocked by Gatekeeper (unsigned). Do one of:
+   - **Right-click** HPBar.app → **Open** → **Open**, or
+   - `xattr -dr com.apple.quarantine /Applications/HPBar.app`, or
+   - after the block, System Settings → Privacy & Security → **Open Anyway**.
+3. The heart appears in the menu bar. **On notched Macs**, a crowded menu bar can
+   hide the heart *behind the notch* — if you don't see it, hold **⌘ and drag**
+   menu-bar icons to reorder (or use [Ice](https://github.com/jordanbaird/Ice) /
+   Bartender) to surface it.
+
+### Linux (`.deb` / `.AppImage`)
+
+Needs a webkit2gtk 4.1 runtime and an AppIndicator-style system tray.
+
+- **Debian / Ubuntu (`.deb`):**
+  ```sh
+  sudo apt install ./hpbar_<version>_amd64.deb
+  # if deps are missing: sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+  ```
+- **AppImage (any distro):**
+  ```sh
+  chmod +x HPBar_<version>_amd64.AppImage
+  ./HPBar_<version>_amd64.AppImage
+  ```
+- **Tray not showing?** GNOME needs the
+  [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/);
+  KDE and most others work out of the box.
+- The token is read from `~/.claude/.credentials.json` — **no prompt**.
+
+### Windows (`.msi` / `.exe`)
+
+1. Run `HPBar_<version>_x64-setup.exe` (NSIS) or `HPBar_<version>_x64_en-US.msi`.
+2. Unsigned → SmartScreen shows "Windows protected your PC": click
+   **More info → Run anyway**.
+3. Needs the **WebView2 runtime** — preinstalled on Windows 11; the installer
+   pulls it in automatically on Windows 10.
+4. The token is read from `%USERPROFILE%\.claude\.credentials.json` — **no prompt**.
+
 ## Layout
 
 ```
