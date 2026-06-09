@@ -8,15 +8,16 @@ public enum FontRegistry {
     nonisolated(unsafe) private static var registered = false
     private static let lock = NSLock()
 
-    /// PostScript names of the fonts the kit bundles.
-    public static let pixelFontName = "PressStart2P-Regular"
+    /// PostScript name of the bundled pixel font (Monocraft, SIL OFL 1.1 —
+    /// the Minecraft theme's typeface). See THIRD_PARTY_NOTICES.md.
+    public static let pixelFontName = "Monocraft"
 
     public static func registerBundledFonts() {
         lock.lock(); defer { lock.unlock() }
         guard !registered else { return }
         registered = true
 
-        for resource in ["PressStart2P-Regular"] {
+        for resource in ["Monocraft"] {
             guard let url = Bundle.module.url(forResource: resource, withExtension: "ttf") else {
                 NSLog("HPBar: bundled font missing — %@", resource)
                 continue

@@ -67,7 +67,13 @@ public struct OAuthUsageDataSource: UsageReporting {
 
         switch http.statusCode {
         case 200: break
-        case 401: throw FetchError.unauthorized
+        case 401:
+            // The cached token was rejected — almost always because Claude Code
+            // rotated it out from under us. Drop our cache so the next fetch
+            // re-reads the Keychain (picking up the new token, re-prompting for
+            // access if the ACL was reset) instead of looping on the dead token.
+            await credentials.invalidate()
+            throw FetchError.unauthorized
         case 429: throw FetchError.rateLimited
         default: throw FetchError.server(http.statusCode)
         }

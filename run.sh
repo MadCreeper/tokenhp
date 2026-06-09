@@ -4,8 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 echo "▶︎ Stopping running HPBar instances…"
-pkill -f "HPBar.app/Contents/MacOS/HPBar" 2>/dev/null || true
-pkill -x HPBar 2>/dev/null || true
+# Use killall (not pkill) — macOS pkill regex chokes on illegal byte sequences
+# when LC_CTYPE isn't C, which surfaces as `pkill: Regular expression
+# evaluation error`. killall does literal name match and avoids that.
+killall HPBar 2>/dev/null || true
 sleep 1
 
 echo "▶︎ Generating project…"

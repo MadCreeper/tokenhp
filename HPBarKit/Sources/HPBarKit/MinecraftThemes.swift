@@ -2,9 +2,10 @@ import SwiftUI
 
 // MARK: - Pixel font
 
-private extension Font {
-    /// Press Start 2P at a given pt. Falls back to monospaced if the bundled
-    /// font hasn't been registered yet (see `FontRegistry`).
+public extension Font {
+    /// The bundled Minecraft pixel font (Monocraft) at a given pt. Falls back to
+    /// the system font if the bundled face hasn't been registered yet
+    /// (see `FontRegistry`).
     static func pixel(_ size: CGFloat) -> Font {
         .custom(FontRegistry.pixelFontName, size: size)
     }
@@ -106,13 +107,13 @@ public struct MinecraftHeartsBar: View {
             HStack {
                 if let title {
                     Text(title)
-                        .font(.pixel(8))
+                        .font(.pixel(10))
                         .foregroundStyle(.primary)
                 }
                 Spacer()
                 if let trailing {
                     Text(trailing)
-                        .font(.pixel(8))
+                        .font(.pixel(10))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -123,7 +124,7 @@ public struct MinecraftHeartsBar: View {
             }
             if let caption {
                 Text(caption)
-                    .font(.pixel(6))
+                    .font(.pixel(8))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -173,7 +174,7 @@ public struct MinecraftXPBar: View {
         VStack(alignment: .leading, spacing: 4) {
             if let title {
                 Text(title)
-                    .font(.pixel(8))
+                    .font(.pixel(10))
                     .foregroundStyle(.primary)
             }
 
@@ -196,7 +197,7 @@ public struct MinecraftXPBar: View {
 
             if let caption {
                 Text(caption)
-                    .font(.pixel(6))
+                    .font(.pixel(8))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -207,7 +208,7 @@ public struct MinecraftXPBar: View {
     /// lost against same-color background).
     @ViewBuilder
     private static func outlinedLevelText(_ s: String) -> some View {
-        let label = Text(s).font(.pixel(11))
+        let label = Text(s).font(.pixel(12))
         ZStack {
             label.foregroundStyle(.black).offset(x:  1, y:  0)
             label.foregroundStyle(.black).offset(x: -1, y:  0)
@@ -296,5 +297,194 @@ public struct MinecraftXPTheme: HealthBarTheme {
         AnyView(MinecraftXPBar(
             value: value, title: title, trailing: trailing, caption: caption
         ))
+    }
+}
+
+// MARK: - GUI chrome (panel + buttons)
+
+/// The classic Minecraft inventory/GUI palette.
+/// (#C6C6C6 panel · #8B8B8B widget · #555555 shadow · dark border.)
+public enum MinecraftPalette {
+    static func gray(_ v: Double) -> Color { Color(red: v, green: v, blue: v) }
+    public static let panelFace        = gray(198/255)  // #C6C6C6
+    // Buttons carry a slightly cool (blue-grey) stone tint, like the in-game menu.
+    public static let buttonFace       = Color(red: 134/255, green: 134/255, blue: 140/255)
+    public static let buttonHoverFace  = Color(red: 150/255, green: 152/255, blue: 161/255) // lighter on hover (authentic, not green)
+    public static let buttonPressedFace = Color(red: 107/255, green: 107/255, blue: 114/255) // pressed/active
+    public static let light            = gray(1)        // raised highlight edge
+    public static let shadow           = gray(85/255)   // #555555 recessed edge
+    public static let border           = gray(30/255)   // ~#1E1E1E outer frame
+    public static let text             = Color.white
+    public static let textShadow       = gray(63/255)   // #3F3F3F drop shadow
+    public static let panelText        = gray(64/255)   // #404040 labels ON the gray panel
+    public static let panelTextDim     = gray(106/255)  // secondary labels on the panel
+}
+
+/// A pixel-beveled rectangle — the building block for Minecraft panels and
+/// buttons. `raised` draws a 3D-up bevel (light top-left, dark bottom-right);
+/// `false` recesses it (used for pressed/active widgets).
+public struct MinecraftBevel: View {
+    public let face: Color
+    public let raised: Bool
+    public let unit: CGFloat
+    public let textured: Bool
+    public init(face: Color, raised: Bool = true, unit: CGFloat = 3, textured: Bool = false) {
+        self.face = face; self.raised = raised; self.unit = unit; self.textured = textured
+    }
+    public var body: some View {
+        Canvas { ctx, size in
+            let u = unit, w = size.width, h = size.height
+            let hi = raised ? MinecraftPalette.light : MinecraftPalette.shadow
+            let lo = raised ? MinecraftPalette.shadow : MinecraftPalette.light
+            func fill(_ r: CGRect, _ c: Color) { ctx.fill(Path(r), with: .color(c)) }
+            // Dark outer frame, then the beveled face inside it.
+            fill(CGRect(x: 0, y: 0, width: w, height: h), MinecraftPalette.border)
+            let iw = max(0, w - 2 * u), ih = max(0, h - 2 * u)
+            let inner = CGRect(x: u, y: u, width: iw, height: ih)
+            fill(inner, face)
+            if textured { Self.drawStone(ctx, inner) }
+            fill(CGRect(x: u, y: u, width: iw, height: u), hi)             // top
+            fill(CGRect(x: u, y: u, width: u, height: ih), hi)            // left
+            fill(CGRect(x: u, y: h - 2 * u, width: iw, height: u), lo)    // bottom
+            fill(CGRect(x: w - 2 * u, y: u, width: u, height: ih), lo)    // right
+        }
+    }
+
+    /// Subtle horizontal stone grain, like the in-game menu buttons: short
+    /// horizontal streaks (a few px long, 2px tall) scattered sparsely over a
+    /// very faint sheen. Keyed off pixel coordinates so it stays put on redraw.
+    private static func drawStone(_ ctx: GraphicsContext, _ r: CGRect) {
+        ctx.fill(Path(r), with: .linearGradient(
+            Gradient(colors: [Color.white.opacity(0.04), Color.clear, Color.black.opacity(0.06)]),
+            startPoint: CGPoint(x: r.minX, y: r.minY),
+            endPoint: CGPoint(x: r.minX, y: r.maxY)))
+        let rowStep: CGFloat = 3      // gap between streak rows
+        let segStep: CGFloat = 7      // horizontal stride between candidate streaks
+        let streakH: CGFloat = 2
+        var y = r.minY + 1
+        while y < r.maxY - 1 {
+            var x = r.minX
+            while x < r.maxX {
+                let key = (Int(x) &* 49157) ^ (Int(y) &* 98317)
+                // ~3/8 of slots get a streak — sparse and subtle.
+                switch key & 7 {
+                case 0, 1, 2:
+                    let len = CGFloat(3 + ((key >> 3) & 3))   // 3…6 px
+                    let d: Double = key & 1 == 0 ? -0.07 : 0.05
+                    let rect = CGRect(x: x, y: y, width: min(len, r.maxX - x), height: streakH)
+                    ctx.fill(Path(rect), with: .color(d < 0 ? .black.opacity(-d) : .white.opacity(d)))
+                default:
+                    break
+                }
+                x += segStep
+            }
+            y += rowStep
+        }
+    }
+}
+
+public extension View {
+    /// Use this view as a raised Minecraft GUI panel (the gray inventory look).
+    func minecraftPanel(unit: CGFloat = 3) -> some View {
+        background(MinecraftBevel(face: MinecraftPalette.panelFace, raised: true, unit: unit))
+    }
+
+    /// White pixel text with the classic 1px hard drop-shadow.
+    func minecraftText() -> some View {
+        foregroundStyle(MinecraftPalette.text)
+            .shadow(color: MinecraftPalette.textShadow, radius: 0, x: 1, y: 1)
+    }
+}
+
+/// A Minecraft GUI button. `selected` keeps it visually pressed-in (for the
+/// active tab); hovering lightens the face the way vanilla buttons do.
+public struct MinecraftButtonStyle: ButtonStyle {
+    public let selected: Bool
+    public let unit: CGFloat
+    public init(selected: Bool = false, unit: CGFloat = 2) {
+        self.selected = selected; self.unit = unit
+    }
+    public func makeBody(configuration: Configuration) -> some View {
+        MinecraftButtonSurface(pressed: configuration.isPressed || selected, unit: unit) {
+            configuration.label
+        }
+    }
+}
+
+/// One choice in a `MinecraftDropdown`.
+public struct MinecraftDropdownOption<ID: Hashable>: Identifiable {
+    public let id: ID
+    public let label: String
+    public init(id: ID, label: String) { self.id = id; self.label = label }
+}
+
+/// An in-game-style expandable menu: a stone button showing the current value
+/// that expands a stacked list of stone buttons inline below it (the active one
+/// shown pressed-in). No native macOS menu — pure Minecraft.
+public struct MinecraftDropdown<ID: Hashable>: View {
+    public let current: String
+    public let options: [MinecraftDropdownOption<ID>]
+    public let selected: ID
+    public let onSelect: (ID) -> Void
+    @State private var expanded = false
+
+    public init(
+        current: String,
+        options: [MinecraftDropdownOption<ID>],
+        selected: ID,
+        onSelect: @escaping (ID) -> Void
+    ) {
+        self.current = current
+        self.options = options
+        self.selected = selected
+        self.onSelect = onSelect
+    }
+
+    public var body: some View {
+        VStack(spacing: 4) {
+            Button { expanded.toggle() } label: {
+                HStack(spacing: 6) {
+                    Text(current).font(.pixel(11)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.pixel(8))
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(MinecraftButtonStyle())
+
+            if expanded {
+                VStack(spacing: 4) {
+                    ForEach(options) { opt in
+                        Button { onSelect(opt.id); expanded = false } label: {
+                            Text(opt.label).font(.pixel(11)).frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(MinecraftButtonStyle(selected: opt.id == selected))
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct MinecraftButtonSurface<Label: View>: View {
+    let pressed: Bool
+    let unit: CGFloat
+    @ViewBuilder let label: Label
+    @State private var hovering = false
+
+    private var face: Color {
+        if pressed { return MinecraftPalette.buttonPressedFace }
+        return hovering ? MinecraftPalette.buttonHoverFace : MinecraftPalette.buttonFace
+    }
+
+    var body: some View {
+        label
+            .minecraftText()
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(MinecraftBevel(face: face, raised: !pressed, unit: unit, textured: true))
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .animation(nil, value: hovering)
     }
 }
