@@ -21,9 +21,24 @@
   --btn-text-shadow: #3f3f3f;
   /* XP bar */
   --xp-green: #80eb0f;
-  --xp-dark-green: #4d9e0a;
-  --xp-track: #141414;
-  --seg-ink: rgba(0, 0, 0, 0.55);
+  --window-bg: #1e1e1e;
+}
+
+/* Per-theme variable overrides (body carries .theme-<id>). */
+body.theme-classic {
+  --panel-text: #2b2b2e;
+  --panel-text-dim: #6e6e73;
+  --error: #c93c34;
+  --window-bg: #ececf0;
+  font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", sans-serif;
+}
+body.theme-arknights {
+  --panel-text: #1d1d1d;
+  --panel-text-dim: #6d6d6d;
+  --error: #b3382f;
+  --window-bg: #d8d8d8;
+  font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+  font-weight: 400;
 }
 
 * {
@@ -34,9 +49,7 @@
 
 html,
 body {
-  /* Match the panel's outer frame so any unpainted area blends while the
-     window resizes to content height. */
-  background: var(--frame);
+  background: var(--window-bg);
   overflow: hidden;
   font-family: "Monocraft", ui-monospace, monospace;
   -webkit-user-select: none;
@@ -44,20 +57,38 @@ body {
   cursor: default;
 }
 
-/* One raised Minecraft GUI panel: dark frame + light/dark bevel. Height is
-   driven by content; the Rust window resizes to match (top-anchored, grows
-   downward). */
+/* --- Panel: shared layout; chrome per theme --- */
 .panel {
-  background: var(--panel-face);
-  border: 3px solid var(--frame);
-  box-shadow:
-    inset 3px 3px 0 var(--bevel-light),
-    inset -3px -3px 0 var(--bevel-shadow);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   color: var(--panel-text);
+}
+.theme-minecraft .panel {
+  background: var(--panel-face);
+  border: 3px solid var(--frame);
+  box-shadow:
+    inset 3px 3px 0 var(--bevel-light),
+    inset -3px -3px 0 var(--bevel-shadow);
+}
+.theme-classic .panel {
+  background: #ececf0;
+  border: 1px solid #d4d4da;
+  border-radius: 12px;
+}
+.theme-arknights .panel {
+  background: #dcdcdc;
+  border: 1px solid #c0c0c0;
+  /* The game's diagonal-stripe accent along the top edge. */
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(0, 0, 0, 0.22) 0 6px,
+    transparent 6px 12px
+  );
+  background-size: 100% 4px;
+  background-repeat: no-repeat;
+  background-position: top;
 }
 
 /* --- Header --- */
@@ -68,43 +99,41 @@ body {
   border-bottom: 2px solid var(--bevel-shadow);
   padding-bottom: 6px;
 }
+.theme-classic .header {
+  border-bottom: 1px solid #d4d4da;
+}
+.theme-arknights .header {
+  border-bottom: 1px solid #bdbdbd;
+}
 .title {
   font-size: 13px;
   color: var(--panel-text);
-  margin-right: auto; /* push spinner + refresh to the right */
+  margin-right: auto;
 }
 .title::before {
   content: "♥ ";
   color: #e01c1c;
+}
+.theme-arknights .title {
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 500;
 }
 .spinner {
   font-size: 12px;
   color: var(--panel-text-dim);
 }
 
-/* --- Stone buttons + segments --- */
+/* --- Buttons: shared layout; skin per theme --- */
 .mc-btn {
   font-family: inherit;
   font-size: 11px;
-  color: #fff;
-  text-shadow: 1px 1px 0 var(--btn-text-shadow);
-  background: var(--btn-face);
-  border: 2px solid var(--frame);
-  box-shadow:
-    inset 2px 2px 0 rgba(255, 255, 255, 0.45),
-    inset -2px -2px 0 rgba(0, 0, 0, 0.35);
   padding: 5px 9px;
   line-height: 1.2;
   cursor: pointer;
-}
-.mc-btn:hover {
-  background: var(--btn-hover);
-}
-.mc-btn.selected {
-  background: var(--btn-pressed);
-  box-shadow:
-    inset 2px 2px 0 rgba(0, 0, 0, 0.4),
-    inset -2px -2px 0 rgba(255, 255, 255, 0.22);
+  border: none;
+  background: none;
+  color: var(--panel-text);
 }
 .mc-btn.icon {
   padding: 4px 7px;
@@ -119,7 +148,75 @@ body {
   text-align: center;
 }
 
-/* --- Live: heart bars --- */
+/* Minecraft: stone bevel + grain (texture.ts port of drawStone). */
+.theme-minecraft .mc-btn {
+  color: #fff;
+  text-shadow: 1px 1px 0 var(--btn-text-shadow);
+  background-color: var(--btn-face);
+  background-image: var(--stone-tile, none),
+    linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.05),
+      rgba(0, 0, 0, 0) 45%,
+      rgba(0, 0, 0, 0.07)
+    );
+  background-size:
+    56px 24px,
+    100% 100%;
+  background-repeat: repeat, no-repeat;
+  border: 2px solid var(--frame);
+  box-shadow:
+    inset 2px 2px 0 rgba(255, 255, 255, 0.45),
+    inset -2px -2px 0 rgba(0, 0, 0, 0.35);
+}
+.theme-minecraft .mc-btn:hover {
+  background-color: var(--btn-hover);
+}
+.theme-minecraft .mc-btn.selected {
+  background-color: var(--btn-pressed);
+  box-shadow:
+    inset 2px 2px 0 rgba(0, 0, 0, 0.4),
+    inset -2px -2px 0 rgba(255, 255, 255, 0.22);
+}
+
+/* Classic: rounded macOS-ish buttons. */
+.theme-classic .mc-btn {
+  background: #e2e2e7;
+  color: #1c1c1e;
+  border: 1px solid #c9c9cf;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.theme-classic .mc-btn:hover {
+  background: #d7d7dc;
+}
+.theme-classic .mc-btn.selected {
+  background: #0a84ff;
+  border-color: #0a84ff;
+  color: #fff;
+}
+
+/* Arknights: white plates, black text; the active one inverts to black —
+   like the game's 编队/干员 tiles and tags. */
+.theme-arknights .mc-btn {
+  background: #f2f2f2;
+  color: #2a2a2a;
+  border: 1px solid #c4c4c4;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 400;
+}
+.theme-arknights .mc-btn:hover {
+  background: #fff;
+}
+.theme-arknights .mc-btn.selected {
+  background: #1c1c1c;
+  border-color: #1c1c1c;
+  color: #fff;
+  font-weight: 500;
+}
+
+/* --- Minecraft live: heart bars --- */
 .bar-head {
   display: flex;
   justify-content: space-between;
@@ -151,6 +248,208 @@ body {
   font-size: 8px;
   color: var(--panel-text-dim);
   margin-top: 4px;
+}
+
+/* --- Classic bars (HealthBarStyle port) --- */
+.cbar + .cbar {
+  margin-top: 12px;
+}
+.cbar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.cbar-title {
+  font-size: 11px;
+  font-weight: 600;
+}
+.cbar-trailing {
+  font-size: 11px;
+  color: var(--panel-text-dim);
+}
+.cbar-track {
+  height: 10px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+.cbar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease-out;
+}
+.cbar-caption {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  margin-top: 3px;
+}
+
+/* --- Arknights: 理智 hero plate (Terminal-screen replica) --- */
+.ak-hero {
+  margin: 2px 0 4px;
+}
+.ak-hero-plate {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #cccccc;
+  border: 1px solid #b8b8b8;
+  padding: 10px 16px 14px;
+  margin: 0 8px;
+  transform: skewX(-8deg);
+}
+.ak-hero-plate > * {
+  transform: skewX(8deg); /* counter-skew the content */
+}
+.ak-plus {
+  position: absolute;
+  left: -11px;
+  top: 50%;
+  margin-top: -11px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #bfbfbf;
+  border: 2px solid #fff;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.ak-hero-brain {
+  width: 50px;
+  height: 49px;
+}
+.ak-hero-brain img,
+.ak-hero-brain svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+.ak-hero-num {
+  font-size: 34px;
+  font-weight: 600;
+  color: #161616;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.ak-hero-tag {
+  display: inline-block;
+  background: #121212;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  padding: 2px 10px 2px 8px;
+  margin-top: 4px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+}
+.ak-hero-bar {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 5px;
+  height: 4px;
+  background: #b0b0b0;
+  transform: none;
+}
+.ak-hero-fill {
+  height: 100%;
+  background: #454545;
+  transition: width 0.4s ease-out;
+}
+.ak-hero .ak-caption {
+  margin: 5px 10px 0;
+}
+
+/* --- Arknights rows --- */
+.ak-row + .ak-row {
+  margin-top: 14px;
+}
+.ak-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.ak-icon {
+  width: 22px;
+  height: 22px;
+  color: #2a2a2a;
+}
+.ak-icon img,
+.ak-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+.ak-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+.ak-sub {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-left: 2px;
+}
+.ak-count {
+  margin-left: auto;
+  font-size: 18px;
+  font-weight: 500;
+  color: #1a1a1a;
+  font-variant-numeric: tabular-nums;
+}
+.ak-count.ak-off {
+  font-size: 12px;
+  color: var(--panel-text-dim);
+}
+.ak-max {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--panel-text-dim);
+}
+.ak-bar {
+  height: 5px;
+  background: #b8b8b8;
+  transform: skewX(-30deg);
+  margin: 0 6px;
+  overflow: hidden;
+}
+.ak-fill {
+  height: 100%;
+  background: #2e2e2e;
+  transition: width 0.4s ease-out;
+}
+.ak-caption {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  margin-top: 4px;
+}
+.akb + .akb {
+  margin-top: 10px;
+}
+.akb-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.akb-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.akb-trailing {
+  font-size: 11px;
+  color: var(--panel-text-dim);
+  font-variant-numeric: tabular-nums;
 }
 
 /* --- Local: dropdown + cost + XP bars --- */
@@ -190,9 +489,18 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.theme-classic .model-id,
+.theme-arknights .model-id {
+  font-size: 10px;
+}
 .cost-total {
   font-size: 11px;
   color: var(--panel-text);
+}
+.theme-arknights .cost-total {
+  font-size: 14px;
+  font-weight: 500;
+  color: #9a7a16;
 }
 
 .xp-bars {
@@ -208,40 +516,18 @@ body {
 }
 .xp-cluster {
   position: relative;
-  height: 24px;
+  height: 23px;
 }
-.xp-bar {
+/* The bar is a pixel-grid SVG (xpbar.ts): rounded capsule, thick border,
+   highlight stripe, mottled empty texture. */
+.xp-svg {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 11px;
-  background: var(--xp-track);
-  border: 2px solid #000;
-  border-radius: 2px;
-  overflow: hidden;
-}
-.xp-fill {
-  height: 100%;
-  background: linear-gradient(
-    to bottom,
-    var(--xp-green) 0,
-    var(--xp-green) 55%,
-    var(--xp-dark-green) 55%,
-    var(--xp-dark-green) 100%
-  );
-}
-/* 20 segment dividers (every 5%), painted over the fill. */
-.xp-bar::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    to right,
-    transparent 0 calc(5% - 1px),
-    var(--seg-ink) calc(5% - 1px) 5%
-  );
+  width: 100%;
+  height: 12px;
+  display: block;
 }
 .xp-level {
   position: absolute;
@@ -249,7 +535,7 @@ body {
   left: 0;
   right: 0;
   text-align: center;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--xp-green);
   text-shadow:
     1px 0 #000,
@@ -272,6 +558,12 @@ body {
   border-top: 2px solid var(--bevel-shadow);
   padding-top: 6px;
   text-align: center;
+}
+.theme-classic .footer {
+  border-top: 1px solid #d4d4da;
+}
+.theme-arknights .footer {
+  border-top: 1px solid #bdbdbd;
 }
 .src-label {
   font-size: 10px;

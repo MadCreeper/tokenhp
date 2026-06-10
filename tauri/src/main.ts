@@ -6,6 +6,10 @@ import type { LocalReport, ModelUsage, UsageReport, UsageWindow } from "./types"
 import { heartsRow } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatTokens, nowTime } from "./util";
+import { installStoneTexture } from "./texture";
+import { applyTheme, cycleTheme, getTheme, themeLabel } from "./theme";
+import { classicNeutralBar, classicQuotaBar } from "./classicbar";
+import { akBar, akResource } from "./arknights";
 import "./styles.css";
 
 const POLL_MS = 30 * 60 * 1000; // refresh every 30 min, like the Swift app
@@ -109,6 +113,7 @@ function headerHTML(): string {
     <header class="header">
       <span class="title">Claude Quota</span>
       ${state.loading ? `<span class="spinner">…</span>` : ""}
+      <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="refresh" title="Refresh">⟳</button>
     </header>`;
 }
@@ -132,16 +137,27 @@ function contentHTML(): string {
 // --- Live (hearts) ---
 
 function liveHTML(): string {
-  if (state.live) return state.live.windows.map(heartBarHTML).join("");
+  if (state.live) return state.live.windows.map(liveBarHTML).join("");
   if (state.error) return `<div class="msg">${escapeHTML(state.error)}</div>`;
   return `<div class="msg">Loading…</div>`;
 }
 
-function heartBarHTML(w: UsageWindow): string {
+function liveBarHTML(w: UsageWindow): string {
   const used = Math.round(w.utilization * 100);
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
   const caption = resetCaption(w.resets_at);
+  switch (getTheme()) {
+    case "classic":
+      return classicQuotaBar(w.title, w.remaining, trailing, caption);
+    case "arknights":
+      return akResource(w.title, w.remaining, caption, w.trailing);
+    default:
+      return heartBarHTML(w, trailing, caption);
+  }
+}
+
+function heartBarHTML(w: UsageWindow, trailing: string, caption: string | null): string {
   return `
     <div class="bar">
       <div class="bar-head">
@@ -229,12 +245,15 @@ function xpBarsHTML(m: ModelUsage): string {
     dollars !== undefined
       ? `${formatTokens(tokens)} · ${formatDollars(dollars)}`
       : formatTokens(tokens);
+  const theme = getTheme();
+  const bar =
+    theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
   return `
     <div class="xp-bars">
-      ${xpBar("Input", frac(m.input), trailing(m.input, m.cost?.input))}
-      ${xpBar("Output", frac(m.output), trailing(m.output, m.cost?.output))}
-      ${xpBar("Cache R", frac(m.cache_read), trailing(m.cache_read, m.cost?.cache_read))}
-      ${xpBar("Cache W", frac(m.cache_create), trailing(m.cache_create, m.cost?.cache_create))}
+      ${bar("Input", frac(m.input), trailing(m.input, m.cost?.input))}
+      ${bar("Output", frac(m.output), trailing(m.output, m.cost?.output))}
+      ${bar("Cache R", frac(m.cache_read), trailing(m.cache_read, m.cost?.cache_read))}
+      ${bar("Cache W", frac(m.cache_create), trailing(m.cache_create, m.cost?.cache_create))}
     </div>`;
 }
 
@@ -262,6 +281,10 @@ app.addEventListener("click", (e) => {
   switch (action) {
     case "refresh":
       void refresh();
+      break;
+    case "theme":
+      cycleTheme();
+      render();
       break;
     case "source":
       if (value && value !== state.source) {
@@ -296,5 +319,7 @@ app.addEventListener("click", (e) => {
 // Re-fetch when the popover is shown, on a slow timer, and once on load.
 listen("refresh", () => void refresh());
 setInterval(() => void refresh(), POLL_MS);
+installStoneTexture();
+applyTheme();
 render();
 void refresh();
