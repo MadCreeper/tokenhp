@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HPBar — Theme Showcase</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #15161a;
+        color: #e6e6e6;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+        margin: 0 0 4px;
+      }
+      p.note {
+        margin: 0 0 20px;
+        color: #9a9a9a;
+        font-size: 13px;
+      }
+      .grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 22px;
+      }
+      .cell {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .cell iframe {
+        width: 380px;
+        height: 620px;
+        border: 1px solid #2c2c2c;
+        border-radius: 6px;
+        background: #000;
+      }
+      .label {
+        font-size: 12px;
+        color: #9a9a9a;
+        text-transform: capitalize;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>♥ HPBar — theme showcase</h1>
+    <p class="note">
+      Every theme × tab, rendered with mock data (no Keychain, no network, no Tauri).
+      Edit the lists below or open a single panel directly, e.g.
+      <code>/?mock=1&amp;theme=arknights&amp;source=live</code>.
+    </p>
+    <div class="grid" id="grid"></div>
+    <script type="module">
+      const themes = ["minecraft", "classic", "arknights"];
+      const sources = ["live", "local"];
+      const grid = document.getElementById("grid");
+      for (const theme of themes) {
+        for (const source of sources) {
+          const cell = document.createElement("div");
+          cell.className = "cell";
+          const frame = document.createElement("iframe");
+          frame.src = `/?mock=1&theme=${theme}&source=${source}`;
+          frame.loading = "lazy";
+          const label = document.createElement("div");
+          label.className = "label";
+          label.textContent = `${theme} · ${source}`;
+          cell.append(frame, label);
+          grid.append(cell);
+        }
+      }
+    </script>
+  </body>
+</html>

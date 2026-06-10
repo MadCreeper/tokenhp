@@ -7,9 +7,21 @@ export type Theme = "minecraft" | "classic" | "arknights";
 const KEY = "hpbar-theme";
 const ORDER: Theme[] = ["minecraft", "classic", "arknights"];
 
+// Forced theme (used by the showcase tool via ?theme=…); overrides storage.
+let override: Theme | null = null;
+export function setThemeOverride(t: Theme): void {
+  override = t;
+  applyTheme(t);
+}
+
+export function isTheme(s: string | null): s is Theme {
+  return ORDER.includes(s as Theme);
+}
+
 export function getTheme(): Theme {
+  if (override) return override;
   const t = localStorage.getItem(KEY);
-  return ORDER.includes(t as Theme) ? (t as Theme) : "minecraft";
+  return isTheme(t) ? t : "minecraft";
 }
 
 export function cycleTheme(): Theme {

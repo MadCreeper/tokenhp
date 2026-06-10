@@ -1,0 +1,26 @@
+// Mock data for the showcase / test tool. Activated by the `?mock` URL flag
+// (see main.ts), this lets the full UI render in a plain browser — every theme
+// and both tabs — with no Keychain read, no network, and no Tauri runtime.
+// Run `npm run dev` and open http://localhost:1420/?mock=1 (or /showcase.html).
+
+import type { LocalReport, UsageReport } from "./types";
+
+export function mockLive(): UsageReport {
+  const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
+  return {
+    source_label: "Live quota",
+    windows: [
+      { title: "5-Hour", utilization: 0.51, remaining: 0.49, resets_at: iso((2 * 3600 + 45 * 60) * 1000), trailing: null },
+      { title: "Weekly", utilization: 0.43, remaining: 0.57, resets_at: iso(26 * 3600 * 1000), trailing: null },
+      { title: "Extra usage", utilization: 1, remaining: 0, resets_at: null, trailing: "Off" },
+    ],
+  };
+}
+
+export const MOCK_LOCAL: LocalReport = {
+  source_label: "Local model usage · last 24h",
+  models: [
+    { id: "claude-opus-4-8", display_name: "Opus 4.8", input: 104846, output: 1665621, cache_read: 164691850, cache_create: 9091429, total: 175553746, max_component: 164691850, cost: { input: 0.52, output: 41.64, cache_read: 82.35, cache_create: 90.91, total: 215.42 } },
+    { id: "claude-haiku-4-5", display_name: "Haiku 4.5", input: 4231, output: 88210, cache_read: 12450000, cache_create: 410000, total: 12952441, max_component: 12450000, cost: { input: 0.0, output: 0.44, cache_read: 1.25, cache_create: 0.51, total: 2.2 } },
+  ],
+};

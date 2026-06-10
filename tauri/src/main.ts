@@ -7,10 +7,17 @@ import { heartsRow } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatTokens, nowTime } from "./util";
 import { installStoneTexture } from "./texture";
-import { applyTheme, cycleTheme, getTheme, themeLabel } from "./theme";
+import { applyTheme, cycleTheme, getTheme, isTheme, setThemeOverride, themeLabel } from "./theme";
 import { classicNeutralBar, classicQuotaBar } from "./classicbar";
 import { akBar, akResource } from "./arknights";
+import { mockLive, MOCK_LOCAL } from "./mock";
 import "./styles.css";
+
+// Showcase / test mode: `?mock=1` feeds the UI canned data (no Keychain, no
+// network, no Tauri) so it renders in a plain browser. `?theme=` and `?source=`
+// force the view. Used by showcase.html and for screenshots.
+const params = new URLSearchParams(location.search);
+const MOCK = params.has("mock");
 
 const POLL_MS = 30 * 60 * 1000; // refresh every 30 min, like the Swift app
 
@@ -50,11 +57,27 @@ const state: State = {
 
 const app = document.getElementById("app")!;
 
+// Apply showcase URL overrides.
+const themeParam = params.get("theme");
+if (isTheme(themeParam)) setThemeOverride(themeParam);
+const sourceParam = params.get("source");
+if (sourceParam === "live" || sourceParam === "local") state.source = sourceParam;
+
 // ---------------------------------------------------------------- data
 
 let inFlight = false;
 
 async function refresh(): Promise<void> {
+  if (MOCK) {
+    state.live = mockLive();
+    state.local = MOCK_LOCAL;
+    state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.models[0].id;
+    state.error = "";
+    state.updatedAt = nowTime();
+    state.loading = false;
+    render();
+    return;
+  }
   if (inFlight) return;
   inFlight = true;
   state.loading = true;
@@ -101,6 +124,7 @@ function render(): void {
 }
 
 function syncWindowSize(): void {
+  if (MOCK) return; // no Tauri window in browser/showcase mode
   const panel = app.querySelector(".panel") as HTMLElement | null;
   if (!panel) return;
   const h = Math.ceil(panel.getBoundingClientRect().height);
@@ -316,10 +340,14 @@ app.addEventListener("click", (e) => {
   }
 });
 
-// Re-fetch when the popover is shown, on a slow timer, and once on load.
-listen("refresh", () => void refresh());
-setInterval(() => void refresh(), POLL_MS);
 installStoneTexture();
 applyTheme();
 render();
 void refresh();
+
+// Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
+// Skipped in showcase/browser mode (no Tauri runtime).
+if (!MOCK) {
+  listen("refresh", () => void refresh());
+  setInterval(() => void refresh(), POLL_MS);
+}
