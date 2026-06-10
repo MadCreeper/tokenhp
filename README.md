@@ -1,198 +1,271 @@
-# tokenhp
+<div align="center">
 
-> **Status: alpha.** Works for me, but it's a side project — expect rough
-> edges and breaking changes. Read [the limitations](#caveats) before
-> relying on it.
+# ♥ HPBar
 
-A macOS menu-bar app that turns your Claude Code usage into HP/MP/EXP bars.
+**Your Claude subscription usage, as a health bar in the menu bar / system tray.**
 
-- **Live quota** — the same 5-hour / weekly / extra-usage numbers Claude Code's
-  `/usage` shows, pulled live from Anthropic's OAuth usage endpoint.
-- **Local activity** — per-exact-model token totals (input / output / cache
-  read / cache write) over a switchable **24h / 7d / 30d** window, with USD
-  cost computed from a bundled pricing table that covers every current Claude
-  model and a handful of common third-party models (Kimi, DeepSeek, MiniMax,
-  Doubao). Click any model in the picker to inspect it; the picker defaults
-  to whoever you used most.
+**把你的 Claude 订阅用量，做成菜单栏 / 系统托盘里的一条血条。**
 
-## Install (macOS 14 Sonoma / 15 Sequoia)
+Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 
-1. **Download.** Get `HPBar.zip` from the latest
-   [Release](https://github.com/MadCreeper/tokenhp/releases) — double-click
-   to unzip.
+**English** · [中文](#zh)
 
-2. **Move to `/Applications`.** Drag `HPBar.app` into your Applications
-   folder. (Optional but recommended.)
+<br/>
 
-3. **Bypass Gatekeeper.** This build isn't notarized (see [Caveats](#caveats)),
-   so macOS will refuse to open it the first time. Pick one:
+<table>
+  <tr>
+    <td align="center"><b>Minecraft</b></td>
+    <td align="center"><b>Classic</b></td>
+    <td align="center"><b>Arknights</b></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/minecraft-live.png" width="230" alt="Minecraft · live quota"/></td>
+    <td><img src="docs/screenshots/classic-live.png" width="230" alt="Classic · live quota"/></td>
+    <td><img src="docs/screenshots/arknights-live.png" width="230" alt="Arknights · live quota"/></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/minecraft-local.png" width="230" alt="Minecraft · local activity"/></td>
+    <td><img src="docs/screenshots/classic-local.png" width="230" alt="Classic · local activity"/></td>
+    <td><img src="docs/screenshots/arknights-local.png" width="230" alt="Arknights · local activity"/></td>
+  </tr>
+</table>
 
-   **Option A — Terminal (one line, works on every macOS version):**
+<sub>Top: live quota — draining Minecraft hearts · classic green→red HP ramp · Arknights 理智 / 源石 readout.<br/>Bottom: local activity — per-model token &amp; cost breakdown. Switch themes any time.</sub>
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/HPBar.app
-   ```
+</div>
 
-   **Option B — System Settings (macOS 15 Sequoia):**
+---
 
-   - Try to open `HPBar.app` from Finder → macOS shows a "blocked" dialog.
-     Dismiss it.
-   - Open **System Settings → Privacy & Security**, scroll down to the
-     **Security** section.
-   - Click **"Open Anyway"** next to HPBar, then confirm the follow-up
-     prompt with Touch ID / password.
+<a id="en"></a>
 
-   *(On macOS 14 Sonoma you could also right-click → **Open**. Apple
-   removed that shortcut on Sequoia for unsigned apps — use A or B.)*
+## ✨ Features
 
-4. **Launch HPBar.** A ⚡ bolt icon appears in the menu bar. Click it.
+- **Lives in the menu bar / tray.** A ♥ icon; click for the popover, right-click for the menu. No window, no Dock icon.
+- **Live quota** — your 5-hour, weekly, and extra-usage windows, with reset countdowns.
+- **Local activity** — per-model token + cost breakdown from your local Claude Code session logs (`~/.claude/projects`), over 24h / 7d / 30d.
+- **Three switchable themes**, remembered across launches:
+  | Theme | Live quota | Local activity |
+  |-------|-----------|----------------|
+  | 🟩 **Minecraft** | draining pixel hearts | Bedrock-style XP bars |
+  | 🍏 **Classic** | green→yellow→red HP ramp | neutral magnitude bars |
+  | 🎮 **Arknights** | 理智 (Sanity) hero plate · 源石 · 合成玉 | skewed game-UI bars |
+- **Open at Login** toggle in the tray menu.
+- **Tiny & native** — uses each OS's built-in webview (no bundled Chromium), so installers are ~3–6 MB and idle RAM stays near a native app's.
 
-5. **First Keychain prompt.** The first time HPBar reads Claude Code's
-   stored OAuth token, macOS will ask for your **login password** to
-   authorize access. Click **"Always Allow"**. *(See [Caveats](#caveats) —
-   this prompt comes back every few hours and there's currently no fix.)*
+## 📦 Install
 
-### Auto-launch on login
+Pre-built bundles are attached to each [release](../../releases) (tags like `tauri-v0.1.1`). They are **unsigned**, so every OS shows an "unidentified developer" warning on first launch — how to get past each is below.
 
-System Settings → **General → Login Items → Open at Login** → click `+`,
-add `HPBar.app`.
+HPBar reads the token from your existing Claude Code login, so **sign in with the Claude Code CLI first** (`claude`). Then look for the ♥ in your menu bar / tray.
 
-### Updating
+<details open>
+<summary><b>macOS</b> — <code>.dmg</code></summary>
 
-1. Quit HPBar (click the menu bar icon → bottom of the menu → **Quit**, or
-   just `pkill -x HPBar`).
-2. Download the new `HPBar.zip`, replace `HPBar.app` in `/Applications`.
-3. Re-run the `xattr` line from step 3 above — the new bundle is
-   quarantined too. Then launch.
+1. Download `HPBar_<version>_universal.dmg` (Intel + Apple Silicon), open it, drag **HPBar** to Applications.
+2. First launch is blocked by Gatekeeper (unsigned). Do one of:
+   - **Right-click** HPBar.app → **Open** → **Open**, or
+   - `xattr -dr com.apple.quarantine /Applications/HPBar.app`, or
+   - after the block: System Settings → Privacy & Security → **Open Anyway**.
+3. **On notched Macs**, a crowded menu bar can hide the ♥ *behind the notch* — hold **⌘ and drag** menu-bar icons to reorder (or use [Ice](https://github.com/jordanbaird/Ice) / Bartender) to surface it.
 
-## Caveats
+</details>
 
-This is alpha-quality software for personal use:
+<details>
+<summary><b>Linux</b> — <code>.deb</code> / <code>.rpm</code> / <code>.AppImage</code></summary>
 
-- **Apple Silicon only.** CI builds for `arm64`; the release zip won't run
-  on Intel Macs. [Build from source](#build-from-source) if you need
-  x86_64.
-- **Requires macOS 14+** (Sonoma or later).
-- **The Keychain prompt re-appears every few hours.** Claude Code rotates
-  its OAuth token, which rewrites the Keychain item and resets its ACL —
-  wiping the "Always Allow" you clicked. Working around this requires
-  HPBar to run its own OAuth flow, which is on the maybe-someday list.
-- **Non-Anthropic prices are best-effort.** Bundled rates for Kimi /
-  DeepSeek / MiniMax / Doubao are looked up from vendor docs and can
-  drift. Override via your own `pricing.json` if you have your real
-  billed rates.
-- **Reads Claude Code's Keychain item directly.** If Anthropic changes how
-  the CLI stores credentials, HPBar will break until it's updated.
-- **No code signing / no notarization.** No $99/yr Apple Developer
-  membership for a side project — hence the one-time Gatekeeper bypass.
+Needs a webkit2gtk 4.1 runtime and an AppIndicator-style tray.
 
-## Themes
+```sh
+# Debian / Ubuntu
+sudo apt install ./HPBar_<version>_amd64.deb
+# (deps if missing) sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
 
-Open the popover, click the **paintbrush** icon (top right) to switch.
+# Fedora / RHEL
+sudo dnf install ./HPBar-<version>-1.x86_64.rpm
 
-| Theme | Live quota | Local activity |
-| --- | --- | --- |
-| **Classic** | Continuous green→yellow→red bars that drain as quota is consumed | Neutral accent-color magnitude bars |
-| **Minecraft** | 10 pixel hearts per quota, half-empty mid-cell (the 8th heart at 76%) | XP-bar style: dark slate track, bright green fill, segmented, level number in pixel font overlapping the bar top |
-
-The Minecraft theme uses the **Press Start 2P** pixel font (OFL licensed,
-bundled). The heart and XP-bar sprites are drawn programmatically in
-SwiftUI Canvas — no Mojang textures shipped.
-
-## Pricing customization
-
-All model prices live in JSON. Defaults ship in
-[`HPBarKit/Sources/HPBarKit/Resources/pricing.json`](HPBarKit/Sources/HPBarKit/Resources/pricing.json).
-To override an entry or add a new model without rebuilding, drop a JSON file
-at `~/Library/Application Support/HPBar/pricing.json`:
-
-```json
-{
-  "claude-opus-4-8": { "input": 4.5, "output": 22 },
-  "minimax-m3.0": {
-    "input": 0.35, "output": 1.3,
-    "cache_read": 0.07, "cache_create": 0.45
-  }
-}
+# AppImage (any distro)
+chmod +x HPBar_<version>_amd64.AppImage && ./HPBar_<version>_amd64.AppImage
 ```
 
-All prices are USD per million tokens. Fields:
+GNOME needs the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/) for the tray icon. Token is read from `~/.claude/.credentials.json` — **no prompt**.
 
-- `input`, `output` — required
-- `cache_read` — defaults to 0 if omitted
-- `cache_create` — Anthropic's 5-minute cache write rate (or the only cache
-  write rate for vendors without a TTL distinction)
-- `cache_create_1h` — optional, only Anthropic charges separately for 1-hour
-  cache writes (2× input). If omitted, 1-hour writes use `cache_create`.
+</details>
 
-The user file is *merged* on top of the bundled defaults — anything you don't
-override stays at the built-in value.
+<details>
+<summary><b>Windows</b> — <code>.msi</code> / <code>.exe</code></summary>
 
-Restart the app to pick up changes.
+1. Run `HPBar_<version>_x64-setup.exe` (NSIS) or `HPBar_<version>_x64_en-US.msi`.
+2. Unsigned → SmartScreen shows "Windows protected your PC": **More info → Run anyway**.
+3. Needs the **WebView2 runtime** — preinstalled on Windows 11; the installer pulls it in on Windows 10.
 
-## Build from source
+Token is read from `%USERPROFILE%\.claude\.credentials.json` — **no prompt**.
 
-Requires Xcode 16+ (Swift 6) and [xcodegen](https://github.com/yonaskolb/XcodeGen):
+</details>
 
-```bash
-brew install xcodegen
-git clone https://github.com/MadCreeper/tokenhp.git
-cd tokenhp
-./run.sh              # kills old instances, generates the project, builds, launches
+## 🔑 Where the token comes from
+
+| OS | Source | Prompt? |
+|----|--------|---------|
+| macOS | Keychain item `Claude Code-credentials` (via `keyring`) | once per token rotation |
+| Linux / Windows | `~/.claude/.credentials.json` plaintext file | **never** |
+
+HPBar never logs in itself — it reuses your Claude Code login and only reads it.
+
+## 🛠 Develop
+
+Prereqs: Node + npm, and the Rust toolchain (`rustup`).
+
+```sh
+npm install
+npm run tauri dev      # tray app with hot-reload
+npm run tauri build    # .dmg / .deb+.rpm+.AppImage / .msi+.exe
 ```
 
-For a release build:
+If `cargo` downloads fail with an HTTP/2 framing error: `CARGO_HTTP_MULTIPLEXING=false npm run tauri dev`.
+Headless data-path checks (no GUI): `cargo run --example check` (live) · `cargo run --example local_check` (local).
 
-```bash
-xcodegen generate
-xcodebuild -project HPBar.xcodeproj -scheme HPBar -configuration Release build
+**Theme showcase / mock mode** — preview every theme with canned data; no Keychain, no network, no Tauri:
+
+```sh
+npm run dev    # vite only, then open in a browser:
 ```
 
-To run tests:
+- Gallery of all themes × tabs: <http://localhost:1420/showcase.html>
+- A single panel: `http://localhost:1420/?mock=1&theme=arknights&source=local`
+  (`theme` = `minecraft` \| `classic` \| `arknights`, `source` = `live` \| `local`)
 
-```bash
-swift test --package-path HPBarKit
+These screenshots were captured this way.
+
+<details>
+<summary>Project layout</summary>
+
+```
+src/                    Frontend (vanilla TS + Vite)
+  hearts.ts             Minecraft hearts (pixel-grid SVG)
+  xpbar.ts              Minecraft XP bars
+  classicbar.ts         Classic HP/neutral bars
+  arknights.ts          理智/源石/合成玉 rows + sanity hero plate
+  theme.ts              theme state (persisted, body.theme-<id>)
+  mock.ts               canned data for the showcase/test mode
+  main.ts               state, fetch, render dispatch
+public/ak/              Arknights icon assets
+showcase.html           theme gallery (mock mode)
+src-tauri/src/
+  credentials.rs        read Claude Code token (Keychain / file)
+  usage.rs              GET /api/oauth/usage
+  localstats.rs         scan ~/.claude/projects + pricing.rs
+  lib.rs                tray, popover window, commands
 ```
 
-## Architecture
+</details>
 
-```text
-HPBarKit/Sources/HPBarKit/
-├── HealthBar.swift           # thin View that delegates to the theme
-├── HealthBarTheme.swift      # protocol: Classic + Neutral + Minecraft variants
-├── HealthBarStyle.swift      # continuous green→yellow→red color ramp
-├── MinecraftThemes.swift     # 7×7 pixel-heart Canvas + segmented XP bar
-├── Resources/
-│   ├── pricing.json          # bundled price table
-│   └── PressStart2P-Regular.ttf
-└── Services/
-    ├── ClaudeCredentials.swift  # Keychain reader for Claude Code's OAuth token
-    ├── CredentialProvider.swift # in-memory cache to limit Keychain reads
-    ├── OAuthUsageDataSource.swift  # /api/oauth/usage client
-    ├── LocalStatsDataSource.swift  # scans ~/.claude/projects/**/*.jsonl
-    ├── Pricing.swift             # JSON loader with user-file overlay
-    ├── FontRegistry.swift        # registers bundled pixel font at startup
-    ├── UsageReport.swift         # report models (windows vs per-model)
-    └── UsageViewModel.swift      # @Observable VM with per-tab/window cache
+## 📝 Status
 
-HPBar/
-└── HPBarApp.swift            # MenuBarExtra scene + popover
+Three themes complete and verified on macOS; Linux/Windows bundles build in CI. Not yet done: code signing/notarization. The Arknights icon assets are sourced from community wikis and bundled for this app.
+
+---
+<br/>
+
+<a id="zh"></a>
+
+<div align="center">
+
+# ♥ HPBar · 中文
+
+**把你的 Claude 订阅用量，做成菜单栏 / 系统托盘里的一条血条。**
+
+跨平台（macOS · Linux · Windows）· 基于 Tauri 2 · 体积小（约 6 MB）
+
+[English](#en) · **中文**
+
+</div>
+
+## ✨ 功能
+
+- **常驻菜单栏 / 托盘**：一个 ♥ 图标，左键点开弹窗，右键打开菜单；没有窗口，也没有 Dock 图标。
+- **实时额度（Live quota）**：5 小时、每周、额外用量三个窗口，并显示重置倒计时。
+- **本地活动（Local activity）**：从本地 Claude Code 会话日志（`~/.claude/projects`）统计每个模型的 token 用量与花费，支持 24 小时 / 7 天 / 30 天。
+- **三种可切换主题**（自动记住上次选择）：
+  | 主题 | 实时额度 | 本地活动 |
+  |------|---------|---------|
+  | 🟩 **我的世界** | 逐格扣血的像素红心 | 基岩版风格经验条 |
+  | 🍏 **经典** | 绿→黄→红 血条渐变 | 单色用量条 |
+  | 🎮 **明日方舟** | 理智读数 · 源石 · 合成玉 | 斜切游戏 UI 进度条 |
+- 托盘菜单内可开启 **开机自启**。
+- **小巧且原生**：复用各系统自带的 webview（不打包 Chromium），安装包仅约 3–6 MB，空闲内存接近原生应用。
+
+## 📦 安装
+
+每个 [release](../../releases) 都附带预编译安装包（标签形如 `tauri-v0.1.1`）。安装包**未签名**，首次启动时系统会提示「未受信任的开发者」，各平台绕过方法见下。
+
+HPBar 复用你已有的 Claude Code 登录，请**先用 Claude Code CLI 登录**（`claude`），随后在菜单栏 / 托盘找到 ♥ 图标。
+
+<details open>
+<summary><b>macOS</b> — <code>.dmg</code></summary>
+
+1. 下载 `HPBar_<version>_universal.dmg`（同时支持 Intel 与 Apple 芯片），打开后把 **HPBar** 拖入「应用程序」。
+2. 首次启动会被 Gatekeeper 拦截（未签名），任选其一：
+   - **右键**点 HPBar.app → **打开** → **打开**；或
+   - 终端执行 `xattr -dr com.apple.quarantine /Applications/HPBar.app`；或
+   - 被拦截后到「系统设置 → 隐私与安全性」点 **仍要打开**。
+3. **刘海屏 Mac**：菜单栏图标过多时 ♥ 可能被藏在*刘海后面* —— 按住 **⌘ 拖动**菜单栏图标重新排列即可让它显示出来（或用 [Ice](https://github.com/jordanbaird/Ice) / Bartender 管理）。
+
+</details>
+
+<details>
+<summary><b>Linux</b> — <code>.deb</code> / <code>.rpm</code> / <code>.AppImage</code></summary>
+
+需要 webkit2gtk 4.1 运行库，以及支持 AppIndicator 的托盘。
+
+```sh
+# Debian / Ubuntu
+sudo apt install ./HPBar_<version>_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./HPBar-<version>-1.x86_64.rpm
+
+# AppImage（任意发行版）
+chmod +x HPBar_<version>_amd64.AppImage && ./HPBar_<version>_amd64.AppImage
 ```
 
-## CI / Releases
+GNOME 需要安装 [AppIndicator 扩展](https://extensions.gnome.org/extension/615/appindicator-support/)才会显示托盘图标。令牌从 `~/.claude/.credentials.json` 读取，**不会弹窗**。
 
-CI runs on every push and PR (`macos-15` runner): runs unit tests, generates
-the Xcode project with xcodegen, builds the app ad-hoc signed, and uploads
-the zip as an artifact.
+</details>
 
-A `v*` tag (e.g. `v0.1.0`) additionally creates a GitHub Release with
-`HPBar.zip` attached. Tag a version locally and push:
+<details>
+<summary><b>Windows</b> — <code>.msi</code> / <code>.exe</code></summary>
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
+1. 运行 `HPBar_<version>_x64-setup.exe`（NSIS）或 `HPBar_<version>_x64_en-US.msi`。
+2. 未签名 → SmartScreen 提示「Windows 已保护你的电脑」：点 **更多信息 → 仍要运行**。
+3. 需要 **WebView2 运行时** —— Windows 11 已自带；Windows 10 上安装程序会自动拉取。
+
+令牌从 `%USERPROFILE%\.claude\.credentials.json` 读取，**不会弹窗**。
+
+</details>
+
+## 🔑 令牌来源
+
+| 系统 | 来源 | 是否弹窗 |
+|------|------|---------|
+| macOS | 钥匙串项 `Claude Code-credentials`（通过 `keyring`） | 每次令牌轮换时一次 |
+| Linux / Windows | `~/.claude/.credentials.json` 明文文件 | **从不** |
+
+HPBar 自身不做任何登录，只复用并读取你的 Claude Code 登录信息。
+
+## 🛠 开发
+
+依赖：Node + npm，以及 Rust 工具链（`rustup`）。
+
+```sh
+npm install
+npm run tauri dev      # 带热重载的托盘应用
+npm run tauri build    # 打包各平台安装包
 ```
 
-## License
+若 `cargo` 下载报 HTTP/2 framing 错误，加前缀：`CARGO_HTTP_MULTIPLEXING=false npm run tauri dev`。
 
-No license declared yet. The bundled Press Start 2P font is OFL-1.1.
+**主题预览 / mock 模式** —— 用预置假数据预览所有主题，无需钥匙串、网络或 Tauri：执行 `npm run dev`（仅 vite），然后在浏览器打开 <http://localhost:1420/showcase.html>（所有主题画廊），或 `http://localhost:1420/?mock=1&theme=arknights&source=local` 查看单个面板。本文档的截图即由此生成。
+
+## 📝 状态
+
+三种主题均已完成并在 macOS 上验证；Linux/Windows 安装包由 CI 构建。尚未完成：代码签名 / 公证。明日方舟主题图标来自社区 wiki，随应用一并打包。

@@ -1,8 +1,7 @@
-# Cross-platform release builds for the Tauri port (tauri/ subdir).
-# Triggered by tags like `tauri-v0.1.0` (kept separate from the Swift app's
-# `v*` release workflow). Produces .app/.dmg (macOS, universal), .deb/.AppImage
-# (Linux), and .msi/.exe (Windows), attached to a draft prerelease.
-name: Tauri Release
+# Cross-platform release builds. Triggered by tags like `tauri-v0.1.1`.
+# Produces .app/.dmg (macOS, universal), .deb/.rpm/.AppImage (Linux), and
+# .msi/.exe (Windows), attached to a draft prerelease.
+name: Release
 
 on:
   push:
@@ -45,7 +44,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tauri/src-tauri -> target
+          workspaces: src-tauri -> target
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -62,7 +61,6 @@ jobs:
             file wget
 
       - name: Install frontend dependencies
-        working-directory: tauri
         run: npm ci
 
       - name: Build + release
@@ -70,9 +68,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: tauri
           tagName: ${{ github.ref_name }}
-          releaseName: "HPBar (Tauri) ${{ github.ref_name }}"
+          releaseName: "HPBar ${{ github.ref_name }}"
           releaseBody: "Cross-platform HPBar build — Claude usage in your tray. Unsigned; see README for install caveats."
           releaseDraft: true
           prerelease: true
