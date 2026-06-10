@@ -18,6 +18,8 @@ import "./styles.css";
 // force the view. Used by showcase.html and for screenshots.
 const params = new URLSearchParams(location.search);
 const MOCK = params.has("mock");
+// In the browser there's no Tauri window to fix the width, so pin it to match.
+if (MOCK) document.documentElement.style.width = "360px";
 
 const POLL_MS = 30 * 60 * 1000; // refresh every 30 min, like the Swift app
 
