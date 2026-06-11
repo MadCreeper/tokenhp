@@ -157,17 +157,17 @@ fn toggle_popover(win: &WebviewWindow, rect: Rect) {
     let _ = win.emit("refresh", ());
 }
 
-/// Place the window just below the tray icon, right edge aligned to the icon
-/// (like the AppKit version), clamped to the icon's monitor so it never spills
-/// off-screen — menu-bar icons sit at the right edge, so a naive centered
-/// placement would hang halfway off the display.
+/// Place the popover next to the tray icon, right-edge aligned, on the icon's
+/// own monitor. Opens *below* the icon when it's near the top of its screen
+/// (macOS menu bar) and *above* when near the bottom (Windows taskbar tray) —
+/// so it works regardless of where the tray lives. All math is in global
+/// physical pixels, which span the whole multi-display layout (offsets can be
+/// negative), so we never floor coordinates to 0.
 fn position_under_tray(win: &WebviewWindow, rect: Rect) {
     use tauri::{PhysicalPosition, Position, Size};
 
     let scale = win.scale_factor().unwrap_or(1.0);
 
-    // The tray rect is reported in the menu bar's coordinate space. Resolve the
-    // icon's top-left + size to physical pixels.
     let (icon_x, icon_y) = match rect.position {
         Position::Physical(p) => (p.x as f64, p.y as f64),
         Position::Logical(p) => (p.x * scale, p.y * scale),
@@ -177,23 +177,52 @@ fn position_under_tray(win: &WebviewWindow, rect: Rect) {
         Size::Logical(s) => (s.width * scale, s.height * scale),
     };
 
-    let win_w = win.outer_size().map(|s| s.width as f64).unwrap_or(360.0);
+    let (win_w, win_h) = win
+        .outer_size()
+        .map(|s| (s.width as f64, s.height as f64))
+        .unwrap_or((360.0, 300.0));
 
-    // A few px below the icon so the revealed menu bar never covers it.
+    // Find the monitor the icon is ON — not the window's current monitor, which
+    // would yank the panel back onto the main display in a multi-screen setup.
+    let icon_monitor = win
+        .available_monitors()
+        .ok()
+        .and_then(|monitors| {
+            monitors.into_iter().find(|m| {
+                let mp = m.position();
+                let ms = m.size();
+                let (mx, my) = (mp.x as f64, mp.y as f64);
+                icon_x >= mx
+                    && icon_x < mx + ms.width as f64
+                    && icon_y >= my
+                    && icon_y < my + ms.height as f64
+            })
+        })
+        .or_else(|| win.current_monitor().ok().flatten());
+
     const GAP: f64 = 6.0;
     let mut x = icon_x + icon_w - win_w; // right edge under the icon's right edge
-    let y = icon_y + icon_h + GAP;
 
-    // Clamp x to the icon's monitor so the panel stays fully on-screen.
-    if let Ok(Some(monitor)) = win.current_monitor() {
+    // Below the icon by default (top menu bar); above it if the icon sits in the
+    // bottom half of its monitor (a bottom taskbar tray, e.g. Windows).
+    let icon_in_bottom_half = icon_monitor.as_ref().is_some_and(|m| {
+        let mid = m.position().y as f64 + m.size().height as f64 / 2.0;
+        icon_y > mid
+    });
+    let mut y = if icon_in_bottom_half {
+        icon_y - win_h - GAP
+    } else {
+        icon_y + icon_h + GAP
+    };
+
+    // Clamp onto the icon's monitor so the panel stays fully on-screen.
+    if let Some(monitor) = &icon_monitor {
         let mp = monitor.position();
         let ms = monitor.size();
-        let min_x = mp.x as f64 + 8.0;
-        let max_x = (mp.x as f64 + ms.width as f64) - win_w - 8.0;
-        x = x.clamp(min_x, max_x.max(min_x));
-    } else {
-        x = x.max(0.0);
+        let (mx, my) = (mp.x as f64, mp.y as f64);
+        x = x.clamp(mx + 8.0, (mx + ms.width as f64 - win_w - 8.0).max(mx + 8.0));
+        y = y.clamp(my + 8.0, (my + ms.height as f64 - win_h - 8.0).max(my + 8.0));
     }
 
-    let _ = win.set_position(PhysicalPosition::new(x, y.max(0.0)));
+    let _ = win.set_position(PhysicalPosition::new(x, y));
 }
