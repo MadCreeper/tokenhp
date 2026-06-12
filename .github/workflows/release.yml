@@ -1,12 +1,12 @@
-# Cross-platform release builds. Triggered by tags like `tauri-v0.1.1`.
+# Cross-platform release builds. Triggered by tags like `v0.2.0`.
 # Produces .app/.dmg (macOS, universal), .deb/.rpm/.AppImage (Linux), and
-# .msi/.exe (Windows), attached to a draft prerelease.
+# .msi/.exe (Windows), attached to a published prerelease (alpha).
 name: Release
 
 on:
   push:
     tags:
-      - "tauri-v*"
+      - "v*"
   workflow_dispatch:
 
 jobs:
@@ -71,6 +71,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "HPBar ${{ github.ref_name }}"
           releaseBody: "Cross-platform HPBar build — Claude usage in your tray. Unsigned; see README for install caveats."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: true
           args: ${{ matrix.args }}
