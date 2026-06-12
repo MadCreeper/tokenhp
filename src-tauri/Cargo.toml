@@ -1,6 +1,6 @@
 [package]
 name = "hpbar"
-version = "0.2.0"
+version = "0.2.1"
 description = "HP Bar — Claude subscription usage in your menu bar / tray"
 authors = ["MadCreeper"]
 edition = "2021"
