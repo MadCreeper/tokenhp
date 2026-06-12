@@ -20,6 +20,10 @@ pub struct ClaudeCredentials {
     pub access_token: String,
     /// Expiry as Unix epoch seconds, if known.
     pub expires_at: Option<f64>,
+    /// Plan tier, e.g. "max" / "pro" / "free".
+    pub subscription_type: Option<String>,
+    /// Rate-limit tier, e.g. "default_claude_max_20x" — encodes the 5×/20× multiplier.
+    pub rate_limit_tier: Option<String>,
 }
 
 impl ClaudeCredentials {
@@ -151,11 +155,17 @@ fn parse(raw: &str) -> Result<ClaudeCredentials, CredError> {
         // Stored in epoch milliseconds.
         #[serde(rename = "expiresAt")]
         expires_at: Option<f64>,
+        #[serde(rename = "subscriptionType")]
+        subscription_type: Option<String>,
+        #[serde(rename = "rateLimitTier")]
+        rate_limit_tier: Option<String>,
     }
 
     let env: Envelope = serde_json::from_str(raw).map_err(|_| CredError::Malformed)?;
     Ok(ClaudeCredentials {
         access_token: env.oauth.access_token,
         expires_at: env.oauth.expires_at.map(|ms| ms / 1000.0),
+        subscription_type: env.oauth.subscription_type,
+        rate_limit_tier: env.oauth.rate_limit_tier,
     })
 }

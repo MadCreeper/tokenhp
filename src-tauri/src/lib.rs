@@ -4,6 +4,7 @@
 //! borderless popover window, and the credential + usage-fetch logic; the web
 //! frontend renders the health bars.
 
+pub mod account;
 pub mod credentials;
 pub mod localstats;
 pub mod pricing;
@@ -29,6 +30,13 @@ async fn fetch_usage(
         .map_err(|e| e.to_string())
 }
 
+/// Login identity for the footer (email + plan). Best-effort: returns whatever
+/// can be read from local Claude Code state, with empty fields otherwise.
+#[tauri::command]
+fn fetch_account(cache: tauri::State<'_, CredentialCache>) -> account::AccountInfo {
+    account::fetch(cache.inner())
+}
+
 /// Local per-model token breakdown over the last `window_secs`. Scans session
 /// transcripts on a blocking thread so the UI stays responsive.
 #[tauri::command]
@@ -46,7 +54,11 @@ pub fn run() {
             None,
         ))
         .manage(CredentialCache::new())
-        .invoke_handler(tauri::generate_handler![fetch_usage, fetch_local])
+        .invoke_handler(tauri::generate_handler![
+            fetch_usage,
+            fetch_local,
+            fetch_account
+        ])
         .setup(|app| {
             // macOS: run as a menu-bar accessory — no Dock icon, no app menu.
             #[cfg(target_os = "macos")]

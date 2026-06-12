@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
-import type { LocalReport, ModelUsage, UsageReport, UsageWindow } from "./types";
+import type { Account, LocalReport, ModelUsage, UsageReport, UsageWindow } from "./types";
 import { heartsRow } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatTokens, nowTime } from "./util";
@@ -40,6 +40,7 @@ interface State {
   dropdownOpen: boolean;
   live: UsageReport | null;
   local: LocalReport | null;
+  account: Account | null;
   error: string;
   loading: boolean;
   updatedAt: string;
@@ -52,6 +53,7 @@ const state: State = {
   dropdownOpen: false,
   live: null,
   local: null,
+  account: null,
   error: "",
   loading: false,
   updatedAt: "",
@@ -73,6 +75,7 @@ async function refresh(): Promise<void> {
   if (MOCK) {
     state.live = mockLive();
     state.local = MOCK_LOCAL;
+    state.account = { email: "you@example.com", plan: "Max 20×" };
     state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.models[0].id;
     state.error = "";
     state.updatedAt = nowTime();
@@ -84,6 +87,15 @@ async function refresh(): Promise<void> {
   inFlight = true;
   state.loading = true;
   render();
+  // Account identity rarely changes; fetch it once and reuse.
+  if (!state.account) {
+    invoke<Account>("fetch_account")
+      .then((a) => {
+        state.account = a;
+        render();
+      })
+      .catch(() => {});
+  }
   try {
     if (state.source === "live") {
       state.live = await invoke<UsageReport>("fetch_usage");
@@ -289,9 +301,21 @@ function footerHTML(): string {
       ? (state.live?.source_label ?? "Live quota")
       : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
+  // Account identity only makes sense for Live quota — that's Claude's official
+  // per-account usage. Local activity aggregates every model in the transcripts
+  // (incl. non-Claude providers like DeepSeek/Volcengine), so the Claude login
+  // and plan are irrelevant there.
+  const acct = state.source === "live" ? state.account : null;
+  const acctText = acct
+    ? [acct.email, acct.plan].filter(Boolean).join(" · ")
+    : "";
+  const acctLine = acctText
+    ? `<div class="account">${escapeHTML(acctText)}</div>`
+    : "";
   return `
     <footer class="footer">
       <div class="src-label">${escapeHTML(label)}</div>
+      ${acctLine}
       <div class="updated">${escapeHTML(updated)}</div>
     </footer>`;
 }

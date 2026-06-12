@@ -569,6 +569,14 @@ body {
   font-size: 10px;
   color: var(--panel-text);
 }
+.account {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .updated {
   font-size: 9px;
   color: var(--panel-text-dim);
