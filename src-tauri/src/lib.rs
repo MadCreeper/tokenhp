@@ -4,6 +4,7 @@
 //! borderless popover window, and the credential + usage-fetch logic; the web
 //! frontend renders the health bars.
 
+pub mod account;
 pub mod credentials;
 pub mod localstats;
 pub mod pricing;
@@ -29,6 +30,13 @@ async fn fetch_usage(
         .map_err(|e| e.to_string())
 }
 
+/// Login identity for the footer (email + plan). Best-effort: returns whatever
+/// can be read from local Claude Code state, with empty fields otherwise.
+#[tauri::command]
+fn fetch_account(cache: tauri::State<'_, CredentialCache>) -> account::AccountInfo {
+    account::fetch(cache.inner())
+}
+
 /// Local per-model token breakdown over the last `window_secs`. Scans session
 /// transcripts on a blocking thread so the UI stays responsive.
 #[tauri::command]
@@ -46,7 +54,11 @@ pub fn run() {
             None,
         ))
         .manage(CredentialCache::new())
-        .invoke_handler(tauri::generate_handler![fetch_usage, fetch_local])
+        .invoke_handler(tauri::generate_handler![
+            fetch_usage,
+            fetch_local,
+            fetch_account
+        ])
         .setup(|app| {
             // macOS: run as a menu-bar accessory — no Dock icon, no app menu.
             #[cfg(target_os = "macos")]
@@ -102,15 +114,15 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         launch_enabled,
         None::<&str>,
     )?;
-    // "Open HPBar" is the only way to reach the popover on Linux, where
-    // libappindicator never delivers tray *click* events to the app — only menu
-    // events fire. Harmless on macOS/Windows, where left-click still works.
-    let open = MenuItem::with_id(app, "open", "Open HPBar", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit HPBar", true, None::<&str>)?;
+    // Linux trays (libappindicator/StatusNotifierItem) don't deliver left-click
+    // events, so the only reliable way to open the popover there is a menu item.
+    // Harmless on macOS/Windows, where left-click still works too.
+    let show = MenuItem::with_id(app, "show", "Show HPBar", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
-            &open,
+            &show,
             &PredefinedMenuItem::separator(app)?,
             &autostart,
             &PredefinedMenuItem::separator(app)?,
@@ -125,21 +137,28 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))
         .expect("bundled tray.png must be a valid PNG");
 
+    // On Linux the tray never reports clicks, so the menu must be reachable by
+    // *left* click — that's where users will find "Show HPBar". On macOS/Windows
+    // clicks work, so we reserve left-click for the popover and put the menu on
+    // right-click.
+    #[cfg(target_os = "linux")]
+    let show_menu_on_left_click = true;
+    #[cfg(not(target_os = "linux"))]
+    let show_menu_on_left_click = false;
+
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .icon_as_template(true)
         .tooltip("HPBar")
         .menu(&menu)
-        // Linux can't deliver tray clicks, so let a left-click open the menu
-        // (with "Open HPBar"). macOS/Windows keep left-click = popover.
-        .show_menu_on_left_click(cfg!(target_os = "linux"))
+        .show_menu_on_left_click(show_menu_on_left_click)
         .on_menu_event(move |app, event| match event.id.as_ref() {
-            "open" => {
+            "quit" => app.exit(0),
+            "show" => {
                 if let Some(win) = app.get_webview_window("popover") {
-                    show_popover(&win);
+                    toggle_popover_no_anchor(&win);
                 }
             }
-            "quit" => app.exit(0),
             "autostart" => {
                 let mgr = app.autolaunch();
                 let enabled = mgr.is_enabled().unwrap_or(false);
@@ -167,57 +186,63 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 /// Show the popover anchored beneath the clicked tray icon, or hide it if it's
-/// already visible. The tray *click* path — only fires on macOS/Windows.
+/// already visible.
 fn toggle_popover(win: &WebviewWindow, rect: Rect) {
     if win.is_visible().unwrap_or(false) {
         let _ = win.hide();
         return;
     }
+
     position_under_tray(win, rect);
-    reveal(win);
+    let _ = win.show();
+    let _ = win.set_focus();
+    // Tell the frontend to re-fetch now that we're visible.
+    let _ = win.emit("refresh", ());
 }
 
-/// Show the popover without a tray-icon rect to anchor to — the "Open HPBar"
-/// menu path, which is the only entry point on Linux. Toggles like the click
-/// path so the menu item can also dismiss it.
-fn show_popover(win: &WebviewWindow) {
+/// Toggle the popover when we have no tray rectangle to anchor to — i.e. it was
+/// opened from the tray menu rather than a click. This is the only path that
+/// works on Linux, where the tray backend never emits left-click events.
+fn toggle_popover_no_anchor(win: &WebviewWindow) {
     if win.is_visible().unwrap_or(false) {
         let _ = win.hide();
         return;
     }
-    position_fallback(win);
-    reveal(win);
-}
 
-/// Show + focus the window and tell the frontend to re-fetch.
-fn reveal(win: &WebviewWindow) {
+    position_top_right(win);
     mark_shown();
     let _ = win.show();
     let _ = win.set_focus();
     let _ = win.emit("refresh", ());
 }
 
-/// Top-right corner of the primary (or current) monitor, with a small margin —
-/// the usual tray location when we have no icon rect to anchor to. `set_position`
-/// is a no-op on Wayland, but the window still appears (compositor-placed).
-fn position_fallback(win: &WebviewWindow) {
+/// Anchor the popover to the top-right corner of the primary monitor — the
+/// usual home of the system tray on Linux desktops (GNOME/KDE) — when we don't
+/// have the icon's own rectangle to position against.
+fn position_top_right(win: &WebviewWindow) {
     use tauri::PhysicalPosition;
-    let Some(monitor) = win
+
+    let win_w = win.outer_size().map(|s| s.width as f64).unwrap_or(360.0);
+
+    let monitor = win
         .primary_monitor()
         .ok()
         .flatten()
-        .or_else(|| win.current_monitor().ok().flatten())
-    else {
-        return;
-    };
-    let mp = monitor.position();
-    let ms = monitor.size();
-    let win_w = win.outer_size().map(|s| s.width as f64).unwrap_or(360.0);
-    const MARGIN: f64 = 8.0;
-    let x = mp.x as f64 + ms.width as f64 - win_w - MARGIN;
-    let y = mp.y as f64 + MARGIN;
-    let _ = win.set_position(PhysicalPosition::new(x, y));
+        .or_else(|| win.current_monitor().ok().flatten());
+
+    if let Some(monitor) = monitor {
+        let mp = monitor.position();
+        let ms = monitor.size();
+        const MARGIN: f64 = 8.0;
+        let x = mp.x as f64 + ms.width as f64 - win_w - MARGIN;
+        let y = mp.y as f64 + MARGIN;
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+    }
 }
+
+// --- Post-show grace period (best-of-both: layered on top of the verified
+// Linux tray fix). Guards the blur-to-hide handler against the spurious
+// focus-out some Linux compositors emit while the popover is still appearing.
 
 /// Monotonic clock anchored at first use; basis for the post-show grace period.
 fn app_clock() -> &'static std::time::Instant {

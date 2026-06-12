@@ -38,3 +38,9 @@ export interface LocalReport {
   models: ModelUsage[];
   source_label: string;
 }
+
+/** Mirrors `account::AccountInfo`. */
+export interface Account {
+  email: string | null;
+  plan: string | null;
+}
