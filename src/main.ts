@@ -157,9 +157,10 @@ function syncWindowSize(): void {
 }
 
 function headerHTML(): string {
+  const title = state.provider === "codex" ? "Codex Quota" : "Claude Quota";
   return `
     <header class="header">
-      <span class="title">Claude Quota</span>
+      <span class="title">${title}</span>
       ${state.loading ? `<span class="spinner">…</span>` : ""}
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="refresh" title="Refresh">⟳</button>
