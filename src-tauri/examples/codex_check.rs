@@ -3,9 +3,13 @@
 //!
 //!     cargo run --example codex_check
 
+use hpbar_lib::account;
 use hpbar_lib::codexstats;
 
 fn main() {
+    let a = account::fetch_codex();
+    println!("codex account: email={:?} plan={:?}", a.email, a.plan);
+    println!("---");
     match codexstats::fetch_local(2_592_000) {
         Ok(r) => {
             println!("{}", r.source_label);

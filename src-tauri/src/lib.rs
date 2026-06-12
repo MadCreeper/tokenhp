@@ -38,6 +38,12 @@ fn fetch_account(cache: tauri::State<'_, CredentialCache>) -> account::AccountIn
     account::fetch(cache.inner())
 }
 
+/// Codex (ChatGPT) login identity for the footer, from `~/.codex/auth.json`.
+#[tauri::command]
+fn fetch_codex_account() -> account::AccountInfo {
+    account::fetch_codex()
+}
+
 /// Local per-model token breakdown over the last `window_secs`. Scans session
 /// transcripts on a blocking thread so the UI stays responsive.
 #[tauri::command]
@@ -78,7 +84,8 @@ pub fn run() {
             fetch_local,
             fetch_codex_local,
             fetch_codex_quota,
-            fetch_account
+            fetch_account,
+            fetch_codex_account
         ])
         .setup(|app| {
             // macOS: run as a menu-bar accessory — no Dock icon, no app menu.

@@ -95,16 +95,16 @@ async function refresh(): Promise<void> {
   inFlight = true;
   state.loading = true;
   render();
-  // Account identity rarely changes; fetch it once and reuse.
+  const codex = state.provider === "codex";
+  // Account identity rarely changes; fetch it once per provider and reuse.
   if (!state.account) {
-    invoke<Account>("fetch_account")
+    invoke<Account>(codex ? "fetch_codex_account" : "fetch_account")
       .then((a) => {
         state.account = a;
         render();
       })
       .catch(() => {});
   }
-  const codex = state.provider === "codex";
   try {
     if (state.source === "live") {
       state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
@@ -320,12 +320,10 @@ function footerHTML(): string {
       ? (state.live?.source_label ?? "Live quota")
       : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
-  // Account identity only makes sense for Claude's Live quota — that's the
-  // official per-account usage. Hidden for Local activity (aggregates every
-  // model in the transcripts, incl. non-Claude providers) and for Codex (a
-  // different login entirely).
-  const acct =
-    state.provider === "claude" && state.source === "live" ? state.account : null;
+  // Account identity belongs on the Live quota view — the per-account
+  // subscription (Claude login, or the ChatGPT login behind Codex). Hidden on
+  // Local activity, which aggregates models that may not map to that account.
+  const acct = state.source === "live" ? state.account : null;
   const acctText = acct
     ? [acct.email, acct.plan].filter(Boolean).join(" · ")
     : "";
@@ -359,6 +357,7 @@ app.addEventListener("click", (e) => {
         // Drop the other provider's cached data so we never show it by mistake.
         state.live = null;
         state.local = null;
+        state.account = null;
         state.selectedModelId = null;
         state.error = "";
         render();
