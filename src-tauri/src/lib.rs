@@ -96,9 +96,19 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "quit", "Quit HPBar", true, None::<&str>)?;
+    // Linux trays (libappindicator/StatusNotifierItem) don't deliver left-click
+    // events, so the only reliable way to open the popover there is a menu item.
+    // Harmless on macOS/Windows, where left-click still works too.
+    let show = MenuItem::with_id(app, "show", "Show HPBar", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&autostart, &PredefinedMenuItem::separator(app)?, &quit],
+        &[
+            &show,
+            &PredefinedMenuItem::separator(app)?,
+            &autostart,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
     )?;
     // Captured so the toggle handler can reflect the new state in the checkmark.
     let autostart_item = autostart.clone();
@@ -108,14 +118,28 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))
         .expect("bundled tray.png must be a valid PNG");
 
+    // On Linux the tray never reports clicks, so the menu must be reachable by
+    // *left* click — that's where users will find "Show HPBar". On macOS/Windows
+    // clicks work, so we reserve left-click for the popover and put the menu on
+    // right-click.
+    #[cfg(target_os = "linux")]
+    let show_menu_on_left_click = true;
+    #[cfg(not(target_os = "linux"))]
+    let show_menu_on_left_click = false;
+
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .icon_as_template(true)
         .tooltip("HPBar")
         .menu(&menu)
-        .show_menu_on_left_click(false) // left click = popover, right click = menu
+        .show_menu_on_left_click(show_menu_on_left_click)
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "quit" => app.exit(0),
+            "show" => {
+                if let Some(win) = app.get_webview_window("popover") {
+                    toggle_popover_no_anchor(&win);
+                }
+            }
             "autostart" => {
                 let mgr = app.autolaunch();
                 let enabled = mgr.is_enabled().unwrap_or(false);
@@ -155,6 +179,45 @@ fn toggle_popover(win: &WebviewWindow, rect: Rect) {
     let _ = win.set_focus();
     // Tell the frontend to re-fetch now that we're visible.
     let _ = win.emit("refresh", ());
+}
+
+/// Toggle the popover when we have no tray rectangle to anchor to — i.e. it was
+/// opened from the tray menu rather than a click. This is the only path that
+/// works on Linux, where the tray backend never emits left-click events.
+fn toggle_popover_no_anchor(win: &WebviewWindow) {
+    if win.is_visible().unwrap_or(false) {
+        let _ = win.hide();
+        return;
+    }
+
+    position_top_right(win);
+    let _ = win.show();
+    let _ = win.set_focus();
+    let _ = win.emit("refresh", ());
+}
+
+/// Anchor the popover to the top-right corner of the primary monitor — the
+/// usual home of the system tray on Linux desktops (GNOME/KDE) — when we don't
+/// have the icon's own rectangle to position against.
+fn position_top_right(win: &WebviewWindow) {
+    use tauri::PhysicalPosition;
+
+    let win_w = win.outer_size().map(|s| s.width as f64).unwrap_or(360.0);
+
+    let monitor = win
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| win.current_monitor().ok().flatten());
+
+    if let Some(monitor) = monitor {
+        let mp = monitor.position();
+        let ms = monitor.size();
+        const MARGIN: f64 = 8.0;
+        let x = mp.x as f64 + ms.width as f64 - win_w - MARGIN;
+        let y = mp.y as f64 + MARGIN;
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+    }
 }
 
 /// Place the popover next to the tray icon, right-edge aligned, on the icon's
