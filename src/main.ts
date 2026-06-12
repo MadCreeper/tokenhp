@@ -25,6 +25,12 @@ const POLL_MS = 30 * 60 * 1000; // refresh every 30 min, like the Swift app
 
 type Source = "live" | "local";
 type WindowKey = "day" | "week" | "month";
+type Provider = "claude" | "codex";
+
+const PROVIDER_KEY = "hpbar-provider";
+function loadProvider(): Provider {
+  return localStorage.getItem(PROVIDER_KEY) === "codex" ? "codex" : "claude";
+}
 
 const WINDOW_SECS: Record<WindowKey, number> = {
   day: 86_400,
@@ -34,6 +40,7 @@ const WINDOW_SECS: Record<WindowKey, number> = {
 const WINDOW_TITLE: Record<WindowKey, string> = { day: "24h", week: "7d", month: "30d" };
 
 interface State {
+  provider: Provider;
   source: Source;
   window: WindowKey;
   selectedModelId: string | null;
@@ -47,6 +54,7 @@ interface State {
 }
 
 const state: State = {
+  provider: loadProvider(),
   source: "live",
   window: "day",
   selectedModelId: null,
@@ -96,11 +104,12 @@ async function refresh(): Promise<void> {
       })
       .catch(() => {});
   }
+  const codex = state.provider === "codex";
   try {
     if (state.source === "live") {
-      state.live = await invoke<UsageReport>("fetch_usage");
+      state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
     } else {
-      const report = await invoke<LocalReport>("fetch_local", {
+      const report = await invoke<LocalReport>(codex ? "fetch_codex_local" : "fetch_local", {
         windowSecs: WINDOW_SECS[state.window],
       });
       state.local = report;
@@ -128,6 +137,7 @@ function render(): void {
   app.innerHTML = `
     <main class="panel">
       ${headerHTML()}
+      ${providerSegHTML()}
       ${sourceSegHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
@@ -158,6 +168,14 @@ function headerHTML(): string {
 
 function segButton(action: string, value: string, label: string, selected: boolean): string {
   return `<button class="mc-btn ${selected ? "selected" : ""}" data-action="${action}" data-value="${value}">${label}</button>`;
+}
+
+function providerSegHTML(): string {
+  return `
+    <div class="seg provider-seg">
+      ${segButton("provider", "claude", "Claude", state.provider === "claude")}
+      ${segButton("provider", "codex", "Codex", state.provider === "codex")}
+    </div>`;
 }
 
 function sourceSegHTML(): string {
@@ -301,11 +319,12 @@ function footerHTML(): string {
       ? (state.live?.source_label ?? "Live quota")
       : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
-  // Account identity only makes sense for Live quota — that's Claude's official
-  // per-account usage. Local activity aggregates every model in the transcripts
-  // (incl. non-Claude providers like DeepSeek/Volcengine), so the Claude login
-  // and plan are irrelevant there.
-  const acct = state.source === "live" ? state.account : null;
+  // Account identity only makes sense for Claude's Live quota — that's the
+  // official per-account usage. Hidden for Local activity (aggregates every
+  // model in the transcripts, incl. non-Claude providers) and for Codex (a
+  // different login entirely).
+  const acct =
+    state.provider === "claude" && state.source === "live" ? state.account : null;
   const acctText = acct
     ? [acct.email, acct.plan].filter(Boolean).join(" · ")
     : "";
@@ -331,6 +350,19 @@ app.addEventListener("click", (e) => {
   switch (action) {
     case "refresh":
       void refresh();
+      break;
+    case "provider":
+      if (value && value !== state.provider) {
+        state.provider = value as Provider;
+        localStorage.setItem(PROVIDER_KEY, state.provider);
+        // Drop the other provider's cached data so we never show it by mistake.
+        state.live = null;
+        state.local = null;
+        state.selectedModelId = null;
+        state.error = "";
+        render();
+        void refresh();
+      }
       break;
     case "theme":
       cycleTheme();
