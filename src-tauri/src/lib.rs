@@ -78,6 +78,13 @@ fn build_popover(app: &tauri::AppHandle) -> tauri::Result<()> {
     let win = popover.clone();
     popover.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {
+            // Swallow the spurious focus-out some Linux compositors fire while
+            // the window is still appearing — without this the popover would
+            // flash open and immediately hide itself. macOS/Windows are unchanged.
+            #[cfg(target_os = "linux")]
+            if shown_recently() {
+                return;
+            }
             let _ = win.hide();
         }
     });
@@ -95,10 +102,20 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         launch_enabled,
         None::<&str>,
     )?;
+    // "Open HPBar" is the only way to reach the popover on Linux, where
+    // libappindicator never delivers tray *click* events to the app — only menu
+    // events fire. Harmless on macOS/Windows, where left-click still works.
+    let open = MenuItem::with_id(app, "open", "Open HPBar", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit HPBar", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&autostart, &PredefinedMenuItem::separator(app)?, &quit],
+        &[
+            &open,
+            &PredefinedMenuItem::separator(app)?,
+            &autostart,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
     )?;
     // Captured so the toggle handler can reflect the new state in the checkmark.
     let autostart_item = autostart.clone();
@@ -113,8 +130,15 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .icon_as_template(true)
         .tooltip("HPBar")
         .menu(&menu)
-        .show_menu_on_left_click(false) // left click = popover, right click = menu
+        // Linux can't deliver tray clicks, so let a left-click open the menu
+        // (with "Open HPBar"). macOS/Windows keep left-click = popover.
+        .show_menu_on_left_click(cfg!(target_os = "linux"))
         .on_menu_event(move |app, event| match event.id.as_ref() {
+            "open" => {
+                if let Some(win) = app.get_webview_window("popover") {
+                    show_popover(&win);
+                }
+            }
             "quit" => app.exit(0),
             "autostart" => {
                 let mgr = app.autolaunch();
@@ -143,18 +167,81 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 /// Show the popover anchored beneath the clicked tray icon, or hide it if it's
-/// already visible.
+/// already visible. The tray *click* path — only fires on macOS/Windows.
 fn toggle_popover(win: &WebviewWindow, rect: Rect) {
     if win.is_visible().unwrap_or(false) {
         let _ = win.hide();
         return;
     }
-
     position_under_tray(win, rect);
+    reveal(win);
+}
+
+/// Show the popover without a tray-icon rect to anchor to — the "Open HPBar"
+/// menu path, which is the only entry point on Linux. Toggles like the click
+/// path so the menu item can also dismiss it.
+fn show_popover(win: &WebviewWindow) {
+    if win.is_visible().unwrap_or(false) {
+        let _ = win.hide();
+        return;
+    }
+    position_fallback(win);
+    reveal(win);
+}
+
+/// Show + focus the window and tell the frontend to re-fetch.
+fn reveal(win: &WebviewWindow) {
+    mark_shown();
     let _ = win.show();
     let _ = win.set_focus();
-    // Tell the frontend to re-fetch now that we're visible.
     let _ = win.emit("refresh", ());
+}
+
+/// Top-right corner of the primary (or current) monitor, with a small margin —
+/// the usual tray location when we have no icon rect to anchor to. `set_position`
+/// is a no-op on Wayland, but the window still appears (compositor-placed).
+fn position_fallback(win: &WebviewWindow) {
+    use tauri::PhysicalPosition;
+    let Some(monitor) = win
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| win.current_monitor().ok().flatten())
+    else {
+        return;
+    };
+    let mp = monitor.position();
+    let ms = monitor.size();
+    let win_w = win.outer_size().map(|s| s.width as f64).unwrap_or(360.0);
+    const MARGIN: f64 = 8.0;
+    let x = mp.x as f64 + ms.width as f64 - win_w - MARGIN;
+    let y = mp.y as f64 + MARGIN;
+    let _ = win.set_position(PhysicalPosition::new(x, y));
+}
+
+/// Monotonic clock anchored at first use; basis for the post-show grace period.
+fn app_clock() -> &'static std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now)
+}
+
+static LAST_SHOWN_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record the moment of the most recent show, so [`shown_recently`] can ignore
+/// the focus-out that immediately follows on some Linux compositors.
+fn mark_shown() {
+    LAST_SHOWN_MS.store(
+        app_clock().elapsed().as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// True for a brief window after a show. Only consulted on Linux.
+#[allow(dead_code)]
+fn shown_recently() -> bool {
+    const GRACE_MS: u64 = 250;
+    let now = app_clock().elapsed().as_millis() as u64;
+    now.saturating_sub(LAST_SHOWN_MS.load(std::sync::atomic::Ordering::Relaxed)) < GRACE_MS
 }
 
 /// Place the popover next to the tray icon, right-edge aligned, on the icon's
