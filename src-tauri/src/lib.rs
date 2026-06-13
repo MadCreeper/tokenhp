@@ -5,9 +5,11 @@
 //! frontend renders the health bars.
 
 pub mod account;
+pub mod codexstats;
 pub mod credentials;
 pub mod localstats;
 pub mod pricing;
+pub mod tools;
 pub mod usage;
 
 use credentials::CredentialCache;
@@ -37,14 +39,28 @@ fn fetch_account(cache: tauri::State<'_, CredentialCache>) -> account::AccountIn
     account::fetch(cache.inner())
 }
 
-/// Local per-model token breakdown over the last `window_secs`. Scans session
-/// transcripts on a blocking thread so the UI stays responsive.
+/// Codex (ChatGPT) login identity for the footer, from `~/.codex/auth.json`.
 #[tauri::command]
-async fn fetch_local(window_secs: i64) -> Result<localstats::LocalReport, String> {
-    tokio::task::spawn_blocking(move || localstats::fetch(window_secs))
+fn fetch_codex_account() -> account::AccountInfo {
+    account::fetch_codex()
+}
+
+/// The API axis: per-tool + pooled token usage over the last `window_secs`,
+/// aggregating every local tool (Claude Code, Codex, …). Scans logs on a
+/// blocking thread so the UI stays responsive.
+#[tauri::command]
+async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
+    tokio::task::spawn_blocking(move || tools::fetch_local(window_secs))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+}
+
+/// Codex's latest local rate-limit snapshot, shaped like the live-quota bars.
+#[tauri::command]
+async fn fetch_codex_quota() -> Result<usage::UsageReport, String> {
+    tokio::task::spawn_blocking(codexstats::fetch_quota)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 pub fn run() {
@@ -57,7 +73,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             fetch_local,
-            fetch_account
+            fetch_codex_quota,
+            fetch_account,
+            fetch_codex_account
         ])
         .setup(|app| {
             // macOS: run as a menu-bar accessory — no Dock icon, no app menu.

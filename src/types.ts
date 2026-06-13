@@ -34,8 +34,21 @@ export interface ModelUsage {
   cost: ModelCost | null;
 }
 
-export interface LocalReport {
+/** Mirrors `tools::AppUsageDTO` — one tool's usage. */
+export interface AppUsage {
+  id: string;
+  display_name: string;
+  /** "equivalent" (subscription priced at API rates) or "real" (API spend). */
+  kind: string;
   models: ModelUsage[];
+  total: number;
+  cost: number | null;
+}
+
+/** Mirrors `tools::LocalReport` — per-tool breakdown + model-pooled total. */
+export interface LocalReport {
+  apps: AppUsage[];
+  combined: ModelUsage[];
   source_label: string;
 }
 

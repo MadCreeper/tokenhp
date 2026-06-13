@@ -17,10 +17,15 @@ export function mockLive(): UsageReport {
   };
 }
 
+const MOCK_OPUS = { id: "claude-opus-4-8", display_name: "Opus 4.8", input: 104846, output: 1665621, cache_read: 164691850, cache_create: 9091429, total: 175553746, max_component: 164691850, cost: { input: 0.52, output: 41.64, cache_read: 82.35, cache_create: 90.91, total: 215.42 } };
+const MOCK_HAIKU = { id: "claude-haiku-4-5", display_name: "Haiku 4.5", input: 4231, output: 88210, cache_read: 12450000, cache_create: 410000, total: 12952441, max_component: 12450000, cost: { input: 0.0, output: 0.44, cache_read: 1.25, cache_create: 0.51, total: 2.2 } };
+const MOCK_GPT = { id: "gpt-5.5", display_name: "GPT-5.5", input: 9158, output: 293, cache_read: 29312, cache_create: 0, total: 38763, max_component: 29312, cost: null };
+
 export const MOCK_LOCAL: LocalReport = {
-  source_label: "Local model usage · last 24h",
-  models: [
-    { id: "claude-opus-4-8", display_name: "Opus 4.8", input: 104846, output: 1665621, cache_read: 164691850, cache_create: 9091429, total: 175553746, max_component: 164691850, cost: { input: 0.52, output: 41.64, cache_read: 82.35, cache_create: 90.91, total: 215.42 } },
-    { id: "claude-haiku-4-5", display_name: "Haiku 4.5", input: 4231, output: 88210, cache_read: 12450000, cache_create: 410000, total: 12952441, max_component: 12450000, cost: { input: 0.0, output: 0.44, cache_read: 1.25, cache_create: 0.51, total: 2.2 } },
+  source_label: "Local API usage · last 24h",
+  apps: [
+    { id: "claude-code", display_name: "Claude Code", kind: "equivalent", models: [MOCK_OPUS, MOCK_HAIKU], total: MOCK_OPUS.total + MOCK_HAIKU.total, cost: 217.62 },
+    { id: "codex", display_name: "Codex", kind: "equivalent", models: [MOCK_GPT], total: MOCK_GPT.total, cost: null },
   ],
+  combined: [MOCK_OPUS, MOCK_HAIKU, MOCK_GPT],
 };

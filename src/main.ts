@@ -25,6 +25,12 @@ const POLL_MS = 30 * 60 * 1000; // refresh every 30 min, like the Swift app
 
 type Source = "live" | "local";
 type WindowKey = "day" | "week" | "month";
+type Provider = "claude" | "codex";
+
+const PROVIDER_KEY = "hpbar-provider";
+function loadProvider(): Provider {
+  return localStorage.getItem(PROVIDER_KEY) === "codex" ? "codex" : "claude";
+}
 
 const WINDOW_SECS: Record<WindowKey, number> = {
   day: 86_400,
@@ -34,8 +40,10 @@ const WINDOW_SECS: Record<WindowKey, number> = {
 const WINDOW_TITLE: Record<WindowKey, string> = { day: "24h", week: "7d", month: "30d" };
 
 interface State {
+  provider: Provider; // subscription axis (Live): whose quota
   source: Source;
   window: WindowKey;
+  localTool: string; // API axis (Local): "all" or a tool id
   selectedModelId: string | null;
   dropdownOpen: boolean;
   live: UsageReport | null;
@@ -47,8 +55,10 @@ interface State {
 }
 
 const state: State = {
+  provider: loadProvider(),
   source: "live",
   window: "day",
+  localTool: "all",
   selectedModelId: null,
   dropdownOpen: false,
   live: null,
@@ -76,7 +86,7 @@ async function refresh(): Promise<void> {
     state.live = mockLive();
     state.local = MOCK_LOCAL;
     state.account = { email: "you@example.com", plan: "Max 20×" };
-    state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.models[0].id;
+    state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.combined[0].id;
     state.error = "";
     state.updatedAt = nowTime();
     state.loading = false;
@@ -87,9 +97,10 @@ async function refresh(): Promise<void> {
   inFlight = true;
   state.loading = true;
   render();
-  // Account identity rarely changes; fetch it once and reuse.
+  const codex = state.provider === "codex";
+  // Account identity rarely changes; fetch it once per provider and reuse.
   if (!state.account) {
-    invoke<Account>("fetch_account")
+    invoke<Account>(codex ? "fetch_codex_account" : "fetch_account")
       .then((a) => {
         state.account = a;
         render();
@@ -98,16 +109,14 @@ async function refresh(): Promise<void> {
   }
   try {
     if (state.source === "live") {
-      state.live = await invoke<UsageReport>("fetch_usage");
+      // Subscription axis: the selected provider's quota.
+      state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
     } else {
-      const report = await invoke<LocalReport>("fetch_local", {
+      // API axis: every local tool at once (not provider-scoped).
+      state.local = await invoke<LocalReport>("fetch_local", {
         windowSecs: WINDOW_SECS[state.window],
       });
-      state.local = report;
-      // Keep the selection valid: snap to the highest-volume model.
-      if (!report.models.some((m) => m.id === state.selectedModelId)) {
-        state.selectedModelId = report.models[0]?.id ?? null;
-      }
+      snapSelectedModel();
     }
     state.error = "";
     state.updatedAt = nowTime();
@@ -120,6 +129,24 @@ async function refresh(): Promise<void> {
   }
 }
 
+// The model set + tool kind for the current API-axis selection: the pooled
+// `combined` list when "all", otherwise the chosen tool's own models.
+function localModels(): { models: ModelUsage[]; kind: string | null } {
+  const r = state.local;
+  if (!r) return { models: [], kind: null };
+  if (state.localTool === "all") return { models: r.combined, kind: null };
+  const app = r.apps.find((a) => a.id === state.localTool);
+  return { models: app?.models ?? [], kind: app?.kind ?? null };
+}
+
+// Keep the model selection valid as the tool/window/data changes.
+function snapSelectedModel(): void {
+  const { models } = localModels();
+  if (!models.some((m) => m.id === state.selectedModelId)) {
+    state.selectedModelId = models[0]?.id ?? null;
+  }
+}
+
 // ---------------------------------------------------------------- render
 
 const PANEL_WIDTH = 360;
@@ -129,6 +156,7 @@ function render(): void {
     <main class="panel">
       ${headerHTML()}
       ${sourceSegHTML()}
+      ${state.source === "live" ? providerSegHTML() : toolSegHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
     </main>`;
@@ -147,9 +175,15 @@ function syncWindowSize(): void {
 }
 
 function headerHTML(): string {
+  const title =
+    state.source === "live"
+      ? state.provider === "codex"
+        ? "Codex Quota"
+        : "Claude Quota"
+      : "Token Usage";
   return `
     <header class="header">
-      <span class="title">Claude Quota</span>
+      <span class="title">${title}</span>
       ${state.loading ? `<span class="spinner">…</span>` : ""}
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="refresh" title="Refresh">⟳</button>
@@ -158,6 +192,26 @@ function headerHTML(): string {
 
 function segButton(action: string, value: string, label: string, selected: boolean): string {
   return `<button class="mc-btn ${selected ? "selected" : ""}" data-action="${action}" data-value="${value}">${label}</button>`;
+}
+
+// Subscription axis (Live): which provider's quota.
+function providerSegHTML(): string {
+  return `
+    <div class="seg provider-seg">
+      ${segButton("provider", "claude", "Claude", state.provider === "claude")}
+      ${segButton("provider", "codex", "Codex", state.provider === "codex")}
+    </div>`;
+}
+
+// API axis (Local): which tool to show, or "All" (pooled by model). Tool options
+// come from the loaded report, so the list grows as new adapters are added.
+function toolSegHTML(): string {
+  const apps = state.local?.apps ?? [];
+  const opts = [{ id: "all", name: "All" }, ...apps.map((a) => ({ id: a.id, name: a.display_name }))];
+  return `
+    <div class="seg tool-seg">
+      ${opts.map((o) => segButton("tool", o.id, o.name, state.localTool === o.id)).join("")}
+    </div>`;
 }
 
 function sourceSegHTML(): string {
@@ -238,13 +292,21 @@ function localHTML(): string {
     return windowSeg + body;
   }
 
-  const models = state.local.models;
+  const { models, kind } = localModels();
   const current = models.find((m) => m.id === state.selectedModelId) ?? models[0];
   if (!current) {
-    return windowSeg + `<div class="msg">No model activity in this window.</div>`;
+    return windowSeg + `<div class="msg">No usage for this tool in this window.</div>`;
   }
 
-  return windowSeg + dropdownHTML(models, current) + costLineHTML(current) + xpBarsHTML(current);
+  return windowSeg + kindTagHTML(kind) + dropdownHTML(models, current) + costLineHTML(current) + xpBarsHTML(current);
+}
+
+// Tag a single tool as a flat-rate subscription (cost is an API-rate estimate)
+// or real metered API spend. Hidden on the pooled "All" view.
+function kindTagHTML(kind: string | null): string {
+  if (!kind) return "";
+  const label = kind === "real" ? "real API spend" : "subscription · est. at API rates";
+  return `<div class="kind-tag kind-${escapeHTML(kind)}">${label}</div>`;
 }
 
 function dropdownHTML(models: ModelUsage[], current: ModelUsage): string {
@@ -301,10 +363,9 @@ function footerHTML(): string {
       ? (state.live?.source_label ?? "Live quota")
       : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
-  // Account identity only makes sense for Live quota — that's Claude's official
-  // per-account usage. Local activity aggregates every model in the transcripts
-  // (incl. non-Claude providers like DeepSeek/Volcengine), so the Claude login
-  // and plan are irrelevant there.
+  // Account identity belongs on the Live quota view — the per-account
+  // subscription (Claude login, or the ChatGPT login behind Codex). Hidden on
+  // Local activity, which aggregates models that may not map to that account.
   const acct = state.source === "live" ? state.account : null;
   const acctText = acct
     ? [acct.email, acct.plan].filter(Boolean).join(" · ")
@@ -331,6 +392,26 @@ app.addEventListener("click", (e) => {
   switch (action) {
     case "refresh":
       void refresh();
+      break;
+    case "provider":
+      if (value && value !== state.provider) {
+        state.provider = value as Provider;
+        localStorage.setItem(PROVIDER_KEY, state.provider);
+        // Provider only drives the subscription (Live) view + its account footer.
+        state.live = null;
+        state.account = null;
+        state.error = "";
+        render();
+        void refresh();
+      }
+      break;
+    case "tool":
+      if (value && value !== state.localTool) {
+        state.localTool = value;
+        state.dropdownOpen = false;
+        snapSelectedModel(); // re-render from already-loaded data, no refetch
+        render();
+      }
       break;
     case "theme":
       cycleTheme();

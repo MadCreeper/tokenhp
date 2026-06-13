@@ -30,6 +30,59 @@ pub fn fetch(creds: &CredentialCache) -> AccountInfo {
     }
 }
 
+/// Codex (ChatGPT) identity from `~/.codex/auth.json`'s `id_token` JWT claims.
+/// We only read claims for display — no signature verification.
+pub fn fetch_codex() -> AccountInfo {
+    let claims = read_codex_id_claims();
+    let email = claims
+        .as_ref()
+        .and_then(|c| c.get("email"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let plan = claims
+        .as_ref()
+        .and_then(|c| c.get("https://api.openai.com/auth"))
+        .and_then(|a| a.get("chatgpt_plan_type"))
+        .and_then(|v| v.as_str())
+        .map(capitalize);
+    AccountInfo { email, plan }
+}
+
+/// Decode the (middle) payload of the stored `id_token` JWT into JSON claims.
+fn read_codex_id_claims() -> Option<serde_json::Value> {
+    let path = dirs::home_dir()?.join(".codex").join("auth.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let token = v.get("tokens")?.get("id_token")?.as_str()?;
+    let payload = token.split('.').nth(1)?;
+    let bytes = decode_b64url(payload)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Minimal URL-safe base64 decoder (no padding) — enough for a JWT payload.
+fn decode_b64url(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut buf, mut bits) = (0u32, 0u32);
+    for &c in s.as_bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => continue,
+            _ => return None,
+        } as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 /// Pull the login email out of `~/.claude.json`. Same file/shape on every OS.
 fn read_email() -> Option<String> {
     let path = dirs::home_dir()?.join(".claude.json");
