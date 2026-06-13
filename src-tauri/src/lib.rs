@@ -8,6 +8,7 @@ pub mod account;
 pub mod codexstats;
 pub mod credentials;
 pub mod localstats;
+pub mod openclawstats;
 pub mod pricing;
 pub mod tools;
 pub mod usage;
