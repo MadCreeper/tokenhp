@@ -9,6 +9,7 @@ pub mod codexstats;
 pub mod credentials;
 pub mod localstats;
 pub mod pricing;
+pub mod tools;
 pub mod usage;
 
 use credentials::CredentialCache;
@@ -44,24 +45,14 @@ fn fetch_codex_account() -> account::AccountInfo {
     account::fetch_codex()
 }
 
-/// Local per-model token breakdown over the last `window_secs`. Scans session
-/// transcripts on a blocking thread so the UI stays responsive.
+/// The API axis: per-tool + pooled token usage over the last `window_secs`,
+/// aggregating every local tool (Claude Code, Codex, …). Scans logs on a
+/// blocking thread so the UI stays responsive.
 #[tauri::command]
-async fn fetch_local(window_secs: i64) -> Result<localstats::LocalReport, String> {
-    tokio::task::spawn_blocking(move || localstats::fetch(window_secs))
+async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
+    tokio::task::spawn_blocking(move || tools::fetch_local(window_secs))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
-}
-
-/// Codex per-model token breakdown over the last `window_secs`, from
-/// `~/.codex/sessions`. Same shape as `fetch_local` so the UI reuses it.
-#[tauri::command]
-async fn fetch_codex_local(window_secs: i64) -> Result<localstats::LocalReport, String> {
-    tokio::task::spawn_blocking(move || codexstats::fetch_local(window_secs))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
 }
 
 /// Codex's latest local rate-limit snapshot, shaped like the live-quota bars.
@@ -82,7 +73,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             fetch_local,
-            fetch_codex_local,
             fetch_codex_quota,
             fetch_account,
             fetch_codex_account

@@ -36,42 +36,16 @@ pub struct ModelUsageDTO {
     pub cost: Option<ModelCostDTO>,
 }
 
-#[derive(Serialize, Clone)]
-pub struct LocalReport {
-    pub models: Vec<ModelUsageDTO>,
-    pub source_label: String,
-}
-
-#[derive(Debug)]
-pub enum LocalError {
-    NoSessions,
-    NoActivity,
-}
-
-impl std::fmt::Display for LocalError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LocalError::NoSessions => write!(
-                f,
-                "No local Claude Code sessions found under ~/.claude/projects."
-            ),
-            LocalError::NoActivity => write!(f, "No model activity in this window."),
-        }
-    }
-}
-
-/// Aggregate usage over the last `window_secs`. Synchronous (file IO) — call via
-/// `spawn_blocking` from the async command.
-pub fn fetch(window_secs: i64) -> Result<LocalReport, LocalError> {
+/// Per-model Claude Code token usage over the last `window_secs`, from
+/// `~/.claude/projects`. Returns an empty vec when there's nothing; this is the
+/// Claude Code [`crate::tools::ToolAdapter`] implementation's data source.
+/// Synchronous (file IO) — call via `spawn_blocking`.
+pub fn collect(window_secs: i64) -> Vec<ModelUsageDTO> {
     let projects = dirs::home_dir()
         .map(|h| h.join(".claude").join("projects"))
         .unwrap_or_default();
 
     let files = session_files(&projects);
-    if files.is_empty() {
-        return Err(LocalError::NoSessions);
-    }
-
     let now = Utc::now().timestamp();
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
@@ -105,10 +79,6 @@ pub fn fetch(window_secs: i64) -> Result<LocalReport, LocalError> {
             }
             totals.entry(model).or_default().add(msg.usage.as_ref());
         }
-    }
-
-    if totals.is_empty() {
-        return Err(LocalError::NoActivity);
     }
 
     let pricing = Pricing::loaded();
@@ -149,11 +119,7 @@ pub fn fetch(window_secs: i64) -> Result<LocalReport, LocalError> {
         .collect();
 
     models.sort_by(|a, b| b.total.cmp(&a.total));
-
-    Ok(LocalReport {
-        models,
-        source_label: format!("Local model usage · {}", window_label(window_secs)),
-    })
+    models
 }
 
 #[derive(Default)]
@@ -246,7 +212,7 @@ fn parse_ts(s: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
 }
 
-fn window_label(window_secs: i64) -> &'static str {
+pub fn window_label(window_secs: i64) -> &'static str {
     match window_secs {
         86_400 => "last 24h",
         604_800 => "last 7 days",

@@ -12,7 +12,7 @@
 //! quota reads the most recent non-null `rate_limits` across all sessions — no
 //! network call, we just read what Codex already wrote.
 
-use crate::localstats::{LocalError, LocalReport, ModelCostDTO, ModelUsageDTO};
+use crate::localstats::{ModelCostDTO, ModelUsageDTO};
 use crate::pricing::Pricing;
 use crate::usage::{UsageReport, UsageWindow};
 use chrono::{DateTime, Utc};
@@ -22,17 +22,14 @@ use std::path::{Path, PathBuf};
 
 const TOKEN_COUNT_MARKER: &str = "\"type\":\"token_count\"";
 
-/// Aggregate Codex per-model usage over the last `window_secs`.
-pub fn fetch_local(window_secs: i64) -> Result<LocalReport, LocalError> {
-    let files = session_files();
-    if files.is_empty() {
-        return Err(LocalError::NoSessions);
-    }
-
+/// Per-model Codex token usage over the last `window_secs`. Returns an empty
+/// vec when there's nothing (the `tools` layer decides what "empty" means);
+/// this is the Codex [`crate::tools::ToolAdapter`] implementation's data source.
+pub fn collect_local(window_secs: i64) -> Vec<ModelUsageDTO> {
     let now = Utc::now().timestamp();
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
-    for file in &files {
+    for file in &session_files() {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
@@ -71,16 +68,16 @@ pub fn fetch_local(window_secs: i64) -> Result<LocalReport, LocalError> {
                     else {
                         continue;
                     };
-                    let model = current_model.clone().unwrap_or_else(|| "unknown".into());
+                    // Drop usage we can't attribute to a model (a token_count
+                    // before any turn_context) rather than inventing an "unknown".
+                    let Some(model) = current_model.clone() else {
+                        continue;
+                    };
                     totals.entry(model).or_default().add(usage);
                 }
                 _ => {}
             }
         }
-    }
-
-    if totals.is_empty() {
-        return Err(LocalError::NoActivity);
     }
 
     let pricing = Pricing::loaded();
@@ -120,32 +117,28 @@ pub fn fetch_local(window_secs: i64) -> Result<LocalReport, LocalError> {
         .filter(|m| m.total > 0) // drop models that logged a turn but no tokens
         .collect();
 
-    if models.is_empty() {
-        return Err(LocalError::NoActivity);
-    }
-
     models.sort_by(|a, b| b.total.cmp(&a.total));
-
-    Ok(LocalReport {
-        models,
-        source_label: format!("Codex model usage · {}", window_label(window_secs)),
-    })
+    models
 }
 
 /// The freshest Codex quota snapshot, shaped like the live-quota hearts bars.
+/// Rollout filenames embed an ISO timestamp, so we scan newest-first and stop at
+/// the first session carrying a `rate_limits` snapshot rather than reading every
+/// file.
 pub fn fetch_quota() -> Result<UsageReport, String> {
-    let files = session_files();
+    let mut files = session_files();
     if files.is_empty() {
         return Err("No local Codex sessions found under ~/.codex/sessions.".into());
     }
+    files.sort();
+    files.reverse(); // newest first
 
-    // Scan every session for the most recent token_count that carries a
-    // rate_limits snapshot; the latest one reflects the current quota.
-    let mut best: Option<(i64, RateLimits)> = None;
     for file in &files {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
+        // Most recent rate_limits snapshot within this (newest) session.
+        let mut best: Option<(i64, RateLimits)> = None;
         for line in text.lines() {
             if !line.contains(TOKEN_COUNT_MARKER) {
                 continue;
@@ -153,28 +146,25 @@ pub fn fetch_quota() -> Result<UsageReport, String> {
             let Ok(row) = serde_json::from_str::<Row>(line) else {
                 continue;
             };
-            let Some(payload) = row.payload.as_ref() else {
-                continue;
-            };
-            if payload.r#type.as_deref() != Some("token_count") {
-                continue;
-            }
-            let Some(limits) = payload.rate_limits.clone() else {
+            let Some(limits) = row.payload.as_ref().and_then(|p| p.rate_limits.clone()) else {
                 continue;
             };
             let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
                 continue;
             };
-            if best.as_ref().is_none_or(|(b, _)| ts > *b) {
+            if best.as_ref().map_or(true, |(b, _)| ts > *b) {
                 best = Some((ts, limits));
             }
         }
+        if let Some((_, limits)) = best {
+            return build_quota(limits);
+        }
     }
 
-    let Some((_, limits)) = best else {
-        return Err("No Codex rate-limit data yet — run a recent Codex session first.".into());
-    };
+    Err("No Codex rate-limit data yet — run a recent Codex session first.".into())
+}
 
+fn build_quota(limits: RateLimits) -> Result<UsageReport, String> {
     let windows: Vec<UsageWindow> = [
         limits.primary.map(|w| w.into_window()),
         limits.secondary.map(|w| w.into_window()),
@@ -184,7 +174,9 @@ pub fn fetch_quota() -> Result<UsageReport, String> {
     .collect();
 
     if windows.is_empty() {
-        return Err("Codex reported no rate-limit windows.".into());
+        // rate_limits object present but all-null — typical of API-key auth,
+        // which is metered per-token rather than rate-limited by a quota.
+        return Err("Codex isn't rate-limited here (likely API-key billing).".into());
     }
 
     let plan = limits.plan_type.unwrap_or_else(|| "Codex".into());
@@ -310,15 +302,6 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn parse_ts(s: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
-}
-
-fn window_label(window_secs: i64) -> &'static str {
-    match window_secs {
-        86_400 => "last 24h",
-        604_800 => "last 7 days",
-        2_592_000 => "last 30 days",
-        _ => "recent",
-    }
 }
 
 /// `gpt-5.5` → "GPT-5.5"; other ids pass through.

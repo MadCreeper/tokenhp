@@ -1,6 +1,15 @@
 # Design: multi-tool usage (Claude Code + Codex)
 
-Status: **design / not yet implemented**. Branch `feat/multi-tool-usage`.
+Status: **implemented**, aligned to the two-axis model from the PR review.
+Branch `feat/multi-tool-usage`.
+
+> **Post-review update.** This now follows the settled two-axis design:
+> **Subscription** (Live, provider-selectable quota) + **API** (Local, multi-tool
+> usage tagged `equivalent`/`real`). `LocalReport` is `{ apps, combined }` and
+> each tool is a `ToolAdapter` (Claude Code + Codex implemented). Token usage
+> sums per-turn `last_token_usage`, not the cumulative field the draft below
+> proposed. Field names / frontend may still need reconciliation with the
+> in-flight `feat/openclaw-usage` adapter refactor — see the PR thread.
 
 ## Goal
 

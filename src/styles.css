@@ -475,6 +475,18 @@ body {
   overflow-y: auto;
 }
 
+.kind-tag {
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--panel-text-dim);
+  text-align: center;
+  margin: 2px 0;
+  opacity: 0.85;
+}
+.kind-tag.kind-real {
+  color: #b5651d;
+}
 .cost-line {
   display: flex;
   justify-content: space-between;
