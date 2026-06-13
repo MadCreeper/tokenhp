@@ -10,6 +10,7 @@
 
 use crate::codexstats;
 use crate::localstats::{self, window_label, ModelCostDTO, ModelUsageDTO};
+use crate::openclawstats;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -73,9 +74,25 @@ impl ToolAdapter for Codex {
     }
 }
 
+struct OpenClaw;
+impl ToolAdapter for OpenClaw {
+    fn id(&self) -> &'static str {
+        "openclaw"
+    }
+    fn display_name(&self) -> &'static str {
+        "OpenClaw"
+    }
+    fn kind(&self) -> &'static str {
+        "real" // drives real API keys (DeepSeek/LiteLLM/…), so this is metered spend
+    }
+    fn collect(&self, window_secs: i64) -> Vec<ModelUsageDTO> {
+        openclawstats::collect_local(window_secs)
+    }
+}
+
 /// The registry. Add a tool here and it shows up on the API axis automatically.
 fn adapters() -> Vec<Box<dyn ToolAdapter>> {
-    vec![Box::new(ClaudeCode), Box::new(Codex)]
+    vec![Box::new(ClaudeCode), Box::new(Codex), Box::new(OpenClaw)]
 }
 
 /// Aggregate every tool's usage over `window_secs` into per-tool + pooled views.
