@@ -2,7 +2,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
-import type { Account, LocalReport, ModelUsage, UsageReport, UsageWindow } from "./types";
+import type {
+  Account,
+  LocalReport,
+  ModelUsage,
+  TeamConfig,
+  TeamHandshake,
+  TeamReport,
+  UsageReport,
+  UsageWindow,
+} from "./types";
+import { settingsContentHTML, teamContentHTML } from "./team";
 import { heartsRow } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatTokens, nowTime } from "./util";
@@ -23,9 +33,10 @@ if (MOCK) document.documentElement.style.width = "360px";
 
 const POLL_MS = 30 * 60 * 1000; // refresh every 30 min, like the Swift app
 
-type Source = "live" | "local";
+type Source = "live" | "local" | "team";
 type WindowKey = "day" | "week" | "month";
 type Provider = "claude" | "codex";
+type View = "main" | "settings";
 
 const PROVIDER_KEY = "hpbar-provider";
 function loadProvider(): Provider {
@@ -42,6 +53,7 @@ const WINDOW_TITLE: Record<WindowKey, string> = { day: "24h", week: "7d", month:
 interface State {
   provider: Provider; // subscription axis (Live): whose quota
   source: Source;
+  view: View; // "main" panel vs the team-settings form
   window: WindowKey;
   localTool: string; // API axis (Local): "all" or a tool id
   selectedModelId: string | null;
@@ -52,11 +64,22 @@ interface State {
   error: string;
   loading: boolean;
   updatedAt: string;
+  // Team (opt-in)
+  teamConfig: TeamConfig | null; // null until loaded; gates the Team tab
+  team: TeamReport | null;
+  teamRange: WindowKey;
+  teamModel: string; // "all" or a model id, for the per-model leaderboard
+  teamDropdownOpen: boolean;
+  teamDraft: TeamConfig | null; // edit buffer for the settings form
+  teamTesting: boolean;
+  teamStatus: string;
+  teamStatusOk: boolean;
 }
 
 const state: State = {
   provider: loadProvider(),
   source: "live",
+  view: "main",
   window: "day",
   localTool: "all",
   selectedModelId: null,
@@ -67,6 +90,15 @@ const state: State = {
   error: "",
   loading: false,
   updatedAt: "",
+  teamConfig: null,
+  team: null,
+  teamRange: "day",
+  teamModel: "all",
+  teamDropdownOpen: false,
+  teamDraft: null,
+  teamTesting: false,
+  teamStatus: "",
+  teamStatusOk: false,
 };
 
 const app = document.getElementById("app")!;
@@ -80,6 +112,26 @@ if (sourceParam === "live" || sourceParam === "local") state.source = sourcePara
 // ---------------------------------------------------------------- data
 
 let inFlight = false;
+
+// Manual/auto team uploads are rate-limited so repeated refreshes (or range
+// switches) can't spam SSH tunnels / the DB: at most one in flight, and no more
+// than once per minute. The 30-min background uploader is separate/unaffected.
+let teamUploadInFlight = false;
+let lastTeamUploadAt = 0;
+const TEAM_UPLOAD_MIN_MS = 60_000;
+
+function maybeUploadTeam(): void {
+  if (MOCK || !state.teamConfig?.enabled) return;
+  const now = Date.now();
+  if (teamUploadInFlight || now - lastTeamUploadAt < TEAM_UPLOAD_MIN_MS) return;
+  teamUploadInFlight = true;
+  lastTeamUploadAt = now;
+  void invoke("upload_team_snapshot")
+    .catch(() => {})
+    .finally(() => {
+      teamUploadInFlight = false;
+    });
+}
 
 async function refresh(): Promise<void> {
   if (MOCK) {
@@ -111,6 +163,15 @@ async function refresh(): Promise<void> {
     if (state.source === "live") {
       // Subscription axis: the selected provider's quota.
       state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
+    } else if (state.source === "team") {
+      // Pull the shared roster; opportunistically push our own snapshot too so
+      // teammates see us (fire-and-forget — the git push can be slow).
+      state.team = await invoke<TeamReport>("fetch_team", { range: state.teamRange });
+      // Keep the model selection valid as the range/data changes.
+      if (state.teamModel !== "all" && !state.team.models.some((m) => m.id === state.teamModel)) {
+        state.teamModel = "all";
+      }
+      maybeUploadTeam();
     } else {
       // API axis: every local tool at once (not provider-scoped).
       state.local = await invoke<LocalReport>("fetch_local", {
@@ -152,17 +213,58 @@ function snapSelectedModel(): void {
 const PANEL_WIDTH = 360;
 
 function render(): void {
-  app.innerHTML = `
-    <main class="panel">
+  app.innerHTML =
+    state.view === "settings"
+      ? `<main class="panel">${settingsHeaderHTML()}<section class="content">${settingsContentHTML(
+          {
+            draft: state.teamDraft ?? defaultTeamDraft(),
+            status: state.teamStatus,
+            statusOk: state.teamStatusOk,
+            testing: state.teamTesting,
+          },
+        )}</section></main>`
+      : `<main class="panel">
       ${headerHTML()}
       ${sourceSegHTML()}
-      ${state.source === "live" ? providerSegHTML() : toolSegHTML()}
+      ${subSegHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
     </main>`;
   // Resize the window to the content height (top-anchored → grows downward),
   // mirroring the AppKit panel's self-sizing.
   requestAnimationFrame(syncWindowSize);
+}
+
+// The second segmented row depends on the source; Team renders its own range
+// selector inside the content area (like Local's window selector).
+function subSegHTML(): string {
+  if (state.source === "live") return providerSegHTML();
+  if (state.source === "local") return toolSegHTML();
+  return "";
+}
+
+function defaultTeamDraft(): TeamConfig {
+  return (
+    state.teamConfig ?? {
+      enabled: false,
+      ssh_host: "",
+      ssh_user: "",
+      ssh_port: 22,
+      ssh_password: "",
+      db_host: "127.0.0.1",
+      db_port: 5432,
+      db_name: "hpbar",
+      db_user: "hpbar",
+      team_name: "",
+      member_id: "",
+      display_name: "",
+      share_tokens: true,
+      share_cost: true,
+      share_project: true,
+      interval_secs: 1800,
+      backfill_days: 90,
+    }
+  );
 }
 
 function syncWindowSize(): void {
@@ -176,17 +278,29 @@ function syncWindowSize(): void {
 
 function headerHTML(): string {
   const title =
-    state.source === "live"
-      ? state.provider === "codex"
-        ? "Codex Quota"
-        : "Claude Quota"
-      : "Token Usage";
+    state.source === "team"
+      ? (state.team?.team_name ?? "Team")
+      : state.source === "live"
+        ? state.provider === "codex"
+          ? "Codex Quota"
+          : "Claude Quota"
+        : "Token Usage";
   return `
     <header class="header">
-      <span class="title">${title}</span>
+      <span class="title">${escapeHTML(title)}</span>
       ${state.loading ? `<span class="spinner">…</span>` : ""}
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
+      <button class="mc-btn icon" data-action="settings" title="Team settings">⚙</button>
       <button class="mc-btn icon" data-action="refresh" title="Refresh">⟳</button>
+    </header>`;
+}
+
+function settingsHeaderHTML(): string {
+  return `
+    <header class="header">
+      <span class="title">Team Settings</span>
+      <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
+      <button class="mc-btn icon" data-action="settings-close" title="Back">✕</button>
     </header>`;
 }
 
@@ -215,14 +329,30 @@ function toolSegHTML(): string {
 }
 
 function sourceSegHTML(): string {
+  // The Team tab only appears once the user has opted in (config.enabled).
+  const teamOn = !!state.teamConfig?.enabled;
+  // Shorten the first two labels when a third button has to share the row.
+  const live = teamOn ? "Live" : "Live quota";
+  const local = teamOn ? "Local" : "Local activity";
   return `
     <div class="seg">
-      ${segButton("source", "live", "Live quota", state.source === "live")}
-      ${segButton("source", "local", "Local activity", state.source === "local")}
+      ${segButton("source", "live", live, state.source === "live")}
+      ${segButton("source", "local", local, state.source === "local")}
+      ${teamOn ? segButton("source", "team", "Team", state.source === "team") : ""}
     </div>`;
 }
 
 function contentHTML(): string {
+  if (state.source === "team")
+    return teamContentHTML({
+      report: state.team,
+      range: state.teamRange,
+      model: state.teamModel,
+      dropdownOpen: state.teamDropdownOpen,
+      selfName: state.teamConfig?.display_name ?? "",
+      error: state.error,
+      theme: getTheme(),
+    });
   return state.source === "live" ? liveHTML() : localHTML();
 }
 
@@ -359,24 +489,29 @@ function xpBarsHTML(m: ModelUsage): string {
 
 function footerHTML(): string {
   const label =
-    state.source === "live"
-      ? (state.live?.source_label ?? "Live quota")
-      : (state.local?.source_label ?? "Local activity");
+    state.source === "team"
+      ? "Team usage · shared DB"
+      : state.source === "live"
+        ? (state.live?.source_label ?? "Live quota")
+        : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
-  // Account identity belongs on the Live quota view — the per-account
-  // subscription (Claude login, or the ChatGPT login behind Codex). Hidden on
-  // Local activity, which aggregates models that may not map to that account.
-  const acct = state.source === "live" ? state.account : null;
-  const acctText = acct
-    ? [acct.email, acct.plan].filter(Boolean).join(" · ")
-    : "";
-  const acctLine = acctText
-    ? `<div class="account">${escapeHTML(acctText)}</div>`
-    : "";
+  // The footer's middle line: account identity on Live, member count on Team.
+  let midLine = "";
+  if (state.source === "live") {
+    // The per-account subscription (Claude login, or the ChatGPT login behind
+    // Codex). Hidden on Local, which aggregates models across accounts.
+    const acctText = state.account
+      ? [state.account.email, state.account.plan].filter(Boolean).join(" · ")
+      : "";
+    if (acctText) midLine = `<div class="account">${escapeHTML(acctText)}</div>`;
+  } else if (state.source === "team" && state.team) {
+    const n = state.team.members.length;
+    midLine = `<div class="account">${n} member${n === 1 ? "" : "s"}</div>`;
+  }
   return `
     <footer class="footer">
       <div class="src-label">${escapeHTML(label)}</div>
-      ${acctLine}
+      ${midLine}
       <div class="updated">${escapeHTML(updated)}</div>
     </footer>`;
 }
@@ -391,6 +526,7 @@ app.addEventListener("click", (e) => {
 
   switch (action) {
     case "refresh":
+      maybeUploadTeam(); // also push our latest usage up (rate-limited)
       void refresh();
       break;
     case "provider":
@@ -444,13 +580,117 @@ app.addEventListener("click", (e) => {
         render();
       }
       break;
+    case "team-range":
+      if (value && value !== state.teamRange) {
+        state.teamRange = value as WindowKey;
+        state.teamDropdownOpen = false;
+        render();
+        void refresh();
+      }
+      break;
+    case "team-toggle-dropdown":
+      state.teamDropdownOpen = !state.teamDropdownOpen;
+      render();
+      break;
+    case "team-select-model":
+      if (value) {
+        state.teamModel = value; // client-side slice — no refetch
+        state.teamDropdownOpen = false;
+        render();
+      }
+      break;
+    case "settings":
+      openSettings();
+      break;
+    case "settings-close":
+      state.view = "main";
+      render();
+      break;
+    case "team-test":
+      void testTeam();
+      break;
+    case "team-save":
+      void saveTeam();
+      break;
   }
 });
+
+// The settings form binds inputs to a draft buffer so typed values survive the
+// re-renders triggered by Test/Save (which rebuild the whole panel).
+app.addEventListener("input", (e) => {
+  const el = e.target as HTMLInputElement;
+  const field = el.dataset.field;
+  if (!field || !state.teamDraft) return;
+  const draft = state.teamDraft as unknown as Record<string, unknown>;
+  draft[field] =
+    el.type === "checkbox"
+      ? el.checked
+      : el.type === "number"
+        ? Number(el.value) || 0 // ports must serialize as numbers, not strings
+        : el.value;
+});
+
+function openSettings(): void {
+  state.teamDraft = { ...defaultTeamDraft() };
+  state.teamStatus = "";
+  state.teamStatusOk = false;
+  state.teamTesting = false;
+  state.view = "settings";
+  render();
+}
+
+async function testTeam(): Promise<void> {
+  if (!state.teamDraft || state.teamTesting) return;
+  state.teamTesting = true;
+  state.teamStatus = "";
+  render();
+  try {
+    const h = await invoke<TeamHandshake>("test_team_connection", { config: state.teamDraft });
+    state.teamStatusOk = true;
+    const n = h.member_count;
+    state.teamStatus = `Connected ✓ · ${h.team_name} · ${n} member${n === 1 ? "" : "s"}`;
+  } catch (err) {
+    state.teamStatusOk = false;
+    state.teamStatus = String(err);
+  } finally {
+    state.teamTesting = false;
+    render();
+  }
+}
+
+async function saveTeam(): Promise<void> {
+  if (!state.teamDraft) return;
+  try {
+    await invoke("set_team_config", { config: state.teamDraft });
+    state.teamConfig = await invoke<TeamConfig>("get_team_config");
+    // If sharing was turned off while the Team tab was open, fall back to Live.
+    if (!state.teamConfig.enabled && state.source === "team") state.source = "live";
+    state.view = "main";
+    state.team = null; // force a fresh fetch the next time Team is opened
+    render();
+    if (state.source === "team") void refresh();
+  } catch (err) {
+    state.teamStatusOk = false;
+    state.teamStatus = String(err);
+    render();
+  }
+}
+
+async function loadTeamConfig(): Promise<void> {
+  if (MOCK) return;
+  try {
+    state.teamConfig = await invoke<TeamConfig>("get_team_config");
+    render();
+  } catch {
+    /* leave the Team tab hidden if config can't be read */
+  }
+}
 
 installStoneTexture();
 applyTheme();
 render();
 void refresh();
+void loadTeamConfig();
 
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).

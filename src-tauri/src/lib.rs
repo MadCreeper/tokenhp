@@ -10,10 +10,12 @@ pub mod credentials;
 pub mod localstats;
 pub mod openclawstats;
 pub mod pricing;
+pub mod team;
 pub mod tools;
 pub mod usage;
 
 use credentials::CredentialCache;
+use std::time::Duration;
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -64,6 +66,74 @@ async fn fetch_codex_quota() -> Result<usage::UsageReport, String> {
         .map_err(|e| e.to_string())?
 }
 
+// --- Team sharing (opt-in) ---------------------------------------------------
+
+/// Current team-sharing config (defaults, with `enabled=false`, when unset). The
+/// frontend uses `enabled` to decide whether to show the Team tab at all.
+#[tauri::command]
+fn get_team_config() -> team::TeamConfig {
+    team::TeamConfig::load()
+}
+
+/// Persist team-sharing config, filling in derived fields (member id, display
+/// name) from the local account first.
+#[tauri::command]
+fn set_team_config(mut config: team::TeamConfig) -> Result<(), String> {
+    config.normalize(account::read_email().as_deref());
+    config.save()
+}
+
+/// Verify connectivity/auth (open the SSH tunnel, connect to Postgres, migrate),
+/// write this member's row, and return the current roster — the "handshake"
+/// shown in settings.
+#[tauri::command]
+async fn test_team_connection(
+    mut config: team::TeamConfig,
+) -> Result<team::TeamHandshake, String> {
+    let email = account::read_email();
+    config.normalize(email.as_deref());
+    team::test_connection(&config, email.as_deref()).await
+}
+
+/// Push this member's latest snapshot now (also done periodically in the
+/// background). No-op when sharing is disabled.
+#[tauri::command]
+async fn upload_team_snapshot() -> Result<(), String> {
+    let mut cfg = team::TeamConfig::load();
+    if !cfg.enabled {
+        return Ok(());
+    }
+    let email = account::read_email();
+    cfg.normalize(email.as_deref());
+    team::upload(&cfg, email.as_deref()).await
+}
+
+/// The team leaderboard for `range` ("day" | "week" | "month").
+#[tauri::command]
+async fn fetch_team(range: String) -> Result<team::TeamReport, String> {
+    team::fetch_team(&range).await
+}
+
+/// Background loop: every `interval_secs`, push this member's snapshot if team
+/// sharing is enabled. Cheap no-op (a config read + sleep) when disabled, so it
+/// can run unconditionally for the app's lifetime.
+fn spawn_team_uploader() {
+    tauri::async_runtime::spawn(async move {
+        // Small initial delay so startup isn't competing with the first render.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        loop {
+            let mut cfg = team::TeamConfig::load();
+            let interval = cfg.interval_secs.max(600);
+            if cfg.enabled && !cfg.ssh_host.trim().is_empty() {
+                let email = account::read_email();
+                cfg.normalize(email.as_deref());
+                let _ = team::upload(&cfg, email.as_deref()).await;
+            }
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -76,7 +146,12 @@ pub fn run() {
             fetch_local,
             fetch_codex_quota,
             fetch_account,
-            fetch_codex_account
+            fetch_codex_account,
+            get_team_config,
+            set_team_config,
+            test_team_connection,
+            upload_team_snapshot,
+            fetch_team
         ])
         .setup(|app| {
             // macOS: run as a menu-bar accessory — no Dock icon, no app menu.
@@ -85,6 +160,7 @@ pub fn run() {
 
             build_popover(app.handle())?;
             build_tray(app.handle())?;
+            spawn_team_uploader();
             Ok(())
         })
         .run(tauri::generate_context!())
