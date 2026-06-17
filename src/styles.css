@@ -139,28 +139,22 @@ body {
   padding: 4px 7px;
   font-size: 13px;
 }
-/* "detail" toggle: a small right-aligned underlined link under the segs that
-   reveals the device-share text + account email/plan. Dim when off. */
-.detail-row {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: -2px;
-}
+/* "detail" toggle: an underlined link inline with the "Live quota" footer label
+   that reveals the device-share text + account email/plan. Dim when off. */
 .detail-link {
   background: none;
   border: none;
   cursor: pointer;
   font-family: inherit;
-  font-size: 9px;
-  letter-spacing: 0.04em;
+  font-size: inherit;
+  letter-spacing: 0.02em;
   text-decoration: underline;
-  color: var(--panel-text-dim);
-  opacity: 0.7;
-  padding: 2px 1px;
+  color: inherit;
+  opacity: 0.6;
+  padding: 0 0 0 2px;
 }
 .detail-link.on {
   opacity: 1;
-  color: var(--panel-text);
 }
 .seg {
   display: flex;

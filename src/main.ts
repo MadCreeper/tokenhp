@@ -234,7 +234,6 @@ function render(): void {
       ${headerHTML()}
       ${sourceSegHTML()}
       ${subSegHTML()}
-      ${detailToggleHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
     </main>`;
@@ -351,12 +350,6 @@ function sourceSegHTML(): string {
     </div>`;
 }
 
-// "detail" toggle — a small right-aligned underlined link under the segs (live
-// view only). Reveals the per-window device-share text + the account email/plan.
-function detailToggleHTML(): string {
-  if (state.source !== "live") return "";
-  return `<div class="detail-row"><button class="detail-link ${state.showDetail ? "on" : ""}" data-action="detail" title="Show this-machine share + account">detail</button></div>`;
-}
 
 function contentHTML(): string {
   if (state.source === "team")
@@ -616,7 +609,7 @@ function footerHTML(): string {
         ? (state.live?.source_label ?? "Live quota")
         : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
-  // The footer's middle line: account identity on Live (revealed via the header
+  // The footer's middle line: account identity on Live (revealed via the footer
   // "detail" toggle), member count on Team.
   let midLine = "";
   if (state.source === "live" && state.showDetail) {
@@ -630,9 +623,15 @@ function footerHTML(): string {
     const n = state.team.members.length;
     midLine = `<div class="account">${n} member${n === 1 ? "" : "s"}</div>`;
   }
+  // "detail" toggle sits next to the "Live quota" footer label (live view only) —
+  // reveals the per-window device-share text + the account email/plan above.
+  const detail =
+    state.source === "live"
+      ? ` <button class="detail-link ${state.showDetail ? "on" : ""}" data-action="detail" title="Show this-machine share + account">detail</button>`
+      : "";
   return `
     <footer class="footer">
-      <div class="src-label">${escapeHTML(label)}</div>
+      <div class="src-label">${escapeHTML(label)}${detail}</div>
       ${midLine}
       <div class="updated">${escapeHTML(updated)}</div>
     </footer>`;
