@@ -604,8 +604,50 @@ body {
   gap: 11px;
   margin-top: 8px;
 }
+.team-row {
+  cursor: pointer;
+}
 .team-row.team-stale {
   opacity: 0.5;
+}
+/* --- Expanded top-projects list --- */
+.team-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0 2px 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--bevel-shadow);
+}
+.theme-classic .team-projects,
+.theme-arknights .team-projects {
+  border-left-color: #c4c4c4;
+}
+.team-proj {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--panel-text-dim);
+}
+.theme-classic .team-proj,
+.theme-arknights .team-proj {
+  font-size: 11px;
+}
+.team-proj-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-proj-val {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.team-proj-empty {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  font-style: italic;
 }
 .team-sub {
   font-size: 8px;

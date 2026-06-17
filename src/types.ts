@@ -80,12 +80,20 @@ export interface TeamConfig {
   share_project: boolean;
   interval_secs: number;
   backfill_days: number;
+  top_projects: number; // how many top projects to show when a row is expanded
 }
 
 /** Mirrors `team::db::ModelUsage` — one model's usage for a member. */
 export interface TeamModelUsage {
   model: string;
   display_name: string;
+  tokens: number;
+  cost: number;
+}
+
+/** Mirrors `team::db::ProjectUsage` — one project's usage for a member. */
+export interface TeamProjectUsage {
+  project: string;
   tokens: number;
   cost: number;
 }
@@ -101,6 +109,7 @@ export interface MemberView {
   is_stale: boolean;
   is_self: boolean;
   by_model: TeamModelUsage[];
+  by_project: TeamProjectUsage[];
 }
 
 /** Mirrors `team::db::ModelOption` — a model for the dropdown. */

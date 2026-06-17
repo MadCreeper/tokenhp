@@ -18,6 +18,8 @@ export function teamContentHTML(args: {
   model: string; // "all" or a model id
   dropdownOpen: boolean;
   selfName: string; // your locally-set display name (authoritative for your row)
+  expanded: Set<string>; // member ids whose top-projects are shown
+  topProjects: number; // how many to show when expanded
   error: string;
   theme: Theme;
 }): string {
@@ -57,7 +59,12 @@ export function teamContentHTML(args: {
     .sort((a, b) => b.v.tokens - a.v.tokens);
   const max = Math.max(...ranked.map((r) => r.v.tokens), 1);
   const rows = ranked
-    .map((r, i) => memberRow(i + 1, r.m, r.v.tokens, r.v.cost, max, args.theme, args.selfName))
+    .map((r, i) =>
+      memberRow(i + 1, r.m, r.v.tokens, r.v.cost, max, args.theme, args.selfName, {
+        open: args.expanded.has(r.m.member_id),
+        topProjects: args.topProjects,
+      }),
+    )
     .join("");
   return seg + dropdown + `<div class="team-list">${rows}</div>`;
 }
@@ -99,21 +106,44 @@ function memberRow(
   maxTokens: number,
   theme: Theme,
   selfName: string,
+  expand: { open: boolean; topProjects: number },
 ): string {
   const bar = theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
   const frac = clamp01(tokens / maxTokens);
   const trailing = cost > 0 ? `${formatTokens(tokens)} · ${formatDollars(cost)}` : formatTokens(tokens);
   // Your own row uses your locally-set name, so it can't show a stale DB value.
   const display = m.is_self && selfName ? selfName : m.display_name;
-  const name = `${rank}. ${escapeHTML(display)}${m.is_self ? " (you)" : ""}`;
+  // A chevron signals the row is expandable to its top projects.
+  const chevron = expand.open ? "▾" : "▸";
+  const name = `${chevron} ${rank}. ${escapeHTML(display)}${m.is_self ? " (you)" : ""}`;
   const sub = [m.current_project ? `⛏ ${m.current_project}` : null, seenLabel(m)]
     .filter(Boolean)
     .join(" · ");
   return `
-    <div class="team-row ${m.is_stale ? "team-stale" : ""}">
+    <div class="team-row ${m.is_stale ? "team-stale" : ""} ${expand.open ? "team-open" : ""}"
+         data-action="team-expand" data-value="${escapeHTML(m.member_id)}">
       ${bar(name, frac, trailing)}
       ${sub ? `<div class="team-sub">${escapeHTML(sub)}</div>` : ""}
+      ${expand.open ? projectsHTML(m, expand.topProjects) : ""}
     </div>`;
+}
+
+// The top projects for a member (desc by tokens), shown when the row is open.
+function projectsHTML(m: MemberView, topProjects: number): string {
+  const list = m.by_project.slice(0, Math.max(1, topProjects));
+  if (list.length === 0) {
+    return `<div class="team-projects"><div class="team-proj-empty">no project activity in this range</div></div>`;
+  }
+  const rows = list
+    .map((p) => {
+      const val =
+        p.cost > 0 ? `${formatTokens(p.tokens)} · ${formatDollars(p.cost)}` : formatTokens(p.tokens);
+      return `<div class="team-proj"><span class="team-proj-name">${escapeHTML(
+        p.project,
+      )}</span><span class="team-proj-val">${val}</span></div>`;
+    })
+    .join("");
+  return `<div class="team-projects">${rows}</div>`;
 }
 
 function seenLabel(m: MemberView): string {
@@ -165,6 +195,7 @@ export function settingsContentHTML(args: {
       <div class="settings-share-title">Team</div>
       ${field("Team name", "team_name", d.team_name, "My Team")}
       ${field("Your display name", "display_name", d.display_name, "")}
+      ${field("Top projects (on expand)", "top_projects", String(d.top_projects), "5", "number")}
 
       <div class="settings-share-title">Share</div>
       <div class="settings-share">

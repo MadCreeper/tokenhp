@@ -70,6 +70,7 @@ interface State {
   teamRange: WindowKey;
   teamModel: string; // "all" or a model id, for the per-model leaderboard
   teamDropdownOpen: boolean;
+  teamExpanded: Set<string>; // member ids whose top-projects are expanded
   teamDraft: TeamConfig | null; // edit buffer for the settings form
   teamTesting: boolean;
   teamStatus: string;
@@ -95,6 +96,7 @@ const state: State = {
   teamRange: "day",
   teamModel: "all",
   teamDropdownOpen: false,
+  teamExpanded: new Set(),
   teamDraft: null,
   teamTesting: false,
   teamStatus: "",
@@ -263,6 +265,7 @@ function defaultTeamDraft(): TeamConfig {
       share_project: true,
       interval_secs: 1800,
       backfill_days: 90,
+      top_projects: 5,
     }
   );
 }
@@ -350,6 +353,8 @@ function contentHTML(): string {
       model: state.teamModel,
       dropdownOpen: state.teamDropdownOpen,
       selfName: state.teamConfig?.display_name ?? "",
+      expanded: state.teamExpanded,
+      topProjects: state.teamConfig?.top_projects ?? 5,
       error: state.error,
       theme: getTheme(),
     });
@@ -596,6 +601,13 @@ app.addEventListener("click", (e) => {
       if (value) {
         state.teamModel = value; // client-side slice — no refetch
         state.teamDropdownOpen = false;
+        render();
+      }
+      break;
+    case "team-expand":
+      if (value) {
+        if (state.teamExpanded.has(value)) state.teamExpanded.delete(value);
+        else state.teamExpanded.add(value);
         render();
       }
       break;

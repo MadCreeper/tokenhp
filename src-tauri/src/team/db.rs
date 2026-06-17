@@ -68,6 +68,14 @@ pub struct ModelUsage {
     pub cost: f64,
 }
 
+/// One project's usage for a member over the range (for the expandable row).
+#[derive(Serialize, Clone)]
+pub struct ProjectUsage {
+    pub project: String,
+    pub tokens: i64,
+    pub cost: f64,
+}
+
 #[derive(Serialize, Clone)]
 pub struct MemberView {
     pub member_id: String,
@@ -80,6 +88,8 @@ pub struct MemberView {
     pub is_self: bool,
     /// Per-model breakdown so the frontend can switch models without refetching.
     pub by_model: Vec<ModelUsage>,
+    /// Per-project breakdown (desc by tokens) for the expandable "top projects".
+    pub by_project: Vec<ProjectUsage>,
 }
 
 /// A model present in the range, for the dropdown (sorted by team-wide usage).
@@ -493,6 +503,24 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         });
     }
 
+    // Per-(member, project) totals for the range (the expandable "top projects").
+    let project_sql = format!(
+        "SELECT member_id, project, SUM(tokens)::bigint AS tokens,
+                COALESCE(SUM(cost), 0)::double precision AS cost
+         FROM usage_daily WHERE {day_filter} GROUP BY member_id, project"
+    );
+    let project_rows = client.query(&project_sql, &[]).await.map_err(|e| e.to_string())?;
+    let mut projects_by_member: std::collections::HashMap<String, Vec<ProjectUsage>> =
+        std::collections::HashMap::new();
+    for row in &project_rows {
+        let member_id: String = row.get("member_id");
+        projects_by_member.entry(member_id).or_default().push(ProjectUsage {
+            project: row.get("project"),
+            tokens: row.get("tokens"),
+            cost: row.get("cost"),
+        });
+    }
+
     // Member identity/metadata (everyone, even with no usage in the range).
     let meta_rows = client
         .query(
@@ -524,6 +552,8 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
             };
             let mut by_model = by_member.remove(&member_id).unwrap_or_default();
             by_model.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+            let mut by_project = projects_by_member.remove(&member_id).unwrap_or_default();
+            by_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
             let tokens = by_model.iter().map(|m| m.tokens).sum();
             let cost = by_model.iter().map(|m| m.cost).sum();
             MemberView {
@@ -536,6 +566,7 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
                 last_seen_secs,
                 is_stale: updated_ts == 0 || last_seen_secs > STALE_SECS,
                 by_model,
+                by_project,
             }
         })
         .collect();

@@ -37,6 +37,9 @@ fn default_interval() -> u64 {
 fn default_backfill() -> i64 {
     90
 }
+fn default_top_projects() -> u32 {
+    5
+}
 
 /// Local-only configuration for team sharing. No secrets — auth is the user's
 /// SSH key plus Postgres localhost `trust`.
@@ -81,6 +84,9 @@ pub struct TeamConfig {
     pub interval_secs: u64,
     #[serde(default = "default_backfill")]
     pub backfill_days: i64,
+    /// How many top projects to show when a leaderboard row is expanded.
+    #[serde(default = "default_top_projects")]
+    pub top_projects: u32,
 }
 
 impl Default for TeamConfig {
@@ -103,6 +109,7 @@ impl Default for TeamConfig {
             share_project: true,
             interval_secs: default_interval(),
             backfill_days: default_backfill(),
+            top_projects: default_top_projects(),
         }
     }
 }
@@ -145,6 +152,9 @@ impl TeamConfig {
         }
         if self.backfill_days <= 0 {
             self.backfill_days = default_backfill();
+        }
+        if self.top_projects == 0 {
+            self.top_projects = default_top_projects();
         }
         if self.member_id.trim().is_empty() {
             self.member_id = derive_member_id(email);

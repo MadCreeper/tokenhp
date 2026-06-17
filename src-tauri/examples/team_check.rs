@@ -63,6 +63,9 @@ async fn main() {
                         "  {:<22} {:>11} tok  ${:<8.2} proj={:?} seen={}s stale={}",
                         m.display_name, m.tokens, m.cost, m.current_project, m.last_seen_secs, m.is_stale
                     );
+                    for p in m.by_project.iter().take(5) {
+                        println!("        · {:<22} {:>11} tok  ${:.2}", p.project, p.tokens, p.cost);
+                    }
                 }
             }
             Err(e) => println!("=== {range} === {e}"),
