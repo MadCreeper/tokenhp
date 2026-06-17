@@ -38,7 +38,18 @@ const RESOURCES: Record<string, Resource> = {
  * current-sanity number, and the black 理智/135 tag, with a slim drain bar
  * along the plate's bottom edge.
  */
-function akSanityHero(remaining: number, caption: string | null): string {
+/** Ghost segment for the device split: this machine's share of the *drained*
+ *  part, positioned from `remaining` to `remaining + machineShare`. */
+function akGhost(remaining: number, machineShare: number | null | undefined): string {
+  if (machineShare == null) return "";
+  return `<div class="ak-fill-ghost" style="left:${(clamp01(remaining) * 100).toFixed(1)}%;width:${(clamp01(machineShare) * 100).toFixed(1)}%"></div>`;
+}
+
+function akSanityHero(
+  remaining: number,
+  caption: string | null,
+  machineShare?: number | null,
+): string {
   const v = clamp01(remaining);
   const cur = Math.round(v * 135);
   return `
@@ -50,7 +61,7 @@ function akSanityHero(remaining: number, caption: string | null): string {
           <div class="ak-hero-num">${cur}</div>
           <div class="ak-hero-tag">理智/135</div>
         </div>
-        <div class="ak-hero-bar"><div class="ak-hero-fill" style="width:${(v * 100).toFixed(1)}%"></div></div>
+        <div class="ak-hero-bar"><div class="ak-hero-fill" style="width:${(v * 100).toFixed(1)}%"></div>${akGhost(v, machineShare)}</div>
       </div>
       ${caption ? `<div class="ak-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
@@ -67,8 +78,9 @@ export function akResource(
   remaining: number,
   caption: string | null,
   trailingOverride: string | null,
+  machineShare?: number | null,
 ): string {
-  if (title === "5-Hour") return akSanityHero(remaining, caption);
+  if (title === "5-Hour") return akSanityHero(remaining, caption, machineShare);
   const r = RESOURCES[title] ?? { icon: ICON_ORUNDUM, zh: title, max: 100 };
   const v = clamp01(remaining);
   const count = trailingOverride
@@ -81,7 +93,7 @@ export function akResource(
         <span class="ak-name">${escapeHTML(r.zh)} <span class="ak-sub">${escapeHTML(title)}</span></span>
         ${count}
       </div>
-      <div class="ak-bar"><div class="ak-fill" style="width:${(v * 100).toFixed(1)}%"></div></div>
+      <div class="ak-bar"><div class="ak-fill" style="width:${(v * 100).toFixed(1)}%"></div>${akGhost(v, machineShare)}</div>
       ${caption ? `<div class="ak-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
 }

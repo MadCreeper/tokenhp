@@ -38,11 +38,16 @@ function barHTML(
   fillColor: [number, number, number] | string,
   trailing: string,
   caption: string | null,
+  ghost?: { left: number; width: number },
 ): string {
   const grad =
     typeof fillColor === "string"
       ? fillColor
       : `linear-gradient(to bottom, ${css(fillColor, 0.75)}, ${css(fillColor)})`;
+  // Ghost segment = this machine's share of the *drained* part (others stay track bg).
+  const ghostDiv = ghost
+    ? `<div class="cbar-ghost" style="left:${(clamp01(ghost.left) * 100).toFixed(1)}%;width:${(clamp01(ghost.width) * 100).toFixed(1)}%"></div>`
+    : "";
   return `
     <div class="cbar">
       <div class="cbar-head">
@@ -51,19 +56,25 @@ function barHTML(
       </div>
       <div class="cbar-track">
         <div class="cbar-fill" style="width:${(clamp01(fillFrac) * 100).toFixed(1)}%;background:${grad}"></div>
+        ${ghostDiv}
       </div>
       ${caption ? `<div class="cbar-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
 }
 
-/** Quota (drain) bar — fill = remaining, color ramps with it. */
+/** Quota (drain) bar — fill = remaining, color ramps with it. When
+ *  `machineShare` is given, the drained part shows this machine's ghost segment
+ *  (from `remaining` to `remaining + machineShare`). */
 export function classicQuotaBar(
   title: string,
   remaining: number,
   trailing: string,
   caption: string | null,
+  machineShare?: number | null,
 ): string {
-  return barHTML(title, remaining, rampColor(remaining), trailing, caption);
+  const ghost =
+    machineShare != null ? { left: remaining, width: machineShare } : undefined;
+  return barHTML(title, remaining, rampColor(remaining), trailing, caption, ghost);
 }
 
 /** Magnitude bar — single accent color; width already encodes the value. */

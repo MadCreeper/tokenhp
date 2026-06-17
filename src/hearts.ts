@@ -76,3 +76,49 @@ export function heartsRow(value: number): string {
   }
   return out;
 }
+
+// "Your drain" ghost tone — between the bright full heart and the dark empty
+// one, so the drained hearts you caused stand apart from those other devices did.
+const GHOST_BODY = "#9a3030";
+const GHOST_SPARKLE = "#c25a5a";
+
+/** A full heart drawn in an explicit body/sparkle tone (outline unchanged). */
+function tonedHeartSVG(body: string, sparkle: string): string {
+  let rects = "";
+  for (let y = 0; y < PATTERN.length; y++) {
+    const row = PATTERN[y];
+    for (let x = 0; x < row.length; x++) {
+      const code = row[x];
+      const color = code === 1 ? OUTLINE : code === 2 ? body : code === 3 ? sparkle : null;
+      if (!color) continue;
+      rects += `<rect x="${x}" y="${y}" width="1" height="1" fill="${color}"/>`;
+    }
+  }
+  return `<svg class="heart" viewBox="0 0 7 7" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg">${rects}</svg>`;
+}
+
+/**
+ * Like {@link heartsRow}, but the *drained* hearts are split into the portion
+ * this machine used (a "ghost" mid-red) vs other devices (the dark empty tone) —
+ * `machineShare` is this machine's fraction of the whole window. Bright hearts
+ * still show remaining HP; the fractional edge heart is preserved.
+ */
+export function heartsRowSplit(remaining: number, machineShare: number): string {
+  const fRem = clamp01(remaining);
+  const fMac = clamp01(remaining + machineShare); // remaining + your-drain = 1 − others
+  let out = "";
+  for (let i = 0; i < 10; i++) {
+    const lo = i / 10;
+    const hi = (i + 1) / 10;
+    const center = (i + 0.5) / 10;
+    if (hi <= fRem + 1e-9) {
+      out += heartSVG(1); // fully remaining → bright full
+    } else if (lo >= fRem - 1e-9) {
+      // fully drained → your-drain ghost, or others' drain (empty tone)
+      out += center <= fMac ? tonedHeartSVG(GHOST_BODY, GHOST_SPARKLE) : heartSVG(0);
+    } else {
+      out += heartSVG(fillForHeart(i, remaining)); // straddles the HP edge
+    }
+  }
+  return out;
+}

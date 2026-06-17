@@ -13,7 +13,7 @@ import type {
   UsageWindow,
 } from "./types";
 import { settingsContentHTML, teamContentHTML } from "./team";
-import { heartsRow } from "./hearts";
+import { heartsRow, heartsRowSplit } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
 import { installStoneTexture } from "./texture";
@@ -374,16 +374,17 @@ function liveBarHTML(w: UsageWindow): string {
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
   const caption = resetCaption(w.resets_at);
+  const split = machineSplit(w); // this machine's window fraction, or null when unsure
   let bar: string;
   switch (getTheme()) {
     case "classic":
-      bar = classicQuotaBar(w.title, w.remaining, trailing, caption);
+      bar = classicQuotaBar(w.title, w.remaining, trailing, caption, split);
       break;
     case "arknights":
-      bar = akResource(w.title, w.remaining, caption, w.trailing);
+      bar = akResource(w.title, w.remaining, caption, w.trailing, split);
       break;
     default:
-      bar = heartBarHTML(w, trailing, caption);
+      bar = heartBarHTML(w, trailing, caption, split);
   }
   // Wrap so the optional warning/share lines stay attached to their bar and
   // inter-window spacing comes from `.live-window` (the `.bar + .bar` selectors
@@ -393,6 +394,15 @@ function liveBarHTML(w: UsageWindow): string {
 
 // Confidence below this hides the device split entirely (bar renders as before).
 const SHARE_MIN_CONF = 0.35;
+
+// This machine's fraction of the window for the ghost split, or null when the
+// fit isn't confident enough (the bar then renders normally, no ghost).
+function machineSplit(w: UsageWindow): number | null {
+  if (w.machine_share == null || w.share_confidence == null || w.share_confidence < SHARE_MIN_CONF) {
+    return null;
+  }
+  return clamp01(w.machine_share);
+}
 
 // "This machine vs other devices" split for the window — an estimate from
 // correlating account-wide utilization with this machine's local cost (see the
@@ -418,14 +428,21 @@ function etaWarnHTML(etaSecs: number | null): string {
   return `<div class="bar-eta">⚠ hits limit in ~${escapeHTML(formatDuration(etaSecs))}</div>`;
 }
 
-function heartBarHTML(w: UsageWindow, trailing: string, caption: string | null): string {
+function heartBarHTML(
+  w: UsageWindow,
+  trailing: string,
+  caption: string | null,
+  machineShare: number | null,
+): string {
+  const hearts =
+    machineShare != null ? heartsRowSplit(w.remaining, machineShare) : heartsRow(w.remaining);
   return `
     <div class="bar">
       <div class="bar-head">
         <span class="bar-title">${escapeHTML(w.title)}</span>
         <span class="bar-trailing">${escapeHTML(trailing)}</span>
       </div>
-      <div class="hearts">${heartsRow(w.remaining)}</div>
+      <div class="hearts">${hearts}</div>
       ${caption ? `<div class="bar-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
 }

@@ -297,11 +297,20 @@ body {
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.25);
   overflow: hidden;
+  position: relative;
 }
 .cbar-fill {
   height: 100%;
   border-radius: 3px;
   transition: width 0.4s ease-out;
+}
+/* Device-split: this machine's share of the drained part (others = plain track). */
+.cbar-ghost {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.28);
+  transition: left 0.4s ease-out, width 0.4s ease-out;
 }
 .cbar-caption {
   font-size: 9px;
@@ -497,11 +506,20 @@ body {
   transform: skewX(-30deg);
   margin: 0 6px;
   overflow: hidden;
+  position: relative;
 }
 .ak-fill {
   height: 100%;
   background: #2e2e2e;
   transition: width 0.4s ease-out;
+}
+/* Device-split ghost band (this machine's drain) — both ak-bar and ak-hero-bar. */
+.ak-fill-ghost {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(60, 60, 60, 0.55);
+  transition: left 0.4s ease-out, width 0.4s ease-out;
 }
 .ak-caption {
   font-size: 9px;
