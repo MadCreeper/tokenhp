@@ -77,21 +77,29 @@ function barHTML(
     </div>`;
 }
 
+const WHITE: [number, number, number] = [1, 1, 1];
+
 /** Quota (drain) bar — fill = remaining, color ramps with it. The "used up"
  *  track is the same hue at lower saturation (not gray); when `machineShare` is
- *  given, this machine's drain shows as a mid-saturation ghost segment. */
+ *  given, this machine's drain shows as a *lighter* (ghost-like) tint of the hue.
+ *  `off` (disabled window, e.g. Extra usage) renders a neutral bar, not a
+ *  colored/"depleted" one. */
 export function classicQuotaBar(
   title: string,
   remaining: number,
   trailing: string,
   caption: string | null,
   machineShare?: number | null,
+  off?: boolean,
 ): string {
+  if (off) {
+    return barHTML(title, 0, "transparent", trailing, caption, "rgba(0,0,0,0.14)");
+  }
   const base = rampColor(remaining);
-  const track = css(desat(base, 0.6, 0.9)); // used-up: same hue, low saturation
+  const track = css(desat(base, 0.6, 0.9)); // used by others: same hue, low saturation
   const ghost =
     machineShare != null
-      ? { left: remaining, width: machineShare, color: css(desat(base, 0.3, 0.96)) }
+      ? { left: remaining, width: machineShare, color: css(mix(base, WHITE, 0.5)) } // mine: lighter, ghostly
       : undefined;
   return barHTML(title, remaining, base, trailing, caption, track, ghost);
 }

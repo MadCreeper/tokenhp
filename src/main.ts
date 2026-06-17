@@ -234,6 +234,7 @@ function render(): void {
       ${headerHTML()}
       ${sourceSegHTML()}
       ${subSegHTML()}
+      ${detailToggleHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
     </main>`;
@@ -293,17 +294,10 @@ function headerHTML(): string {
           ? "Codex Quota"
           : "Claude Quota"
         : "Token Usage";
-  // "detail" reveals the per-window device-share text + the account email/plan.
-  // Live view only (those are live-quota details).
-  const detail =
-    state.source === "live"
-      ? `<button class="mc-btn detail-btn ${state.showDetail ? "on" : ""}" data-action="detail" title="Show this-machine share + account">detail</button>`
-      : "";
   return `
     <header class="header">
       <span class="title">${escapeHTML(title)}</span>
       ${state.loading ? `<span class="spinner">…</span>` : ""}
-      ${detail}
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings" title="Team settings">⚙</button>
       <button class="mc-btn icon" data-action="refresh" title="Refresh">⟳</button>
@@ -357,6 +351,13 @@ function sourceSegHTML(): string {
     </div>`;
 }
 
+// "detail" toggle — a small right-aligned underlined link under the segs (live
+// view only). Reveals the per-window device-share text + the account email/plan.
+function detailToggleHTML(): string {
+  if (state.source !== "live") return "";
+  return `<div class="detail-row"><button class="detail-link ${state.showDetail ? "on" : ""}" data-action="detail" title="Show this-machine share + account">detail</button></div>`;
+}
+
 function contentHTML(): string {
   if (state.source === "team")
     return teamContentHTML({
@@ -390,7 +391,7 @@ function liveBarHTML(w: UsageWindow): string {
   let bar: string;
   switch (getTheme()) {
     case "classic":
-      bar = classicQuotaBar(w.title, w.remaining, trailing, caption, split);
+      bar = classicQuotaBar(w.title, w.remaining, trailing, caption, split, w.trailing === "Off");
       break;
     case "arknights":
       bar = akResource(w.title, w.remaining, caption, w.trailing, split);
