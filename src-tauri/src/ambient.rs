@@ -96,16 +96,49 @@ fn pct(remaining: f64) -> i64 {
 
 // --- persisted settings (just the alert toggle, for now) --------------------
 
+fn default_alerts() -> bool {
+    true
+}
+fn default_theme() -> String {
+    "minecraft".into()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AmbientSettings {
     /// Whether low/critical quota notifications fire. Toggle in the tray menu.
+    #[serde(default = "default_alerts")]
     pub alerts_enabled: bool,
+    /// Tray-heart theme id, mirrored from the popover (`src/theme.ts`). `#[serde
+    /// (default)]` so configs written before this field still load.
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 impl Default for AmbientSettings {
     fn default() -> Self {
         Self {
-            alerts_enabled: true,
+            alerts_enabled: default_alerts(),
+            theme: default_theme(),
+        }
+    }
+}
+
+/// Last painted HP + tooltip, so a theme switch can repaint the tray instantly
+/// from the new palette without waiting for (or forcing) a fresh network poll.
+#[derive(Default)]
+pub struct TrayState(pub std::sync::Mutex<Option<(f64, String)>>);
+
+/// Persist the chosen tray theme and repaint the heart now with the last-known
+/// HP (no network — the next poll refreshes the level). Frontend calls this when
+/// the user switches theme.
+pub fn set_theme_and_repaint(app: &AppHandle, theme: String) {
+    let mut s = load_settings(app);
+    s.theme = theme.clone();
+    save_settings(app, &s);
+    if let Some(st) = app.try_state::<TrayState>() {
+        let snap = st.0.lock().unwrap().clone();
+        if let Some((remaining, tip)) = snap {
+            paint(app, remaining, &tip, heart_icon::TrayTheme::from_id(&theme));
         }
     }
 }
@@ -237,11 +270,15 @@ pub fn spawn(app: AppHandle) {
         tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
         // Dev hook: `HPBAR_TRAY_DEMO=<0..1>` paints the heart at a fixed level and
         // skips polling, so the tray rendering can be eyeballed without live creds.
+        // `HPBAR_TRAY_THEME=minecraft|classic|arknights` overrides the theme.
         if let Some(r) = std::env::var("HPBAR_TRAY_DEMO")
             .ok()
             .and_then(|s| s.parse::<f64>().ok())
         {
-            paint(&app, r, &format!("HPBar demo · {}%", pct(r)));
+            let theme = std::env::var("HPBAR_TRAY_THEME")
+                .map(|t| heart_icon::TrayTheme::from_id(&t))
+                .unwrap_or_else(|_| current_theme(&app));
+            paint(&app, r, &format!("HPBar demo · {}%", pct(r)), theme);
             return;
         }
         // Per-window last-notified severity, so each depletion alerts once (and
@@ -265,11 +302,21 @@ async fn fetch(app: &AppHandle) -> Result<UsageReport, ()> {
     usage::fetch(cache.inner()).await.map_err(|_| ())
 }
 
-/// Redraw the tray icon + tooltip from the report.
+/// Redraw the tray icon + tooltip from the report, and stash the HP + tooltip so
+/// a later theme switch can repaint instantly.
 fn apply(app: &AppHandle, report: &UsageReport) {
     if let Some(remaining) = min_remaining(report) {
-        paint(app, remaining, &tooltip(report));
+        let tip = tooltip(report);
+        if let Some(st) = app.try_state::<TrayState>() {
+            *st.0.lock().unwrap() = Some((remaining, tip.clone()));
+        }
+        paint(app, remaining, &tip, current_theme(app));
     }
+}
+
+/// The tray theme from persisted settings.
+fn current_theme(app: &AppHandle) -> heart_icon::TrayTheme {
+    heart_icon::TrayTheme::from_id(&load_settings(app).theme)
 }
 
 /// Paint the tray heart at `remaining` (0..1) with `tooltip` hover text.
@@ -277,8 +324,8 @@ fn apply(app: &AppHandle, report: &UsageReport) {
 /// Updates run on the main thread — tray back-ends (macOS `NSStatusItem`, the
 /// Windows message pump, GTK on Linux) are all main-thread-only — so we marshal
 /// once and batch the updates there.
-fn paint(app: &AppHandle, remaining: f64, tooltip: &str) {
-    let (rgba, w, h) = heart_icon::render_rgba(remaining, SCALE);
+fn paint(app: &AppHandle, remaining: f64, tooltip: &str, theme: heart_icon::TrayTheme) {
+    let (rgba, w, h) = heart_icon::render_rgba(remaining, SCALE, theme);
     // Annunciator: when low, show the exact "NN%" as a tray *title* — menu-bar
     // text the OS keeps legible on any wallpaper, which the icon hue can't (macOS
     // menu-bar vibrancy can wash the colour out entirely). macOS-only on purpose:

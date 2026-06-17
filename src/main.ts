@@ -570,6 +570,7 @@ app.addEventListener("click", (e) => {
       break;
     case "theme":
       cycleTheme();
+      syncTrayTheme(); // recolor the menu-bar heart to match
       render();
       break;
     case "source":
@@ -712,11 +713,19 @@ async function loadTeamConfig(): Promise<void> {
   }
 }
 
+// Push the current theme to the backend so the tray heart matches the popover
+// (localStorage is the source of truth; the backend persists its own copy).
+function syncTrayTheme(): void {
+  if (MOCK) return;
+  void invoke("set_tray_theme", { theme: getTheme() }).catch(() => {});
+}
+
 installStoneTexture();
 applyTheme();
 render();
 void refresh();
 void loadTeamConfig();
+syncTrayTheme();
 
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).

@@ -45,14 +45,58 @@ fn darken(c: Rgb, f: f64) -> Rgb {
     (m(c.0), m(c.1), m(c.2))
 }
 
-/// Health-ramp tint for the heart, by remaining fraction: green → amber → orange
-/// → red (matching the app's "Classic" HP theme). The *drained* pixels are dark
-/// versions of the same hue (the Minecraft empty-heart look), so the fill level
-/// reads from **luminance** — a bright-vs-dark contrast that survives the menu
-/// bar's vibrancy, which can wash the *hue* out entirely (a red can render as a
-/// muddy blue over a blue wallpaper). Colour is then a bonus where it survives;
-/// the precise level falls back to the tray title (see `ambient`) when low.
-pub fn zone_style(remaining: f64) -> HeartStyle {
+/// Which visual theme the tray heart is drawn in — mirrors the popover's
+/// `Theme` (see `src/theme.ts`); the frontend syncs the choice to the backend.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrayTheme {
+    Minecraft,
+    Classic,
+    Arknights,
+}
+
+impl TrayTheme {
+    /// Parse the localStorage theme id; unknown / default → Minecraft (the app's
+    /// default theme).
+    pub fn from_id(s: &str) -> Self {
+        match s {
+            "classic" => TrayTheme::Classic,
+            "arknights" => TrayTheme::Arknights,
+            _ => TrayTheme::Minecraft,
+        }
+    }
+}
+
+/// The heart's colours for a remaining fraction, per theme.
+///
+/// In every theme the *drained* pixels are dark versions of the lit hue, so the
+/// fill level reads from **luminance** — a bright-vs-dark contrast that survives
+/// the menu bar's vibrancy, which can wash the *hue* out entirely (a red can
+/// render as a muddy blue over a blue wallpaper). Only **Classic** also ramps the
+/// hue green → red with danger (its whole identity); **Minecraft** stays its
+/// iconic red and **Arknights** its 理智 azure — for those, danger reads from how
+/// drained the heart is plus the tray-title `%` (see `ambient`).
+pub fn zone_style(remaining: f64, theme: TrayTheme) -> HeartStyle {
+    match theme {
+        TrayTheme::Classic => classic_style(remaining),
+        TrayTheme::Minecraft => fixed_hue_style(
+            (0xe0, 0x1c, 0x1c), // body — matches src/hearts.ts BODY_FULL
+            (0xff, 0xf2, 0xf2), // sparkle — SPARKLE_FULL
+            (0x7a, 0x0f, 0x0f), // outline
+            (0x45, 0x29, 0x29), // empty body — BODY_EMPTY (the in-app drained heart)
+            (0x57, 0x38, 0x38), // empty sparkle — SPARKLE_EMPTY
+        ),
+        TrayTheme::Arknights => fixed_hue_style(
+            (0x3c, 0xc6, 0xf0), // body — 理智 azure
+            (0xd6, 0xf6, 0xff), // sparkle
+            (0x10, 0x5a, 0x80), // outline
+            (0x15, 0x39, 0x4d), // empty body — dark navy
+            (0x22, 0x55, 0x6e), // empty sparkle
+        ),
+    }
+}
+
+/// Classic theme: green → amber → orange → red HP ramp, dark drained pixels.
+fn classic_style(remaining: f64) -> HeartStyle {
     let (body, sparkle, outline) = if remaining <= 0.10 {
         ((0xff, 0x2a, 0x22), (0xff, 0xc4, 0xc0), (0x7a, 0x0c, 0x08)) // critical · red
     } else if remaining <= 0.25 {
@@ -68,6 +112,25 @@ pub fn zone_style(remaining: f64) -> HeartStyle {
         full_outline: outline,
         empty_body: darken(body, 0.30),
         empty_sparkle: darken(sparkle, 0.26),
+        empty_outline: darken(outline, 0.6),
+    }
+}
+
+/// A theme whose hue is fixed (Minecraft red, Arknights azure): the lit heart is
+/// always the same colour and only the fill level moves.
+fn fixed_hue_style(
+    body: Rgb,
+    sparkle: Rgb,
+    outline: Rgb,
+    empty_body: Rgb,
+    empty_sparkle: Rgb,
+) -> HeartStyle {
+    HeartStyle {
+        full_body: body,
+        full_sparkle: sparkle,
+        full_outline: outline,
+        empty_body,
+        empty_sparkle,
         empty_outline: darken(outline, 0.6),
     }
 }
@@ -115,9 +178,9 @@ pub fn render_rgba_styled(remaining: f64, scale: u32, style: &HeartStyle) -> (Ve
     (rgba, w, h)
 }
 
-/// Render with the default health-ramp zone style for `remaining`.
-pub fn render_rgba(remaining: f64, scale: u32) -> (Vec<u8>, u32, u32) {
-    render_rgba_styled(remaining, scale, &zone_style(remaining))
+/// Render the heart at `remaining` in `theme`'s palette.
+pub fn render_rgba(remaining: f64, scale: u32, theme: TrayTheme) -> (Vec<u8>, u32, u32) {
+    render_rgba_styled(remaining, scale, &zone_style(remaining, theme))
 }
 
 /// A uniform muted blue-grey heart for the "no data yet" / signed-out state. Used
@@ -148,12 +211,40 @@ mod tests {
 
     #[test]
     fn dimensions_and_alpha() {
-        let (rgba, w, h) = render_rgba(0.5, 6);
+        let (rgba, w, h) = render_rgba(0.5, 6, TrayTheme::Classic);
         assert_eq!(w, 42);
         assert_eq!(h, 42);
         assert_eq!(rgba.len(), (42 * 42 * 4) as usize);
         // The very top-left cell (code 0) must be transparent.
         assert_eq!(rgba[3], 0);
+    }
+
+    #[test]
+    fn themes_differ_when_healthy() {
+        // A healthy heart is green in Classic but red in Minecraft and azure in
+        // Arknights — the body pixel must differ.
+        let body = |theme| {
+            let (rgba, _, _) = render_rgba(0.9, 6, theme);
+            // Sample a guaranteed body pixel: centre of the grid (cell 3,2 = body).
+            let (w, scale) = (42u32, 6u32);
+            let (x, y) = (3 * scale + 2, 2 * scale + 2);
+            let i = ((y * w + x) * 4) as usize;
+            (rgba[i], rgba[i + 1], rgba[i + 2])
+        };
+        let mc = body(TrayTheme::Minecraft);
+        let classic = body(TrayTheme::Classic);
+        let ak = body(TrayTheme::Arknights);
+        assert!(mc != classic && classic != ak && mc != ak, "themes should differ: {mc:?} {classic:?} {ak:?}");
+        assert!(classic.1 > classic.0 && classic.1 > classic.2, "classic healthy should be green-dominant");
+        assert!(ak.2 > ak.0, "arknights should be blue-dominant");
+    }
+
+    #[test]
+    fn from_id_maps_themes() {
+        assert_eq!(TrayTheme::from_id("classic"), TrayTheme::Classic);
+        assert_eq!(TrayTheme::from_id("arknights"), TrayTheme::Arknights);
+        assert_eq!(TrayTheme::from_id("minecraft"), TrayTheme::Minecraft);
+        assert_eq!(TrayTheme::from_id("garbage"), TrayTheme::Minecraft);
     }
 
     #[test]
@@ -181,8 +272,8 @@ mod tests {
 
     #[test]
     fn empty_heart_still_has_silhouette() {
-        // At 0% the heart must still be drawn (grey), so the icon stays findable.
-        let (rgba, w, h) = render_rgba(0.0, 6);
+        // At 0% the heart must still be drawn, so the icon stays findable.
+        let (rgba, w, h) = render_rgba(0.0, 6, TrayTheme::Classic);
         let opaque = (0..(w * h)).filter(|i| rgba[(*i * 4 + 3) as usize] == 0xff).count();
         assert!(opaque > 200, "drained heart should still render a visible silhouette");
     }

@@ -71,6 +71,13 @@ async fn fetch_codex_quota() -> Result<usage::UsageReport, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Mirror the popover's theme onto the tray heart, repainting it now. Called by
+/// the frontend on startup and whenever the user cycles the theme.
+#[tauri::command]
+fn set_tray_theme(app: tauri::AppHandle, theme: String) {
+    ambient::set_theme_and_repaint(&app, theme);
+}
+
 // --- Team sharing (opt-in) ---------------------------------------------------
 
 /// Current team-sharing config (defaults, with `enabled=false`, when unset). The
@@ -147,12 +154,14 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .manage(CredentialCache::new())
+        .manage(ambient::TrayState::default())
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             fetch_local,
             fetch_codex_quota,
             fetch_account,
             fetch_codex_account,
+            set_tray_theme,
             get_team_config,
             set_team_config,
             test_team_connection,

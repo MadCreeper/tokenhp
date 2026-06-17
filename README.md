@@ -41,7 +41,7 @@ Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 ## ✨ Features
 
 - **Lives in the menu bar / tray.** A ♥ icon; click for the popover, right-click for the menu. No window, no Dock icon.
-- **A living menu-bar heart** — the tray ♥ *is* the gauge: it drains and shifts green → amber → red with your most-depleted live window, so you read your HP at a glance without clicking. When you're low it also shows the exact `%` beside it (macOS), which stays legible on any wallpaper.
+- **A living menu-bar heart** — the tray ♥ *is* the gauge: it drains with your most-depleted live window, **in whichever theme you've picked** (Minecraft red · Classic's green→amber→red HP ramp · Arknights 理智 azure), so you read your HP at a glance without clicking. When you're low it also shows the exact `%` beside it (macOS), which stays legible on any wallpaper.
 - **Live quota** — your 5-hour, weekly, and extra-usage windows, with reset countdowns.
 - **Burn-rate warning** — when your recent pace would exhaust a window *before* it resets, the bar flags **⚠ hits limit in ~35m**, so a surprise rate-limit doesn't catch you mid-task.
 - **Quota alerts** — an opt-out native notification the first time a window goes low / critical (toggle in the tray menu).
@@ -192,7 +192,7 @@ Three themes complete and verified on macOS; Linux/Windows bundles build in CI. 
 ## ✨ 功能
 
 - **常驻菜单栏 / 托盘**：一个 ♥ 图标，左键点开弹窗，右键打开菜单；没有窗口，也没有 Dock 图标。
-- **会动的菜单栏血条**：托盘上的 ♥ 本身就是血条——它会随你「最吃紧」的实时额度逐格扣血，并按 绿→黄→红 变色，不点开也能一眼看出血量；额度偏低时还会在旁边显示精确的 `%`（macOS），任何壁纸下都清晰可读。
+- **会动的菜单栏血条**：托盘上的 ♥ 本身就是血条——它会随你「最吃紧」的实时额度逐格扣血，并**按你选择的主题着色**（我的世界红 · 经典 绿→黄→红 血条 · 明日方舟 理智蓝），不点开也能一眼看出血量；额度偏低时还会在旁边显示精确的 `%`（macOS），任何壁纸下都清晰可读。
 - **实时额度（Live quota）**：5 小时、每周、额外用量三个窗口，并显示重置倒计时。
 - **耗尽预警（Burn-rate）**：当按你最近的用量速度、某个窗口会在重置**之前**就被用光时，血条会标出 **⚠ 约 35m 后触顶**，免得任务进行到一半被突然限流。
 - **额度提醒（Quota alerts）**：窗口首次进入「偏低 / 临界」时弹一条系统通知（默认开启，托盘菜单可关）。
