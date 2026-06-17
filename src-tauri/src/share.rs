@@ -16,10 +16,13 @@
 //! `pricing.json`) is the bridge; `Q` absorbs the unknown credit↔dollar factor.
 //!
 //! Key trick (the "automatic calibration"): other devices can only *add* to `U`,
-//! so over short intervals `ΔU/Δcost` has a **lower envelope** = the single-device
-//! rate `1/Q`. A recency-weighted low percentile of those slopes finds the floor
-//! without needing to know when you were the only active device. Recency
-//! weighting lets it re-learn `Q` after a limit change or a free reset.
+//! so the cumulative ratio `r = local_cost / U` is always **≤ Q** (others inflate
+//! the denominator). Its **high percentile** = `Q` — captured from the intervals
+//! where this machine was the sole/dominant contributor, with no need to know
+//! when those were. The cumulative ratio is far steadier than per-interval
+//! `ΔU/Δcost` slopes (which divide small, noisy deltas), so it fits from less data
+//! and isn't fooled by this machine's own cost↔U nonlinearity (e.g. cheap cache
+//! tokens). Recency weighting lets `Q` re-learn after a limit change or free reset.
 
 use crate::usage::UsageReport;
 use serde::{Deserialize, Serialize};
@@ -46,11 +49,18 @@ const SHARE_RETAIN_SECS: i64 = 16 * 86_400;
 /// Beyond this age, thin to one sample per `THIN_BUCKET_SECS` to bound file size.
 const RECENT_FULL_SECS: i64 = 2 * 3600;
 const THIN_BUCKET_SECS: i64 = 15 * 60;
-/// Low percentile of `ΔU/Δcost` slopes = the single-device floor (1/Q).
-const FLOOR_PCTILE: f64 = 0.20;
+/// High percentile of the cumulative ratio `local_cost / U` = the window budget
+/// `Q` (the sole-device-dominant samples sit near it; others-active samples below).
+const RATIO_PCTILE: f64 = 0.80;
+/// Ignore samples with utilization below this — `cost/U` is too noisy there.
+const MIN_U_FOR_RATIO: f64 = 0.03;
+/// Need at least this many usable ratio samples to attempt a fit.
+const MIN_RATIO_SAMPLES: usize = 3;
+/// Tolerance for the ratio spread in the confidence score (q80/q50 up to 1+tol → 0).
+const RATIO_TOL: f64 = 0.6;
 /// Effective sample count at which `c_count` saturates.
 const CONF_TARGET_N: f64 = 8.0;
-/// Weight multiplier for intervals the user marked sole-device (calibration).
+/// Weight multiplier for samples the user marked sole-device (calibration).
 const CALIB_BOOST: f64 = 4.0;
 
 // ---- window descriptors -----------------------------------------------------
@@ -71,16 +81,6 @@ pub fn window_secs_for_title(title: &str) -> i64 {
     }
 }
 
-/// Minimum cost increment for an interval to count toward the fit — filters out
-/// quantization-noise-dominated tiny intervals. Scales with the window.
-fn min_dc_for_title(title: &str) -> f64 {
-    match window_secs_for_title(title) {
-        s if s <= 6 * 3600 => 0.02,
-        s if s <= 7 * 86_400 => 0.10,
-        _ => 0.25,
-    }
-}
-
 // ---- the estimator (pure, unit-tested) --------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -92,93 +92,55 @@ pub struct ShareResult {
 }
 
 /// Estimate this machine's share of a window from its recorded series + the live
-/// utilization `live_u`. `cycle_secs` = window length (recency half-life);
-/// `min_dc` = minimum qualifying cost increment. Returns `None` when there's no
-/// usable data at all.
+/// utilization `live_u`. `cycle_secs` = window length (recency half-life).
+/// Returns `None` when there's no usable data at all.
 pub fn estimate(
     samples: &[ShareSample],
     now: i64,
     live_u: f64,
     cycle_secs: i64,
-    min_dc: f64,
 ) -> Option<ShareResult> {
     let current_c = samples.last()?.local_cost;
 
-    // Auto-detect utilization resolution = smallest positive within-segment ΔU.
-    let mut min_pos_du = f64::INFINITY;
-    for w in samples.windows(2) {
-        let du = w[1].u - w[0].u;
-        if du > 1e-9 {
-            min_pos_du = min_pos_du.min(du);
-        }
-    }
-    let resolution = if min_pos_du.is_finite() {
-        min_pos_du.clamp(0.002, 0.02)
-    } else {
-        0.01
-    };
-    let min_du = 2.0 * resolution;
-
-    // Build coalesced, recency-weighted slopes ΔU/Δcost (the lower-envelope set).
-    let mut slopes: Vec<(f64, f64)> = Vec::new(); // (slope, weight)
-    let mut latest_slope_ts = i64::MIN;
-    let (mut acc_du, mut acc_dc) = (0.0_f64, 0.0_f64);
-    let mut acc_calib = true; // all coalesced pairs were sole-device calibrated?
-    for w in samples.windows(2) {
-        let du = w[1].u - w[0].u;
-        let dc = w[1].local_cost - w[0].local_cost;
-        // A drop in either signals a reset (scheduled or free): discard the
-        // partial accumulator and don't form a slope across the boundary.
-        if du < -1e-9 || dc < -1e-9 {
-            acc_du = 0.0;
-            acc_dc = 0.0;
-            acc_calib = true;
+    // Cumulative implied-budget ratios r = local_cost / U. Each is ≤ the true Q
+    // (other devices inflate U); the high percentile = the sole-device-dominant
+    // budget. Recency-weighted, and calibrated (asserted sole-device) samples
+    // weighted up since they're trusted to sit at Q.
+    let mut ratios: Vec<(f64, f64)> = Vec::new(); // (r, weight)
+    for s in samples {
+        if s.u < MIN_U_FOR_RATIO || s.local_cost <= 0.0 {
             continue;
         }
-        acc_du += du;
-        acc_dc += dc;
-        acc_calib = acc_calib && w[0].calibrated && w[1].calibrated;
-        if acc_du >= min_du && acc_dc >= min_dc {
-            let slope = acc_du / acc_dc;
-            let ts = w[1].ts;
-            let recency = 0.5_f64.powf((now - ts) as f64 / cycle_secs as f64);
-            let quant = (acc_du / (4.0 * resolution)).clamp(0.0, 1.0);
-            // Trust calibrated (asserted sole-device) intervals as the floor.
-            let calib = if acc_calib { CALIB_BOOST } else { 1.0 };
-            let weight = recency * quant * calib;
-            if weight > 0.0 && slope.is_finite() && slope > 0.0 {
-                slopes.push((slope, weight));
-                latest_slope_ts = latest_slope_ts.max(ts);
-            }
-            acc_du = 0.0;
-            acc_dc = 0.0;
-            acc_calib = true;
-        }
+        let r = s.local_cost / s.u;
+        let recency = 0.5_f64.powf((now - s.ts) as f64 / cycle_secs as f64);
+        let calib = if s.calibrated { CALIB_BOOST } else { 1.0 };
+        ratios.push((r, recency * calib));
     }
 
-    // Estimate Q from the slope floor; else cold-start prior (assume sole device).
     let mut q = f64::NAN;
     let mut confidence = 0.0;
-    if let Some(floor) = weighted_percentile(&slopes, FLOOR_PCTILE) {
-        if floor > 0.0 {
-            q = 1.0 / floor;
-            let n_eff: f64 = slopes.iter().map(|(_, w)| w).sum();
-            let c_count = (n_eff / CONF_TARGET_N).clamp(0.0, 1.0);
-            // c_fit: how tight is the floor (q20 vs q40)?
-            let q20 = floor;
-            let q40 = weighted_percentile(&slopes, 0.40).unwrap_or(q20);
-            let c_fit = if q20 > 0.0 {
-                (1.0 - (q40 / q20 - 1.0) / 0.5).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let c_rec = 0.5_f64.powf((now - latest_slope_ts) as f64 / cycle_secs as f64);
-            confidence = (c_count * c_fit * c_rec).clamp(0.0, 1.0);
+    if ratios.len() >= MIN_RATIO_SAMPLES {
+        if let Some(qq) = weighted_percentile(&ratios, RATIO_PCTILE) {
+            if qq > 0.0 {
+                q = qq;
+                let n_eff: f64 = ratios.iter().map(|(_, w)| w).sum();
+                let c_count = (n_eff / CONF_TARGET_N).clamp(0.0, 1.0);
+                // Tightness: a steady ratio (q80 ≈ q50) means Q is well-determined.
+                let q50 = weighted_percentile(&ratios, 0.50).unwrap_or(qq);
+                let c_tight = if q50 > 0.0 {
+                    (1.0 - (qq / q50 - 1.0) / RATIO_TOL).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let latest = samples.last().map(|s| s.ts).unwrap_or(now);
+                let c_rec = 0.5_f64.powf((now - latest) as f64 / cycle_secs as f64);
+                confidence = (c_count * c_tight * c_rec).clamp(0.0, 1.0);
+            }
         }
     }
     if !(q.is_finite() && q > 0.0) {
-        // Cold start: no usable slopes yet. Assume sole device (Q = C/U) but keep
-        // confidence low so the UI stays hidden until real intervals accumulate.
+        // Cold start: too little data. Assume sole device (Q = C/U) but keep
+        // confidence low so the UI stays hidden until samples accumulate.
         if live_u > 0.01 && current_c > 0.0 {
             q = current_c / live_u;
             confidence = 0.15;
@@ -345,8 +307,7 @@ pub fn annotate(app: &AppHandle, provider: &str, report: &mut UsageReport) {
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         let cycle = window_secs_for_title(&w.title);
-        let min_dc = min_dc_for_title(&w.title);
-        if let Some(r) = estimate(series, now, w.utilization, cycle, min_dc) {
+        if let Some(r) = estimate(series, now, w.utilization, cycle) {
             w.machine_share = Some(r.this_machine);
             w.others_share = Some(r.others);
             w.share_confidence = Some(r.confidence);
@@ -408,7 +369,7 @@ mod tests {
         let now = 1_000_000;
         // cost and U rise together: Q = $100 (each $10 → 0.10 of the window).
         let s = series(now, &[(10.0, 0.10); 5]);
-        let r = estimate(&s, now, 0.50, 18_000, 0.02).unwrap();
+        let r = estimate(&s, now, 0.50, 18_000).unwrap();
         assert!((r.this_machine - 0.50).abs() < 0.02, "this={}", r.this_machine);
         assert!(r.others < 0.02, "others={}", r.others);
         assert!((r.q - 100.0).abs() < 5.0, "q={}", r.q);
@@ -432,7 +393,7 @@ mod tests {
             ],
         );
         // cumulative cost = 60, cumulative U = 0.50.
-        let r = estimate(&s, now, 0.50, 18_000, 0.02).unwrap();
+        let r = estimate(&s, now, 0.50, 18_000).unwrap();
         assert!(r.others > 0.10, "others={}", r.others);
         assert!(r.this_machine < r.others + 0.25 && r.this_machine < 0.50);
         assert!((r.q - 200.0).abs() < 40.0, "q={}", r.q);
@@ -444,7 +405,7 @@ mod tests {
         // U barely moves, cost barely moves → no qualifying slopes → cold-start
         // (hidden) at best.
         let s = series(now, &[(0.001, 0.0001); 4]);
-        let r = estimate(&s, now, 0.001, 18_000, 0.02);
+        let r = estimate(&s, now, 0.001, 18_000);
         assert!(r.map_or(true, |r| r.confidence < 0.35));
     }
 
@@ -452,8 +413,8 @@ mod tests {
     fn calibration_boosts_confidence_for_sole_device() {
         let now = 1_000_000;
         let incs = [(10.0, 0.10); 3]; // short sole-device run, Q≈100
-        let plain = estimate(&series_calib(now, &incs, false), now, 0.30, 18_000, 0.02).unwrap();
-        let calib = estimate(&series_calib(now, &incs, true), now, 0.30, 18_000, 0.02).unwrap();
+        let plain = estimate(&series_calib(now, &incs, false), now, 0.30, 18_000).unwrap();
+        let calib = estimate(&series_calib(now, &incs, true), now, 0.30, 18_000).unwrap();
         assert!((calib.this_machine - 0.30).abs() < 0.02);
         assert!(
             calib.confidence > plain.confidence,
@@ -471,7 +432,7 @@ mod tests {
         // cycle 2 after a reset
         let c2 = series(now, &[(10.0, 0.10); 3]);
         s.extend(c2);
-        let r = estimate(&s, now, 0.30, 18_000, 0.02).unwrap();
+        let r = estimate(&s, now, 0.30, 18_000).unwrap();
         // Still a clean Q≈100 fit; no panic / no negative attribution.
         assert!(r.this_machine >= 0.0 && r.others >= 0.0);
         assert!((r.q - 100.0).abs() < 10.0, "q={}", r.q);

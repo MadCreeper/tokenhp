@@ -413,7 +413,12 @@ function shareSublabelHTML(w: UsageWindow): string {
   const m = w.machine_share;
   const o = w.others_share;
   const conf = w.share_confidence;
-  if (m == null || o == null || conf == null || conf < SHARE_MIN_CONF) return "";
+  if (m == null || o == null || conf == null) return ""; // no estimate at all yet
+  // We have an estimate but it's not confident enough to commit to numbers —
+  // tell the user it's working and accumulating, rather than showing nothing.
+  if (conf < SHARE_MIN_CONF) {
+    return `<div class="share-sub faint">Device split · estimating…</div>`;
+  }
   const pct = (x: number) => Math.round(x * 100);
   const budget =
     w.window_budget != null && w.window_budget > 0

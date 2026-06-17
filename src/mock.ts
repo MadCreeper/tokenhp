@@ -11,7 +11,7 @@ export function mockLive(): UsageReport {
     source_label: "Live quota",
     windows: [
       { title: "5-Hour", utilization: 0.51, remaining: 0.49, resets_at: iso((2 * 3600 + 45 * 60) * 1000), trailing: null, eta_secs: 35 * 60, machine_share: 0.34, others_share: 0.17, share_confidence: 0.82, window_budget: 42 },
-      { title: "Weekly", utilization: 0.43, remaining: 0.57, resets_at: iso(26 * 3600 * 1000), trailing: null, eta_secs: null, machine_share: 0.30, others_share: 0.13, share_confidence: 0.5, window_budget: 380 },
+      { title: "Weekly", utilization: 0.43, remaining: 0.57, resets_at: iso(26 * 3600 * 1000), trailing: null, eta_secs: null, machine_share: 0.30, others_share: 0.13, share_confidence: 0.25, window_budget: 380 },
       { title: "Extra usage", utilization: 1, remaining: 0, resets_at: null, trailing: "Off", eta_secs: null, machine_share: null, others_share: null, share_confidence: null, window_budget: null },
     ],
   };
