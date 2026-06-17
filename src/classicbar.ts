@@ -32,21 +32,36 @@ export function rampColor(value: number): [number, number, number] {
   return v >= 0.5 ? mix(YELLOW, GREEN, (v - 0.5) / 0.5) : mix(RED, YELLOW, v / 0.5);
 }
 
+/** Same hue, lower saturation (mix toward its own grayscale), optionally dimmed —
+ *  for the "used up" track/ghost so it harmonizes with the colorful fill instead
+ *  of clashing as flat gray. */
+function desat(
+  [r, g, b]: [number, number, number],
+  amount: number,
+  dim = 1,
+): [number, number, number] {
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  const m = (c: number) => (c + (lum - c) * amount) * dim;
+  return [m(r), m(g), m(b)];
+}
+
 function barHTML(
   title: string,
   fillFrac: number,
   fillColor: [number, number, number] | string,
   trailing: string,
   caption: string | null,
-  ghost?: { left: number; width: number },
+  trackColor?: string,
+  ghost?: { left: number; width: number; color?: string },
 ): string {
   const grad =
     typeof fillColor === "string"
       ? fillColor
       : `linear-gradient(to bottom, ${css(fillColor, 0.75)}, ${css(fillColor)})`;
-  // Ghost segment = this machine's share of the *drained* part (others stay track bg).
+  const trackStyle = trackColor ? ` style="background:${trackColor}"` : "";
+  // Ghost segment = this machine's share of the *drained* part (others = track).
   const ghostDiv = ghost
-    ? `<div class="cbar-ghost" style="left:${(clamp01(ghost.left) * 100).toFixed(1)}%;width:${(clamp01(ghost.width) * 100).toFixed(1)}%"></div>`
+    ? `<div class="cbar-ghost" style="left:${(clamp01(ghost.left) * 100).toFixed(1)}%;width:${(clamp01(ghost.width) * 100).toFixed(1)}%${ghost.color ? `;background:${ghost.color}` : ""}"></div>`
     : "";
   return `
     <div class="cbar">
@@ -54,7 +69,7 @@ function barHTML(
         <span class="cbar-title">${escapeHTML(title)}</span>
         <span class="cbar-trailing">${escapeHTML(trailing)}</span>
       </div>
-      <div class="cbar-track">
+      <div class="cbar-track"${trackStyle}>
         <div class="cbar-fill" style="width:${(clamp01(fillFrac) * 100).toFixed(1)}%;background:${grad}"></div>
         ${ghostDiv}
       </div>
@@ -62,9 +77,9 @@ function barHTML(
     </div>`;
 }
 
-/** Quota (drain) bar — fill = remaining, color ramps with it. When
- *  `machineShare` is given, the drained part shows this machine's ghost segment
- *  (from `remaining` to `remaining + machineShare`). */
+/** Quota (drain) bar — fill = remaining, color ramps with it. The "used up"
+ *  track is the same hue at lower saturation (not gray); when `machineShare` is
+ *  given, this machine's drain shows as a mid-saturation ghost segment. */
 export function classicQuotaBar(
   title: string,
   remaining: number,
@@ -72,9 +87,13 @@ export function classicQuotaBar(
   caption: string | null,
   machineShare?: number | null,
 ): string {
+  const base = rampColor(remaining);
+  const track = css(desat(base, 0.6, 0.9)); // used-up: same hue, low saturation
   const ghost =
-    machineShare != null ? { left: remaining, width: machineShare } : undefined;
-  return barHTML(title, remaining, rampColor(remaining), trailing, caption, ghost);
+    machineShare != null
+      ? { left: remaining, width: machineShare, color: css(desat(base, 0.3, 0.96)) }
+      : undefined;
+  return barHTML(title, remaining, base, trailing, caption, track, ghost);
 }
 
 /** Magnitude bar — single accent color; width already encodes the value. */

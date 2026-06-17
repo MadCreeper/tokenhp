@@ -13,12 +13,13 @@ const PATTERN: number[][] = [
   [0, 0, 0, 1, 0, 0, 0],
 ];
 
-// Colors — match MinecraftThemes.swift exactly.
+// Colors. "Full" (remaining) is the bright Minecraft heart; "empty" (used by
+// other devices) is darkened well below it so used-vs-left reads at a glance.
 const OUTLINE = "#000000";
 const BODY_FULL = "#e01c1c";
 const SPARKLE_FULL = "#fff2f2";
-const BODY_EMPTY = "#452929";
-const SPARKLE_EMPTY = "#573838";
+const BODY_EMPTY = "#2e1a1a";
+const SPARKLE_EMPTY = "#3d2424";
 
 // Body pixels live in columns 1..5; map `fill` onto those 5 so a 1-column
 // drain is actually visible (using all 7 made 0.86..1.0 look identical).
@@ -77,10 +78,11 @@ export function heartsRow(value: number): string {
   return out;
 }
 
-// "Your drain" ghost tone — between the bright full heart and the dark empty
-// one, so the drained hearts you caused stand apart from those other devices did.
-const GHOST_BODY = "#9a3030";
-const GHOST_SPARKLE = "#c25a5a";
+// "Your drain" ghost tone — a dark red clearly below the bright full heart
+// (so used reads apart from left), but above the near-black empty (so your drain
+// reads apart from other devices').
+const GHOST_BODY = "#6b2222";
+const GHOST_SPARKLE = "#8a3838";
 
 /** A full heart drawn in an explicit body/sparkle tone (outline unchanged). */
 function tonedHeartSVG(body: string, sparkle: string): string {

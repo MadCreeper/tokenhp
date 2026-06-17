@@ -59,6 +59,7 @@ interface State {
   selectedModelId: string | null;
   dropdownOpen: boolean;
   projectsExpanded: boolean; // Local "Top projects": show all vs the top few
+  showDetail: boolean; // Live: reveal the device-share text + account email/plan
   live: UsageReport | null;
   local: LocalReport | null;
   account: Account | null;
@@ -87,6 +88,7 @@ const state: State = {
   selectedModelId: null,
   dropdownOpen: false,
   projectsExpanded: false,
+  showDetail: false,
   live: null,
   local: null,
   account: null,
@@ -112,6 +114,7 @@ const themeParam = params.get("theme");
 if (isTheme(themeParam)) setThemeOverride(themeParam);
 const sourceParam = params.get("source");
 if (sourceParam === "live" || sourceParam === "local") state.source = sourceParam;
+if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expand detail
 
 // ---------------------------------------------------------------- data
 
@@ -290,10 +293,17 @@ function headerHTML(): string {
           ? "Codex Quota"
           : "Claude Quota"
         : "Token Usage";
+  // "detail" reveals the per-window device-share text + the account email/plan.
+  // Live view only (those are live-quota details).
+  const detail =
+    state.source === "live"
+      ? `<button class="mc-btn detail-btn ${state.showDetail ? "on" : ""}" data-action="detail" title="Show this-machine share + account">detail</button>`
+      : "";
   return `
     <header class="header">
       <span class="title">${escapeHTML(title)}</span>
       ${state.loading ? `<span class="spinner">…</span>` : ""}
+      ${detail}
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings" title="Team settings">⚙</button>
       <button class="mc-btn icon" data-action="refresh" title="Refresh">⟳</button>
@@ -410,6 +420,7 @@ function machineSplit(w: UsageWindow): number | null {
 // correlating account-wide utilization with this machine's local cost (see the
 // Rust `share` module). Hidden until the fit is confident; faded in the mid range.
 function shareSublabelHTML(w: UsageWindow): string {
+  if (!state.showDetail) return ""; // revealed via the "detail" toggle
   const m = w.machine_share;
   const o = w.others_share;
   const conf = w.share_confidence;
@@ -604,9 +615,10 @@ function footerHTML(): string {
         ? (state.live?.source_label ?? "Live quota")
         : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
-  // The footer's middle line: account identity on Live, member count on Team.
+  // The footer's middle line: account identity on Live (revealed via the header
+  // "detail" toggle), member count on Team.
   let midLine = "";
-  if (state.source === "live") {
+  if (state.source === "live" && state.showDetail) {
     // The per-account subscription (Claude login, or the ChatGPT login behind
     // Codex). Hidden on Local, which aggregates models across accounts.
     const acctText = state.account
@@ -685,6 +697,10 @@ app.addEventListener("click", (e) => {
       break;
     case "toggle-projects":
       state.projectsExpanded = !state.projectsExpanded;
+      render();
+      break;
+    case "detail":
+      state.showDetail = !state.showDetail;
       render();
       break;
     case "select-model":

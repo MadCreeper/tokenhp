@@ -139,6 +139,17 @@ body {
   padding: 4px 7px;
   font-size: 13px;
 }
+/* Header "detail" toggle — small text button; dim when off, full when on. */
+.detail-btn {
+  font-size: 9px;
+  padding: 4px 6px;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
+.detail-btn.on {
+  opacity: 1;
+  text-decoration: underline;
+}
 .seg {
   display: flex;
   gap: 6px;
