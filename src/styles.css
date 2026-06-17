@@ -319,6 +319,8 @@ body {
 }
 
 /* --- Local: "Top projects" breakdown (which repo ate my tokens) --- */
+/* Project rows reuse the per-theme magnitude bars (xpBar/classicNeutralBar/akBar)
+   inside an .xp-bars wrapper, so only the section chrome is styled here. */
 .proj-section {
   margin-top: 12px;
   padding-top: 8px;
@@ -331,43 +333,13 @@ body {
   color: var(--panel-text-dim);
   margin-bottom: 6px;
 }
-.proj-row {
-  margin-top: 7px;
-}
-.proj-row:first-of-type {
-  margin-top: 0;
-}
-.proj-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 2px;
-}
-.proj-name {
-  color: var(--panel-text);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.proj-meta {
-  color: var(--panel-text-dim);
+/* "Show all / Show less" toggle — full-width, subtle. */
+.proj-more {
+  width: 100%;
+  margin-top: 8px;
   font-size: 9px;
-  flex: none;
-}
-.proj-track {
-  height: 6px;
-  border-radius: 3px;
-  background: rgba(0, 0, 0, 0.22);
-  overflow: hidden;
-}
-.proj-fill {
-  height: 100%;
-  border-radius: 3px;
-  background: var(--panel-text-dim);
+  letter-spacing: 0.04em;
   opacity: 0.85;
-  transition: width 0.4s ease-out;
 }
 
 /* --- Arknights: 理智 hero plate (Terminal-screen replica) --- */

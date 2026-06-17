@@ -58,6 +58,7 @@ interface State {
   localTool: string; // API axis (Local): "all" or a tool id
   selectedModelId: string | null;
   dropdownOpen: boolean;
+  projectsExpanded: boolean; // Local "Top projects": show all vs the top few
   live: UsageReport | null;
   local: LocalReport | null;
   account: Account | null;
@@ -85,6 +86,7 @@ const state: State = {
   localTool: "all",
   selectedModelId: null,
   dropdownOpen: false,
+  projectsExpanded: false,
   live: null,
   local: null,
   account: null,
@@ -494,31 +496,45 @@ function localHTML(): string {
   );
 }
 
+const PROJECTS_COLLAPSED = 4; // how many projects to show before "Show all"
+
 // "Which repo ate my tokens" — top projects by tokens over the window, pooled
 // across project-aware tools (Claude Code). Shown only in the cross-tool "All"
-// view, where a project breakdown complements the by-model one.
+// view, where a project breakdown complements the by-model one. Each project
+// uses the same per-theme magnitude bar as the model breakdown, so the styling
+// matches the theme. Collapsed to the top few; expandable to the full list.
 function projectsHTML(): string {
   if (state.localTool !== "all") return "";
   const projects = state.local?.projects ?? [];
   if (projects.length === 0) return "";
-  const top = projects.slice(0, 6);
-  const peak = top[0].tokens || 1;
-  const rows = top
+  const peak = projects[0].tokens || 1; // scale all bars to the biggest project
+  const expandable = projects.length > PROJECTS_COLLAPSED;
+  const shown = state.projectsExpanded ? projects : projects.slice(0, PROJECTS_COLLAPSED);
+
+  const bar = themeBar();
+  const rows = shown
     .map((p) => {
-      const frac = clamp01(p.tokens / peak);
       const meta =
         p.cost > 0 ? `${formatTokens(p.tokens)} · ${formatDollars(p.cost)}` : formatTokens(p.tokens);
-      return `
-        <div class="proj-row">
-          <div class="proj-head">
-            <span class="proj-name">${escapeHTML(p.project)}</span>
-            <span class="proj-meta">${escapeHTML(meta)}</span>
-          </div>
-          <div class="proj-track"><div class="proj-fill" style="width:${(frac * 100).toFixed(1)}%"></div></div>
-        </div>`;
+      return bar(p.project, clamp01(p.tokens / peak), meta);
     })
     .join("");
-  return `<div class="proj-section"><div class="proj-title">Top projects</div>${rows}</div>`;
+
+  const toggle = expandable
+    ? `<button class="mc-btn proj-more" data-action="toggle-projects">${
+        state.projectsExpanded ? "Show less ▲" : `Show all ${projects.length} ▼`
+      }</button>`
+    : "";
+  // Wrap rows in `.xp-bars` so they get the same per-theme spacing as the model
+  // breakdown (its gap applies to .xp / .cbar / .akb alike).
+  return `<div class="proj-section"><div class="proj-title">Top projects</div><div class="xp-bars">${rows}</div>${toggle}</div>`;
+}
+
+// The active theme's magnitude bar (label · trailing + bar), shared by the model
+// breakdown and the project list so both render in the theme's style.
+function themeBar(): (label: string, frac: number, trailing: string) => string {
+  const theme = getTheme();
+  return theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
 }
 
 // Tag a single tool as a flat-rate subscription (cost is an API-rate estimate)
@@ -565,9 +581,7 @@ function xpBarsHTML(m: ModelUsage): string {
     dollars !== undefined
       ? `${formatTokens(tokens)} · ${formatDollars(dollars)}`
       : formatTokens(tokens);
-  const theme = getTheme();
-  const bar =
-    theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
+  const bar = themeBar();
   return `
     <div class="xp-bars">
       ${bar("Input", frac(m.input), trailing(m.input, m.cost?.input))}
@@ -662,6 +676,10 @@ app.addEventListener("click", (e) => {
       break;
     case "toggle-dropdown":
       state.dropdownOpen = !state.dropdownOpen;
+      render();
+      break;
+    case "toggle-projects":
+      state.projectsExpanded = !state.projectsExpanded;
       render();
       break;
     case "select-model":

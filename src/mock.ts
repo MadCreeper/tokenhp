@@ -30,8 +30,10 @@ export const MOCK_LOCAL: LocalReport = {
   combined: [MOCK_OPUS, MOCK_HAIKU, MOCK_GPT],
   projects: [
     { project: "hp_bar", tokens: 112_400_000, cost: 138.20 },
-    { project: "api-gateway", tokens: 48_900_000, cost: 61.05 },
-    { project: "infra", tokens: 21_300_000, cost: 14.80 },
-    { project: "scratch", tokens: 5_600_000, cost: 3.55 },
+    { project: "perf_bench_llm_tco", tokens: 48_900_000, cost: 61.05 },
+    { project: "src-tauri", tokens: 21_300_000, cost: 14.80 },
+    { project: "backend", tokens: 5_600_000, cost: 3.55 },
+    { project: "scratch", tokens: 2_600_000, cost: 1.50 },
+    { project: "sunjichen", tokens: 1_400_000, cost: 2.49 },
   ],
 };
