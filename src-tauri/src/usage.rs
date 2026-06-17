@@ -2,10 +2,12 @@
 //! endpoint — the same data Claude Code's `/usage` view shows. Port of the
 //! Swift `OAuthUsageDataSource`.
 //!
-//!     GET https://api.anthropic.com/api/oauth/usage
-//!     Authorization: Bearer <oauth access token>
-//!     anthropic-beta: oauth-2025-04-20
-//!     User-Agent: claude-code/<version>
+//! ```text
+//! GET https://api.anthropic.com/api/oauth/usage
+//! Authorization: Bearer <oauth access token>
+//! anthropic-beta: oauth-2025-04-20
+//! User-Agent: claude-code/<version>
+//! ```
 //!
 //! The `User-Agent` is required; without it the request lands in an
 //! aggressively rate-limited bucket and returns 429s.
@@ -30,6 +32,10 @@ pub struct UsageWindow {
     pub title: String,
     /// Optional trailing badge (e.g. "Off" for disabled extra usage).
     pub trailing: Option<String>,
+    /// Projected seconds until this window hits its limit at the recent burn
+    /// rate, set by `ambient::annotate` only when that lands *before* the reset
+    /// (i.e. a real "you'll run out" warning). `None` otherwise. See `burn`.
+    pub eta_secs: Option<i64>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -139,6 +145,7 @@ impl Window {
             resets_at: self.resets_at,
             title: title.into(),
             trailing: None,
+            eta_secs: None,
         }
     }
 }
@@ -161,6 +168,7 @@ impl Extra {
                 resets_at: None,
                 title: title.into(),
                 trailing: None,
+                eta_secs: None,
             }
         } else {
             UsageWindow {
@@ -169,6 +177,7 @@ impl Extra {
                 resets_at: None,
                 title: title.into(),
                 trailing: Some("Off".into()),
+                eta_secs: None,
             }
         }
     }

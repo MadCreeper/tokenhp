@@ -5,8 +5,11 @@
 //! frontend renders the health bars.
 
 pub mod account;
+pub mod ambient;
+pub mod burn;
 pub mod codexstats;
 pub mod credentials;
+pub mod heart_icon;
 pub mod localstats;
 pub mod openclawstats;
 pub mod pricing;
@@ -28,11 +31,13 @@ use tauri_plugin_autostart::ManagerExt;
 /// human-readable error string (the frontend renders either).
 #[tauri::command]
 async fn fetch_usage(
+    app: tauri::AppHandle,
     cache: tauri::State<'_, CredentialCache>,
 ) -> Result<usage::UsageReport, String> {
-    usage::fetch(cache.inner())
-        .await
-        .map_err(|e| e.to_string())
+    let mut report = usage::fetch(cache.inner()).await.map_err(|e| e.to_string())?;
+    // Add the "you'll run out before reset" projection from recorded history.
+    ambient::annotate(&app, &mut report);
+    Ok(report)
 }
 
 /// Login identity for the footer (email + plan). Best-effort: returns whatever
@@ -140,6 +145,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         .manage(CredentialCache::new())
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
@@ -161,6 +167,9 @@ pub fn run() {
             build_popover(app.handle())?;
             build_tray(app.handle())?;
             spawn_team_uploader();
+            // Ambient HP: keep the menu-bar heart + tooltip live, and alert on
+            // low/critical quota. Runs for the app's lifetime; no-op when signed out.
+            ambient::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -209,6 +218,16 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         launch_enabled,
         None::<&str>,
     )?;
+    // Ambient-HP low/critical quota notifications; persisted, defaults on.
+    let alerts_on = ambient::load_settings(app).alerts_enabled;
+    let alerts = CheckMenuItem::with_id(
+        app,
+        "alerts",
+        "Quota Alerts",
+        true,
+        alerts_on,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit HPBar", true, None::<&str>)?;
     // Linux trays (libappindicator/StatusNotifierItem) don't deliver left-click
     // events, so the only reliable way to open the popover there is a menu item.
@@ -220,17 +239,21 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             &show,
             &PredefinedMenuItem::separator(app)?,
             &autostart,
+            &alerts,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
     )?;
-    // Captured so the toggle handler can reflect the new state in the checkmark.
+    // Captured so the toggle handlers can reflect the new state in the checkmark.
     let autostart_item = autostart.clone();
+    let alerts_item = alerts.clone();
 
-    // tray.png is a monochrome heart; `icon_as_template` lets macOS recolor it
-    // to match the menu bar (light/dark) automatically.
-    let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))
-        .expect("bundled tray.png must be a valid PNG");
+    // The tray heart is now a *live colour gauge* driven by `ambient`, so it must
+    // not be a macOS template (template mode renders alpha-only, discarding our
+    // colours). Start with a neutral blue-grey heart — visible on light *and* dark
+    // bars — which the first quota poll recolours to your remaining HP.
+    let (rgba, w, h) = heart_icon::render_neutral(6);
+    let icon = Image::new_owned(rgba, w, h);
 
     // On Linux the tray never reports clicks, so the menu must be reachable by
     // *left* click — that's where users will find "Show HPBar". On macOS/Windows
@@ -243,7 +266,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("main")
         .icon(icon)
-        .icon_as_template(true)
+        .icon_as_template(false)
         .tooltip("HPBar")
         .menu(&menu)
         .show_menu_on_left_click(show_menu_on_left_click)
@@ -259,6 +282,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 let enabled = mgr.is_enabled().unwrap_or(false);
                 let _ = if enabled { mgr.disable() } else { mgr.enable() };
                 let _ = autostart_item.set_checked(!enabled);
+            }
+            "alerts" => {
+                let mut s = ambient::load_settings(app);
+                s.alerts_enabled = !s.alerts_enabled;
+                ambient::save_settings(app, &s);
+                let _ = alerts_item.set_checked(s.alerts_enabled);
             }
             _ => {}
         })

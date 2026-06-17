@@ -33,3 +33,13 @@ export function formatDollars(d: number): string {
 export function nowTime(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+
+/** Coarse human duration from seconds: 40 → "<1m", 2100 → "35m", 9000 → "2h 30m". */
+export function formatDuration(secs: number): string {
+  if (secs < 60) return "<1m";
+  const m = Math.round(secs / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem ? `${h}h ${rem}m` : `${h}h`;
+}

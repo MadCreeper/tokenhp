@@ -10,9 +10,9 @@ export function mockLive(): UsageReport {
   return {
     source_label: "Live quota",
     windows: [
-      { title: "5-Hour", utilization: 0.51, remaining: 0.49, resets_at: iso((2 * 3600 + 45 * 60) * 1000), trailing: null },
-      { title: "Weekly", utilization: 0.43, remaining: 0.57, resets_at: iso(26 * 3600 * 1000), trailing: null },
-      { title: "Extra usage", utilization: 1, remaining: 0, resets_at: null, trailing: "Off" },
+      { title: "5-Hour", utilization: 0.51, remaining: 0.49, resets_at: iso((2 * 3600 + 45 * 60) * 1000), trailing: null, eta_secs: 35 * 60 },
+      { title: "Weekly", utilization: 0.43, remaining: 0.57, resets_at: iso(26 * 3600 * 1000), trailing: null, eta_secs: null },
+      { title: "Extra usage", utilization: 1, remaining: 0, resets_at: null, trailing: "Off", eta_secs: null },
     ],
   };
 }

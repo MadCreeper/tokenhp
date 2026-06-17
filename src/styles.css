@@ -250,6 +250,20 @@ body {
   margin-top: 4px;
 }
 
+/* Live windows are wrapped so the burn-rate warning stays with its bar; this
+   carries the inter-window gap regardless of theme. */
+.live-window + .live-window {
+  margin-top: 12px;
+}
+/* Burn-rate "you'll run out before reset" warning. Amber, attached under its bar. */
+.bar-eta {
+  margin-top: 4px;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #ffb02e;
+}
+
 /* --- Classic bars (HealthBarStyle port) --- */
 .cbar + .cbar {
   margin-top: 12px;

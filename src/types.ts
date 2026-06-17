@@ -5,6 +5,9 @@ export interface UsageWindow {
   resets_at: string | null;
   title: string;
   trailing: string | null;
+  /** Projected seconds until this window hits its limit at the recent burn
+   *  rate — present only when that's *before* the reset (a real warning). */
+  eta_secs: number | null;
 }
 
 export interface UsageReport {

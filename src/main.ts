@@ -15,7 +15,7 @@ import type {
 import { settingsContentHTML, teamContentHTML } from "./team";
 import { heartsRow } from "./hearts";
 import { xpBar } from "./xpbar";
-import { clamp01, escapeHTML, formatDollars, formatTokens, nowTime } from "./util";
+import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
 import { installStoneTexture } from "./texture";
 import { applyTheme, cycleTheme, getTheme, isTheme, setThemeOverride, themeLabel } from "./theme";
 import { classicNeutralBar, classicQuotaBar } from "./classicbar";
@@ -374,14 +374,28 @@ function liveBarHTML(w: UsageWindow): string {
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
   const caption = resetCaption(w.resets_at);
+  let bar: string;
   switch (getTheme()) {
     case "classic":
-      return classicQuotaBar(w.title, w.remaining, trailing, caption);
+      bar = classicQuotaBar(w.title, w.remaining, trailing, caption);
+      break;
     case "arknights":
-      return akResource(w.title, w.remaining, caption, w.trailing);
+      bar = akResource(w.title, w.remaining, caption, w.trailing);
+      break;
     default:
-      return heartBarHTML(w, trailing, caption);
+      bar = heartBarHTML(w, trailing, caption);
   }
+  // Wrap so the optional warning line stays attached to its bar and inter-window
+  // spacing comes from `.live-window` (the `.bar + .bar` selectors would be broken
+  // by an eta line slipped between two bars).
+  return `<div class="live-window">${bar}${etaWarnHTML(w.eta_secs)}</div>`;
+}
+
+// The burn-rate projection: shown only when the backend has judged you're on pace
+// to hit this window's limit *before* it resets — an actionable warning, not noise.
+function etaWarnHTML(etaSecs: number | null): string {
+  if (etaSecs == null) return "";
+  return `<div class="bar-eta">⚠ hits limit in ~${escapeHTML(formatDuration(etaSecs))}</div>`;
 }
 
 function heartBarHTML(w: UsageWindow, trailing: string, caption: string | null): string {
