@@ -6,8 +6,10 @@
 //! local logs only see this machine. There is no device id, so other devices are
 //! *inferred*: for a window with budget `Q` (the dollar-cost that equals 100%),
 //!
-//!     U ≈ (cost_this_machine + cost_other_devices) / Q
-//!     this_machine = cost_this_machine / Q ,   others = U − this_machine
+//! ```text
+//! U ≈ (cost_this_machine + cost_other_devices) / Q
+//! this_machine = cost_this_machine / Q ,   others = U − this_machine
+//! ```
 //!
 //! We estimate the one scalar `Q` per (provider, window). Both Claude and Codex
 //! meter by model-weighted token cost, so local **dollar cost** (priced via
