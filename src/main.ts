@@ -385,10 +385,30 @@ function liveBarHTML(w: UsageWindow): string {
     default:
       bar = heartBarHTML(w, trailing, caption);
   }
-  // Wrap so the optional warning line stays attached to its bar and inter-window
-  // spacing comes from `.live-window` (the `.bar + .bar` selectors would be broken
-  // by an eta line slipped between two bars).
-  return `<div class="live-window">${bar}${etaWarnHTML(w.eta_secs)}</div>`;
+  // Wrap so the optional warning/share lines stay attached to their bar and
+  // inter-window spacing comes from `.live-window` (the `.bar + .bar` selectors
+  // would be broken by a line slipped between two bars).
+  return `<div class="live-window">${bar}${shareSublabelHTML(w)}${etaWarnHTML(w.eta_secs)}</div>`;
+}
+
+// Confidence below this hides the device split entirely (bar renders as before).
+const SHARE_MIN_CONF = 0.35;
+
+// "This machine vs other devices" split for the window — an estimate from
+// correlating account-wide utilization with this machine's local cost (see the
+// Rust `share` module). Hidden until the fit is confident; faded in the mid range.
+function shareSublabelHTML(w: UsageWindow): string {
+  const m = w.machine_share;
+  const o = w.others_share;
+  const conf = w.share_confidence;
+  if (m == null || o == null || conf == null || conf < SHARE_MIN_CONF) return "";
+  const pct = (x: number) => Math.round(x * 100);
+  const budget =
+    w.window_budget != null && w.window_budget > 0
+      ? `≈ ${formatDollars(w.window_budget)} = 100% of this ${escapeHTML(w.title)} window (estimated)`
+      : "estimated device split";
+  const faint = conf < 0.6 ? " faint" : "";
+  return `<div class="share-sub${faint}" title="${escapeHTML(budget)}">This machine ~${pct(m)}% · Others ~${pct(o)}%</div>`;
 }
 
 // The burn-rate projection: shown only when the backend has judged you're on pace

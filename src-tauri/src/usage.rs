@@ -36,6 +36,18 @@ pub struct UsageWindow {
     /// rate, set by `ambient::annotate` only when that lands *before* the reset
     /// (i.e. a real "you'll run out" warning). `None` otherwise. See `burn`.
     pub eta_secs: Option<i64>,
+    /// This machine's estimated share of the window (0..1), set by
+    /// `share::annotate`. `None` until the fit is confident. See `share`.
+    pub machine_share: Option<f64>,
+    /// Other devices' estimated share of the window (0..1) = utilization −
+    /// machine_share. `None` when machine_share is.
+    pub others_share: Option<f64>,
+    /// Fit confidence 0..1 for the share split; the UI hides the split below a
+    /// threshold and hedges ("≈") in the mid range.
+    pub share_confidence: Option<f64>,
+    /// Estimated window budget `Q` in local $ (the cost that ≈ 100% of the
+    /// window). Diagnostic / tooltip only.
+    pub window_budget: Option<f64>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -146,6 +158,10 @@ impl Window {
             title: title.into(),
             trailing: None,
             eta_secs: None,
+            machine_share: None,
+            others_share: None,
+            share_confidence: None,
+            window_budget: None,
         }
     }
 }
@@ -169,6 +185,10 @@ impl Extra {
                 title: title.into(),
                 trailing: None,
                 eta_secs: None,
+                machine_share: None,
+                others_share: None,
+                share_confidence: None,
+                window_budget: None,
             }
         } else {
             UsageWindow {
@@ -178,6 +198,10 @@ impl Extra {
                 title: title.into(),
                 trailing: Some("Off".into()),
                 eta_secs: None,
+                machine_share: None,
+                others_share: None,
+                share_confidence: None,
+                window_budget: None,
             }
         }
     }

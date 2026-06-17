@@ -8,6 +8,14 @@ export interface UsageWindow {
   /** Projected seconds until this window hits its limit at the recent burn
    *  rate — present only when that's *before* the reset (a real warning). */
   eta_secs: number | null;
+  /** This machine's estimated share of the window (0..1); null until confident. */
+  machine_share: number | null;
+  /** Other devices' estimated share (0..1) = utilization − machine_share. */
+  others_share: number | null;
+  /** Fit confidence 0..1; UI hides the split below a threshold, hedges in mid. */
+  share_confidence: number | null;
+  /** Estimated window budget Q in local $ (tooltip/diagnostic only). */
+  window_budget: number | null;
 }
 
 export interface UsageReport {

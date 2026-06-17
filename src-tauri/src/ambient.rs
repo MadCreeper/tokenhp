@@ -288,6 +288,15 @@ pub fn spawn(app: AppHandle) {
         loop {
             if let Ok(report) = fetch(&app).await {
                 record_history(&app, &report); // feed the burn-rate projection
+                // Record the device-share series (scans local logs → blocking thread).
+                {
+                    let app2 = app.clone();
+                    let report2 = report.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::share::record(&app2, "claude", &report2)
+                    })
+                    .await;
+                }
                 apply(&app, &report);
                 let alerts_on = load_settings(&app).alerts_enabled;
                 notify_crossings(&app, &report, &mut last, alerts_on);
@@ -400,6 +409,10 @@ mod tests {
             title: title.into(),
             trailing: off.then(|| "Off".into()),
             eta_secs: None,
+            machine_share: None,
+            others_share: None,
+            share_confidence: None,
+            window_budget: None,
         }
     }
     fn report(windows: Vec<UsageWindow>) -> UsageReport {

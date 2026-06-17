@@ -259,6 +259,10 @@ impl Window {
             title: window_title(self.window_minutes),
             trailing: None,
             eta_secs: None,
+            machine_share: None,
+            others_share: None,
+            share_confidence: None,
+            window_budget: None,
         }
     }
 }

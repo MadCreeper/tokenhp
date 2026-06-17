@@ -13,6 +13,7 @@ pub mod heart_icon;
 pub mod localstats;
 pub mod openclawstats;
 pub mod pricing;
+pub mod share;
 pub mod team;
 pub mod tools;
 pub mod usage;
@@ -37,6 +38,8 @@ async fn fetch_usage(
     let mut report = usage::fetch(cache.inner()).await.map_err(|e| e.to_string())?;
     // Add the "you'll run out before reset" projection from recorded history.
     ambient::annotate(&app, &mut report);
+    // Add the this-machine vs other-devices split from the recorded series.
+    share::annotate(&app, "claude", &mut report);
     Ok(report)
 }
 
