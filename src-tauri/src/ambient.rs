@@ -112,6 +112,11 @@ pub struct AmbientSettings {
     /// (default)]` so configs written before this field still load.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// User-asserted "I'm the only active device on this account right now" —
+    /// device-share samples recorded while this is on are trusted as the
+    /// single-device floor by the fit. Toggle in the tray menu; default off.
+    #[serde(default)]
+    pub only_active_device: bool,
 }
 
 impl Default for AmbientSettings {
@@ -119,6 +124,7 @@ impl Default for AmbientSettings {
         Self {
             alerts_enabled: default_alerts(),
             theme: default_theme(),
+            only_active_device: false,
         }
     }
 }

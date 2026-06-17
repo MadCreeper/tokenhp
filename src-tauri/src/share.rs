@@ -31,6 +31,11 @@ pub struct ShareSample {
     pub ts: i64,
     pub u: f64,
     pub local_cost: f64,
+    /// Recorded while the user asserted "I'm the only active device" — these
+    /// intervals are trusted as the single-device floor (weighted up in the fit).
+    /// `#[serde(default)]` so samples written before this field still load.
+    #[serde(default)]
+    pub calibrated: bool,
 }
 
 /// Keep ~16 days so the weekly fit always has a baseline; the file persists
@@ -43,6 +48,8 @@ const THIN_BUCKET_SECS: i64 = 15 * 60;
 const FLOOR_PCTILE: f64 = 0.20;
 /// Effective sample count at which `c_count` saturates.
 const CONF_TARGET_N: f64 = 8.0;
+/// Weight multiplier for intervals the user marked sole-device (calibration).
+const CALIB_BOOST: f64 = 4.0;
 
 // ---- window descriptors -----------------------------------------------------
 
@@ -114,6 +121,7 @@ pub fn estimate(
     let mut slopes: Vec<(f64, f64)> = Vec::new(); // (slope, weight)
     let mut latest_slope_ts = i64::MIN;
     let (mut acc_du, mut acc_dc) = (0.0_f64, 0.0_f64);
+    let mut acc_calib = true; // all coalesced pairs were sole-device calibrated?
     for w in samples.windows(2) {
         let du = w[1].u - w[0].u;
         let dc = w[1].local_cost - w[0].local_cost;
@@ -122,22 +130,27 @@ pub fn estimate(
         if du < -1e-9 || dc < -1e-9 {
             acc_du = 0.0;
             acc_dc = 0.0;
+            acc_calib = true;
             continue;
         }
         acc_du += du;
         acc_dc += dc;
+        acc_calib = acc_calib && w[0].calibrated && w[1].calibrated;
         if acc_du >= min_du && acc_dc >= min_dc {
             let slope = acc_du / acc_dc;
             let ts = w[1].ts;
             let recency = 0.5_f64.powf((now - ts) as f64 / cycle_secs as f64);
             let quant = (acc_du / (4.0 * resolution)).clamp(0.0, 1.0);
-            let weight = recency * quant;
+            // Trust calibrated (asserted sole-device) intervals as the floor.
+            let calib = if acc_calib { CALIB_BOOST } else { 1.0 };
+            let weight = recency * quant * calib;
             if weight > 0.0 && slope.is_finite() && slope > 0.0 {
                 slopes.push((slope, weight));
                 latest_slope_ts = latest_slope_ts.max(ts);
             }
             acc_du = 0.0;
             acc_dc = 0.0;
+            acc_calib = true;
         }
     }
 
@@ -296,6 +309,9 @@ fn local_cost_in_window(provider: &str, resets_at: Option<&str>, title: &str) ->
 pub fn record(app: &AppHandle, provider: &str, report: &UsageReport) {
     let mut hist = load_history(app);
     let now = now_unix();
+    // Are we in a user-asserted "only active device" window? Those samples are
+    // trusted as the single-device floor by the estimator.
+    let calibrated = crate::ambient::load_settings(app).only_active_device;
     for w in &report.windows {
         if w.trailing.as_deref() == Some("Off") || w.resets_at.is_none() {
             continue;
@@ -306,6 +322,7 @@ pub fn record(app: &AppHandle, provider: &str, report: &UsageReport) {
             ts: now,
             u: w.utilization,
             local_cost: cost,
+            calibrated,
         });
         prune_and_thin(v, now);
     }
@@ -343,11 +360,16 @@ mod tests {
     /// Build a series from cumulative increments (Δcost, Δu), 5 min apart, ending
     /// at `now`. Starts at (0,0).
     fn series(now: i64, incs: &[(f64, f64)]) -> Vec<ShareSample> {
+        series_calib(now, incs, false)
+    }
+
+    fn series_calib(now: i64, incs: &[(f64, f64)], calibrated: bool) -> Vec<ShareSample> {
         let n = incs.len();
         let mut out = vec![ShareSample {
             ts: now - (n as i64) * 300,
             u: 0.0,
             local_cost: 0.0,
+            calibrated,
         }];
         let (mut c, mut u) = (0.0, 0.0);
         for (i, (dc, du)) in incs.iter().enumerate() {
@@ -357,6 +379,7 @@ mod tests {
                 ts: now - (n as i64 - 1 - i as i64) * 300,
                 u,
                 local_cost: c,
+                calibrated,
             });
         }
         out
@@ -421,6 +444,21 @@ mod tests {
         let s = series(now, &[(0.001, 0.0001); 4]);
         let r = estimate(&s, now, 0.001, 18_000, 0.02);
         assert!(r.map_or(true, |r| r.confidence < 0.35));
+    }
+
+    #[test]
+    fn calibration_boosts_confidence_for_sole_device() {
+        let now = 1_000_000;
+        let incs = [(10.0, 0.10); 3]; // short sole-device run, Q≈100
+        let plain = estimate(&series_calib(now, &incs, false), now, 0.30, 18_000, 0.02).unwrap();
+        let calib = estimate(&series_calib(now, &incs, true), now, 0.30, 18_000, 0.02).unwrap();
+        assert!((calib.this_machine - 0.30).abs() < 0.02);
+        assert!(
+            calib.confidence > plain.confidence,
+            "calib {} should exceed plain {}",
+            calib.confidence,
+            plain.confidence
+        );
     }
 
     #[test]

@@ -239,13 +239,23 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     // Ambient-HP low/critical quota notifications; persisted, defaults on.
-    let alerts_on = ambient::load_settings(app).alerts_enabled;
+    let settings = ambient::load_settings(app);
     let alerts = CheckMenuItem::with_id(
         app,
         "alerts",
         "Quota Alerts",
         true,
-        alerts_on,
+        settings.alerts_enabled,
+        None::<&str>,
+    )?;
+    // Device-share calibration: assert this is the only active device so the fit
+    // trusts current usage as the single-device floor. Persisted, defaults off.
+    let calib = CheckMenuItem::with_id(
+        app,
+        "calib",
+        "Only Device Here",
+        true,
+        settings.only_active_device,
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "quit", "Quit HPBar", true, None::<&str>)?;
@@ -260,6 +270,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &autostart,
             &alerts,
+            &calib,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -267,6 +278,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     // Captured so the toggle handlers can reflect the new state in the checkmark.
     let autostart_item = autostart.clone();
     let alerts_item = alerts.clone();
+    let calib_item = calib.clone();
 
     // The tray heart is now a *live colour gauge* driven by `ambient`, so it must
     // not be a macOS template (template mode renders alpha-only, discarding our
@@ -308,6 +320,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 s.alerts_enabled = !s.alerts_enabled;
                 ambient::save_settings(app, &s);
                 let _ = alerts_item.set_checked(s.alerts_enabled);
+            }
+            "calib" => {
+                let mut s = ambient::load_settings(app);
+                s.only_active_device = !s.only_active_device;
+                ambient::save_settings(app, &s);
+                let _ = calib_item.set_checked(s.only_active_device);
             }
             _ => {}
         })
