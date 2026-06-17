@@ -45,7 +45,7 @@ Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 - **Live quota** — your 5-hour, weekly, and extra-usage windows, with reset countdowns.
 - **Burn-rate warning** — when your recent pace would exhaust a window *before* it resets, the bar flags **⚠ hits limit in ~35m**, so a surprise rate-limit doesn't catch you mid-task.
 - **Quota alerts** — an opt-out native notification the first time a window goes low / critical (toggle in the tray menu).
-- **Local activity** — per-model token + cost breakdown from your local Claude Code session logs (`~/.claude/projects`), over 24h / 7d / 30d.
+- **Local activity** — per-model token + cost breakdown from your local Claude Code session logs (`~/.claude/projects`), over 24h / 7d / 30d, plus a **top-projects** breakdown (which repo ate your tokens) in the pooled "All" view.
 - **Three switchable themes**, remembered across launches:
   | Theme | Live quota | Local activity |
   |-------|-----------|----------------|
@@ -196,7 +196,7 @@ Three themes complete and verified on macOS; Linux/Windows bundles build in CI. 
 - **实时额度（Live quota）**：5 小时、每周、额外用量三个窗口，并显示重置倒计时。
 - **耗尽预警（Burn-rate）**：当按你最近的用量速度、某个窗口会在重置**之前**就被用光时，血条会标出 **⚠ 约 35m 后触顶**，免得任务进行到一半被突然限流。
 - **额度提醒（Quota alerts）**：窗口首次进入「偏低 / 临界」时弹一条系统通知（默认开启，托盘菜单可关）。
-- **本地活动（Local activity）**：从本地 Claude Code 会话日志（`~/.claude/projects`）统计每个模型的 token 用量与花费，支持 24 小时 / 7 天 / 30 天。
+- **本地活动（Local activity）**：从本地 Claude Code 会话日志（`~/.claude/projects`）统计每个模型的 token 用量与花费，支持 24 小时 / 7 天 / 30 天；在汇总的「All」视图下还会按**项目排名**（「哪个仓库吃了我的 token」）。
 - **三种可切换主题**（自动记住上次选择）：
   | 主题 | 实时额度 | 本地活动 |
   |------|---------|---------|

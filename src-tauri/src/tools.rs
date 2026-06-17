@@ -9,7 +9,7 @@
 //! on the other side of the UI.
 
 use crate::codexstats;
-use crate::localstats::{self, window_label, ModelCostDTO, ModelUsageDTO};
+use crate::localstats::{self, window_label, ModelCostDTO, ModelUsageDTO, ProjectUsageDTO};
 use crate::openclawstats;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -26,11 +26,15 @@ pub struct AppUsageDTO {
     pub cost: Option<f64>,
 }
 
-/// The API view: per-tool breakdown plus a model-pooled total across all tools.
+/// The API view: per-tool breakdown plus a model-pooled total across all tools,
+/// and a "which project ate my tokens" breakdown pooled across tools.
 #[derive(Serialize, Clone)]
 pub struct LocalReport {
     pub apps: Vec<AppUsageDTO>,
     pub combined: Vec<ModelUsageDTO>,
+    /// Top projects by tokens over the window (only tools that know their working
+    /// directory contribute — currently Claude Code).
+    pub projects: Vec<ProjectUsageDTO>,
     pub source_label: String,
 }
 
@@ -40,6 +44,11 @@ pub trait ToolAdapter {
     fn display_name(&self) -> &'static str;
     fn kind(&self) -> &'static str;
     fn collect(&self, window_secs: i64) -> Vec<ModelUsageDTO>;
+    /// Per-project usage, for tools that record a working directory. Default:
+    /// none (the tool's logs aren't project-attributable).
+    fn projects(&self, _window_secs: i64) -> Vec<ProjectUsageDTO> {
+        Vec::new()
+    }
 }
 
 struct ClaudeCode;
@@ -55,6 +64,9 @@ impl ToolAdapter for ClaudeCode {
     }
     fn collect(&self, window_secs: i64) -> Vec<ModelUsageDTO> {
         localstats::collect(window_secs)
+    }
+    fn projects(&self, window_secs: i64) -> Vec<ProjectUsageDTO> {
+        localstats::collect_by_project(window_secs)
     }
 }
 
@@ -99,8 +111,22 @@ fn adapters() -> Vec<Box<dyn ToolAdapter>> {
 pub fn fetch_local(window_secs: i64) -> Result<LocalReport, String> {
     let mut apps: Vec<AppUsageDTO> = Vec::new();
     let mut pool: HashMap<String, ModelUsageDTO> = HashMap::new();
+    let mut proj_pool: HashMap<String, ProjectUsageDTO> = HashMap::new();
 
     for adapter in adapters() {
+        // Pool per-project usage across tools (only project-aware tools contribute).
+        for p in adapter.projects(window_secs) {
+            let e = proj_pool
+                .entry(p.project.clone())
+                .or_insert_with(|| ProjectUsageDTO {
+                    project: p.project.clone(),
+                    tokens: 0,
+                    cost: 0.0,
+                });
+            e.tokens += p.tokens;
+            e.cost += p.cost;
+        }
+
         let models = adapter.collect(window_secs);
         if models.is_empty() {
             continue;
@@ -125,9 +151,13 @@ pub fn fetch_local(window_secs: i64) -> Result<LocalReport, String> {
     let mut combined: Vec<ModelUsageDTO> = pool.into_values().collect();
     combined.sort_by(|a, b| b.total.cmp(&a.total));
 
+    let mut projects: Vec<ProjectUsageDTO> = proj_pool.into_values().collect();
+    projects.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+
     Ok(LocalReport {
         apps,
         combined,
+        projects,
         source_label: format!("Local API usage · {}", window_label(window_secs)),
     })
 }

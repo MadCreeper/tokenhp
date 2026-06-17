@@ -28,4 +28,10 @@ export const MOCK_LOCAL: LocalReport = {
     { id: "codex", display_name: "Codex", kind: "equivalent", models: [MOCK_GPT], total: MOCK_GPT.total, cost: null },
   ],
   combined: [MOCK_OPUS, MOCK_HAIKU, MOCK_GPT],
+  projects: [
+    { project: "hp_bar", tokens: 112_400_000, cost: 138.20 },
+    { project: "api-gateway", tokens: 48_900_000, cost: 61.05 },
+    { project: "infra", tokens: 21_300_000, cost: 14.80 },
+    { project: "scratch", tokens: 5_600_000, cost: 3.55 },
+  ],
 };

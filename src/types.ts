@@ -48,10 +48,19 @@ export interface AppUsage {
   cost: number | null;
 }
 
+/** Mirrors `localstats::ProjectUsageDTO` — one project's pooled tokens + cost. */
+export interface ProjectUsage {
+  project: string;
+  tokens: number;
+  cost: number;
+}
+
 /** Mirrors `tools::LocalReport` — per-tool breakdown + model-pooled total. */
 export interface LocalReport {
   apps: AppUsage[];
   combined: ModelUsage[];
+  /** Top projects by tokens (project-aware tools only — currently Claude Code). */
+  projects: ProjectUsage[];
   source_label: string;
 }
 

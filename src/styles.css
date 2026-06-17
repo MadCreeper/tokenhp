@@ -299,6 +299,58 @@ body {
   margin-top: 3px;
 }
 
+/* --- Local: "Top projects" breakdown (which repo ate my tokens) --- */
+.proj-section {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.18);
+}
+.proj-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--panel-text-dim);
+  margin-bottom: 6px;
+}
+.proj-row {
+  margin-top: 7px;
+}
+.proj-row:first-of-type {
+  margin-top: 0;
+}
+.proj-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.proj-name {
+  color: var(--panel-text);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proj-meta {
+  color: var(--panel-text-dim);
+  font-size: 9px;
+  flex: none;
+}
+.proj-track {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+.proj-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--panel-text-dim);
+  opacity: 0.85;
+  transition: width 0.4s ease-out;
+}
+
 /* --- Arknights: 理智 hero plate (Terminal-screen replica) --- */
 .ak-hero {
   margin: 2px 0 4px;

@@ -447,7 +447,41 @@ function localHTML(): string {
     return windowSeg + `<div class="msg">No usage for this tool in this window.</div>`;
   }
 
-  return windowSeg + kindTagHTML(kind) + dropdownHTML(models, current) + costLineHTML(current) + xpBarsHTML(current);
+  return (
+    windowSeg +
+    kindTagHTML(kind) +
+    dropdownHTML(models, current) +
+    costLineHTML(current) +
+    xpBarsHTML(current) +
+    projectsHTML()
+  );
+}
+
+// "Which repo ate my tokens" — top projects by tokens over the window, pooled
+// across project-aware tools (Claude Code). Shown only in the cross-tool "All"
+// view, where a project breakdown complements the by-model one.
+function projectsHTML(): string {
+  if (state.localTool !== "all") return "";
+  const projects = state.local?.projects ?? [];
+  if (projects.length === 0) return "";
+  const top = projects.slice(0, 6);
+  const peak = top[0].tokens || 1;
+  const rows = top
+    .map((p) => {
+      const frac = clamp01(p.tokens / peak);
+      const meta =
+        p.cost > 0 ? `${formatTokens(p.tokens)} · ${formatDollars(p.cost)}` : formatTokens(p.tokens);
+      return `
+        <div class="proj-row">
+          <div class="proj-head">
+            <span class="proj-name">${escapeHTML(p.project)}</span>
+            <span class="proj-meta">${escapeHTML(meta)}</span>
+          </div>
+          <div class="proj-track"><div class="proj-fill" style="width:${(frac * 100).toFixed(1)}%"></div></div>
+        </div>`;
+    })
+    .join("");
+  return `<div class="proj-section"><div class="proj-title">Top projects</div>${rows}</div>`;
 }
 
 // Tag a single tool as a flat-rate subscription (cost is an API-rate estimate)
