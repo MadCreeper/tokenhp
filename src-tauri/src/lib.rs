@@ -66,12 +66,20 @@ async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Codex's latest local rate-limit snapshot, shaped like the live-quota bars.
+/// Codex's latest local rate-limit snapshot, shaped like the live-quota bars,
+/// with the device-share split recorded + annotated.
 #[tauri::command]
-async fn fetch_codex_quota() -> Result<usage::UsageReport, String> {
-    tokio::task::spawn_blocking(codexstats::fetch_quota)
+async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, String> {
+    let mut report = tokio::task::spawn_blocking(codexstats::fetch_quota)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    // Record this machine's Codex share sample (scans logs → blocking thread),
+    // then annotate the report with the this-machine vs others split.
+    let app2 = app.clone();
+    let report2 = report.clone();
+    let _ = tokio::task::spawn_blocking(move || share::record(&app2, "codex", &report2)).await;
+    share::annotate(&app, "codex", &mut report);
+    Ok(report)
 }
 
 /// Mirror the popover's theme onto the tray heart, repainting it now. Called by

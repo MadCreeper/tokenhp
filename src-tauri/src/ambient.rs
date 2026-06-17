@@ -301,6 +301,18 @@ pub fn spawn(app: AppHandle) {
                 let alerts_on = load_settings(&app).alerts_enabled;
                 notify_crossings(&app, &report, &mut last, alerts_on);
             }
+            // Codex device-share series — independent of Claude (a local read), so
+            // it runs even when not signed into Claude. Records only; the tray
+            // heart stays Claude-driven.
+            {
+                let app2 = app.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(codex) = crate::codexstats::fetch_quota() {
+                        crate::share::record(&app2, "codex", &codex);
+                    }
+                })
+                .await;
+            }
             tokio::time::sleep(Duration::from_secs(POLL_SECS)).await;
         }
     });
