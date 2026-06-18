@@ -122,6 +122,7 @@ const sourceParam = params.get("source");
 if (sourceParam === "live" || sourceParam === "local") state.source = sourceParam;
 if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expand detail
 if (params.get("expand") === "1") state.projectsExpanded = true; // showcase: full project list
+const PACE_SHOWCASE = params.get("pace") === "1"; // showcase: force an over-pace 5-Hour
 
 // ---------------------------------------------------------------- data
 
@@ -150,6 +151,17 @@ function maybeUploadTeam(): void {
 async function refresh(): Promise<void> {
   if (MOCK) {
     state.live = mockLive();
+    if (PACE_SHOWCASE) {
+      // Force the 5-Hour window over an even spend-down so the pace cue shows:
+      // ~65% used at ~45% of the window elapsed → "20% over pace". eta is nulled
+      // because the stronger "hits limit" warning would otherwise suppress it.
+      const five = state.live.windows.find((w) => w.title === "5-Hour");
+      if (five) {
+        five.utilization = 0.65;
+        five.remaining = 0.35;
+        five.eta_secs = null;
+      }
+    }
     state.local = MOCK_LOCAL;
     state.account = { email: "you@example.com", plan: "Max 20×" };
     state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.combined[0].id;
