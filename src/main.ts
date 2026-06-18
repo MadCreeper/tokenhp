@@ -436,6 +436,8 @@ function liveBarHTML(w: UsageWindow): string {
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
   const reset = resetCaption(w.resets_at);
+  const pace = paceNote(w); // "20% over pace" on the 5-Hour bar when burning fast
+  const resetText = [reset, pace].filter(Boolean).join(" · ");
   const split = machineSplit(w); // this machine's window fraction, or null when unsure
   let bar: string;
   switch (getTheme()) {
@@ -454,9 +456,9 @@ function liveBarHTML(w: UsageWindow): string {
   // toggling "detail" changes only the right text — no line added → no resize.
   const share = shareInfo(w);
   const foot =
-    reset || share.text
+    resetText || share.text
       ? `<div class="live-foot">
-          <span class="live-reset">${reset ? escapeHTML(reset) : ""}</span>
+          <span class="live-reset">${resetText ? escapeHTML(resetText) : ""}</span>
           <span class="live-share${share.faint ? " faint" : ""}" title="${escapeHTML(share.title)}">${escapeHTML(share.text)}</span>
         </div>`
       : "";
@@ -525,6 +527,27 @@ function heartBarHTML(
       <div class="hearts">${hearts}</div>
       ${caption ? `<div class="bar-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
+}
+
+// Even-pace check: how far along the window are you in *time* vs in *usage*?
+// Only the 5-Hour window — the one you actively manage; "over pace" on the
+// 7-day window early in the week is normal and not actionable.
+const PACE_WINDOW_SECS: Record<string, number> = { "5-Hour": 5 * 3600 };
+const PACE_THRESHOLD = 0.12; // only flag a meaningful lead (12 percentage points)
+
+// "20% over pace" when you've burned notably more than an even spend-down would
+// predict by now — a gentle nudge to slow before you hit the harder eta warning.
+// null when on/under pace, unknown duration, or the eta warning is already shown.
+function paceNote(w: UsageWindow): string | null {
+  if (w.eta_secs != null) return null; // the stronger "hits limit" warning wins
+  const dur = PACE_WINDOW_SECS[w.title];
+  if (!dur || !w.resets_at) return null;
+  const ts = Date.parse(w.resets_at);
+  if (Number.isNaN(ts)) return null;
+  const elapsed = clamp01((dur - (ts - Date.now()) / 1000) / dur); // fraction of window elapsed
+  const over = w.utilization - elapsed; // >0 ⇒ ahead of an even spend-down
+  if (over <= PACE_THRESHOLD) return null;
+  return `${Math.round(over * 100)}% over pace`;
 }
 
 function resetCaption(iso: string | null): string | null {
