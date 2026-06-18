@@ -5,11 +5,15 @@
 //! frontend renders the health bars.
 
 pub mod account;
+pub mod ambient;
+pub mod burn;
 pub mod codexstats;
 pub mod credentials;
+pub mod heart_icon;
 pub mod localstats;
 pub mod openclawstats;
 pub mod pricing;
+pub mod share;
 pub mod team;
 pub mod tools;
 pub mod usage;
@@ -28,11 +32,15 @@ use tauri_plugin_autostart::ManagerExt;
 /// human-readable error string (the frontend renders either).
 #[tauri::command]
 async fn fetch_usage(
+    app: tauri::AppHandle,
     cache: tauri::State<'_, CredentialCache>,
 ) -> Result<usage::UsageReport, String> {
-    usage::fetch(cache.inner())
-        .await
-        .map_err(|e| e.to_string())
+    let mut report = usage::fetch(cache.inner()).await.map_err(|e| e.to_string())?;
+    // Add the "you'll run out before reset" projection from recorded history.
+    ambient::annotate(&app, &mut report);
+    // Add the this-machine vs other-devices split from the recorded series.
+    share::annotate(&app, "claude", &mut report);
+    Ok(report)
 }
 
 /// Login identity for the footer (email + plan). Best-effort: returns whatever
@@ -58,12 +66,27 @@ async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Codex's latest local rate-limit snapshot, shaped like the live-quota bars.
+/// Codex's latest local rate-limit snapshot, shaped like the live-quota bars,
+/// with the device-share split recorded + annotated.
 #[tauri::command]
-async fn fetch_codex_quota() -> Result<usage::UsageReport, String> {
-    tokio::task::spawn_blocking(codexstats::fetch_quota)
+async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, String> {
+    let mut report = tokio::task::spawn_blocking(codexstats::fetch_quota)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    // Record this machine's Codex share sample (scans logs → blocking thread),
+    // then annotate the report with the this-machine vs others split.
+    let app2 = app.clone();
+    let report2 = report.clone();
+    let _ = tokio::task::spawn_blocking(move || share::record(&app2, "codex", &report2)).await;
+    share::annotate(&app, "codex", &mut report);
+    Ok(report)
+}
+
+/// Mirror the popover's theme onto the tray heart, repainting it now. Called by
+/// the frontend on startup and whenever the user cycles the theme.
+#[tauri::command]
+fn set_tray_theme(app: tauri::AppHandle, theme: String) {
+    ambient::set_theme_and_repaint(&app, theme);
 }
 
 // --- Team sharing (opt-in) ---------------------------------------------------
@@ -140,13 +163,16 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         .manage(CredentialCache::new())
+        .manage(ambient::TrayState::default())
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             fetch_local,
             fetch_codex_quota,
             fetch_account,
             fetch_codex_account,
+            set_tray_theme,
             get_team_config,
             set_team_config,
             test_team_connection,
@@ -161,6 +187,9 @@ pub fn run() {
             build_popover(app.handle())?;
             build_tray(app.handle())?;
             spawn_team_uploader();
+            // Ambient HP: keep the menu-bar heart + tooltip live, and alert on
+            // low/critical quota. Runs for the app's lifetime; no-op when signed out.
+            ambient::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -209,6 +238,26 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         launch_enabled,
         None::<&str>,
     )?;
+    // Ambient-HP low/critical quota notifications; persisted, defaults on.
+    let settings = ambient::load_settings(app);
+    let alerts = CheckMenuItem::with_id(
+        app,
+        "alerts",
+        "Quota Alerts",
+        true,
+        settings.alerts_enabled,
+        None::<&str>,
+    )?;
+    // Device-share calibration: assert this is the only active device so the fit
+    // trusts current usage as the single-device floor. Persisted, defaults off.
+    let calib = CheckMenuItem::with_id(
+        app,
+        "calib",
+        "Only Device Here",
+        true,
+        settings.only_active_device,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit HPBar", true, None::<&str>)?;
     // Linux trays (libappindicator/StatusNotifierItem) don't deliver left-click
     // events, so the only reliable way to open the popover there is a menu item.
@@ -220,17 +269,23 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             &show,
             &PredefinedMenuItem::separator(app)?,
             &autostart,
+            &alerts,
+            &calib,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
     )?;
-    // Captured so the toggle handler can reflect the new state in the checkmark.
+    // Captured so the toggle handlers can reflect the new state in the checkmark.
     let autostart_item = autostart.clone();
+    let alerts_item = alerts.clone();
+    let calib_item = calib.clone();
 
-    // tray.png is a monochrome heart; `icon_as_template` lets macOS recolor it
-    // to match the menu bar (light/dark) automatically.
-    let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))
-        .expect("bundled tray.png must be a valid PNG");
+    // The tray heart is now a *live colour gauge* driven by `ambient`, so it must
+    // not be a macOS template (template mode renders alpha-only, discarding our
+    // colours). Start with a neutral blue-grey heart — visible on light *and* dark
+    // bars — which the first quota poll recolours to your remaining HP.
+    let (rgba, w, h) = heart_icon::render_neutral(6);
+    let icon = Image::new_owned(rgba, w, h);
 
     // On Linux the tray never reports clicks, so the menu must be reachable by
     // *left* click — that's where users will find "Show HPBar". On macOS/Windows
@@ -243,7 +298,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("main")
         .icon(icon)
-        .icon_as_template(true)
+        .icon_as_template(false)
         .tooltip("HPBar")
         .menu(&menu)
         .show_menu_on_left_click(show_menu_on_left_click)
@@ -259,6 +314,18 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 let enabled = mgr.is_enabled().unwrap_or(false);
                 let _ = if enabled { mgr.disable() } else { mgr.enable() };
                 let _ = autostart_item.set_checked(!enabled);
+            }
+            "alerts" => {
+                let mut s = ambient::load_settings(app);
+                s.alerts_enabled = !s.alerts_enabled;
+                ambient::save_settings(app, &s);
+                let _ = alerts_item.set_checked(s.alerts_enabled);
+            }
+            "calib" => {
+                let mut s = ambient::load_settings(app);
+                s.only_active_device = !s.only_active_device;
+                ambient::save_settings(app, &s);
+                let _ = calib_item.set_checked(s.only_active_device);
             }
             _ => {}
         })

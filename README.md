@@ -41,8 +41,12 @@ Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 ## ✨ Features
 
 - **Lives in the menu bar / tray.** A ♥ icon; click for the popover, right-click for the menu. No window, no Dock icon.
+- **A living menu-bar heart** — the tray ♥ *is* the gauge: it drains with your most-depleted live window, **in whichever theme you've picked** (Minecraft red · Classic's green→amber→red HP ramp · Arknights 理智 azure), so you read your HP at a glance without clicking. When you're low it also shows the exact `%` beside it (macOS), which stays legible on any wallpaper.
 - **Live quota** — your 5-hour, weekly, and extra-usage windows, with reset countdowns.
-- **Local activity** — per-model token + cost breakdown from your local Claude Code session logs (`~/.claude/projects`), over 24h / 7d / 30d.
+- **Burn-rate warning** — when your recent pace would exhaust a window *before* it resets, the bar flags **⚠ hits limit in ~35m**, so a surprise rate-limit doesn't catch you mid-task.
+- **This machine vs other devices** — your subscription is account-wide, but the Live bars *estimate* how much of each window **this** machine is using vs everything else (another laptop, claude.ai, the mobile app), shown as a dimmed "ghost" split on the bar plus a `This machine ~28% · Others ~12%` line. It fits the relationship between account-wide utilization and this machine's local cost (both Claude and Codex meter by model-weighted cost); an optional **Only Device Here** tray toggle calibrates it. Hidden until the fit is confident. How it works + how fast it converges: [docs/usage-fitting.md](docs/usage-fitting.md).
+- **Quota alerts** — an opt-out native notification the first time a window goes low / critical (toggle in the tray menu).
+- **Local activity** — per-model token + cost breakdown from your local Claude Code session logs (`~/.claude/projects`), over 24h / 7d / 30d, plus a **top-projects** breakdown (which repo ate your tokens) in the pooled "All" view.
 - **Three switchable themes**, remembered across launches:
   | Theme | Live quota | Local activity |
   |-------|-----------|----------------|
@@ -154,7 +158,12 @@ src-tauri/src/
   credentials.rs        read Claude Code token (Keychain / file)
   usage.rs              GET /api/oauth/usage
   localstats.rs         scan ~/.claude/projects + pricing.rs
+  heart_icon.rs         rasterise the live-HP tray heart (RGBA, no deps)
+  burn.rs               burn-rate → "hits limit before reset?" (pure math)
+  share.rs              device-share fit (this machine vs other devices) + persistence
+  ambient.rs            background poll: live tray icon + % title + alerts + history
   lib.rs                tray, popover window, commands
+  examples/tray_preview.rs   dev aid: render the tray heart at every level to a PNG
 ```
 
 </details>
@@ -162,6 +171,8 @@ src-tauri/src/
 ## 📝 Status
 
 Three themes complete and verified on macOS; Linux/Windows bundles build in CI. Not yet done: code signing/notarization. The Arknights icon assets are sourced from community wikis and bundled for this app.
+
+**Platform notes for the live heart.** The draining/colour-changing tray icon, quota alerts, and the burn-rate warning are cross-platform. Two pieces are macOS-specific by design: the inline `%` annunciator (the tray *title* is unsupported on Windows and inconsistent on Linux) and template handling. The trade-off works out — only macOS's menu-bar vibrancy can wash the icon's hue, and that's exactly where the `%` title fills in; Windows and Linux render the heart's colour faithfully. The icon + alerts are verified on macOS; the Win/Linux paths are correct-by-construction (Tauri no-ops the macOS-only calls) but not yet run on those OSes.
 
 ---
 <br/>
@@ -183,8 +194,12 @@ Three themes complete and verified on macOS; Linux/Windows bundles build in CI. 
 ## ✨ 功能
 
 - **常驻菜单栏 / 托盘**：一个 ♥ 图标，左键点开弹窗，右键打开菜单；没有窗口，也没有 Dock 图标。
+- **会动的菜单栏血条**：托盘上的 ♥ 本身就是血条——它会随你「最吃紧」的实时额度逐格扣血，并**按你选择的主题着色**（我的世界红 · 经典 绿→黄→红 血条 · 明日方舟 理智蓝），不点开也能一眼看出血量；额度偏低时还会在旁边显示精确的 `%`（macOS），任何壁纸下都清晰可读。
 - **实时额度（Live quota）**：5 小时、每周、额外用量三个窗口，并显示重置倒计时。
-- **本地活动（Local activity）**：从本地 Claude Code 会话日志（`~/.claude/projects`）统计每个模型的 token 用量与花费，支持 24 小时 / 7 天 / 30 天。
+- **耗尽预警（Burn-rate）**：当按你最近的用量速度、某个窗口会在重置**之前**就被用光时，血条会标出 **⚠ 约 35m 后触顶**，免得任务进行到一半被突然限流。
+- **本机 vs 其他设备**：订阅是全账号共享的，但「实时额度」会*估算*每个窗口里有多少是**本机**用掉的，相对其他来源（另一台电脑、claude.ai、手机 App），在血条上以暗色「虚影」分段显示，并附一行 `本机 ~28% · 其他 ~12%`。原理是拟合「全账号用量」与「本机花费」的关系（Claude 与 Codex 都按模型加权的 token 成本计量）；托盘里可选的 **仅此设备** 开关用于校准。拟合不够确定时自动隐藏。
+- **额度提醒（Quota alerts）**：窗口首次进入「偏低 / 临界」时弹一条系统通知（默认开启，托盘菜单可关）。
+- **本地活动（Local activity）**：从本地 Claude Code 会话日志（`~/.claude/projects`）统计每个模型的 token 用量与花费，支持 24 小时 / 7 天 / 30 天；在汇总的「All」视图下还会按**项目排名**（「哪个仓库吃了我的 token」）。
 - **三种可切换主题**（自动记住上次选择）：
   | 主题 | 实时额度 | 本地活动 |
   |------|---------|---------|
@@ -269,3 +284,5 @@ npm run tauri build    # 打包各平台安装包
 ## 📝 状态
 
 三种主题均已完成并在 macOS 上验证；Linux/Windows 安装包由 CI 构建。尚未完成：代码签名 / 公证。明日方舟主题图标来自社区 wiki，随应用一并打包。
+
+**关于「会动的血条」的平台说明。** 会扣血 / 变色的托盘图标、额度提醒、耗尽预警都是跨平台的。有两处是特意只在 macOS 生效：旁边的 `%` 读数（托盘**标题**在 Windows 不支持、在 Linux 表现不一）以及 template（模板图标）处理。这个取舍正好合适——只有 macOS 的菜单栏 vibrancy 会把图标颜色冲淡，而那正是 `%` 读数补位的地方；Windows 与 Linux 会如实显示血条颜色。图标 + 提醒已在 macOS 验证；Win/Linux 路径在代码层面是正确的（Tauri 会把 macOS 专有调用变为空操作），但尚未在这两个系统上实跑。

@@ -13,9 +13,9 @@ import type {
   UsageWindow,
 } from "./types";
 import { settingsContentHTML, teamContentHTML } from "./team";
-import { heartsRow } from "./hearts";
+import { heartsRow, heartsRowSplit } from "./hearts";
 import { xpBar } from "./xpbar";
-import { clamp01, escapeHTML, formatDollars, formatTokens, nowTime } from "./util";
+import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
 import { installStoneTexture } from "./texture";
 import { applyTheme, cycleTheme, getTheme, isTheme, setThemeOverride, themeLabel } from "./theme";
 import { classicNeutralBar, classicQuotaBar } from "./classicbar";
@@ -49,6 +49,8 @@ const WINDOW_SECS: Record<WindowKey, number> = {
   month: 2_592_000,
 };
 const WINDOW_TITLE: Record<WindowKey, string> = { day: "24h", week: "7d", month: "30d" };
+// Team uses calendar-ish labels ("Today") where Local uses durations ("24h").
+const TEAM_RANGE_LABEL: Record<WindowKey, string> = { day: "Today", week: "7d", month: "30d" };
 
 interface State {
   provider: Provider; // subscription axis (Live): whose quota
@@ -57,7 +59,11 @@ interface State {
   window: WindowKey;
   localTool: string; // API axis (Local): "all" or a tool id
   selectedModelId: string | null;
-  dropdownOpen: boolean;
+  dropdownOpen: boolean; // Local: the model dropdown
+  toolDropdownOpen: boolean; // Local: the tool selector (All / Claude Code / …)
+  providerDropdownOpen: boolean; // Live: the Claude / Codex selector
+  projectsExpanded: boolean; // Local "Top projects": show all vs the top few
+  showDetail: boolean; // Live: reveal the device-share text + account email/plan
   live: UsageReport | null;
   local: LocalReport | null;
   account: Account | null;
@@ -85,6 +91,10 @@ const state: State = {
   localTool: "all",
   selectedModelId: null,
   dropdownOpen: false,
+  toolDropdownOpen: false,
+  providerDropdownOpen: false,
+  projectsExpanded: false,
+  showDetail: false,
   live: null,
   local: null,
   account: null,
@@ -110,6 +120,8 @@ const themeParam = params.get("theme");
 if (isTheme(themeParam)) setThemeOverride(themeParam);
 const sourceParam = params.get("source");
 if (sourceParam === "live" || sourceParam === "local") state.source = sourceParam;
+if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expand detail
+if (params.get("expand") === "1") state.projectsExpanded = true; // showcase: full project list
 
 // ---------------------------------------------------------------- data
 
@@ -228,7 +240,7 @@ function render(): void {
       : `<main class="panel">
       ${headerHTML()}
       ${sourceSegHTML()}
-      ${subSegHTML()}
+      ${filterLineHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
     </main>`;
@@ -237,12 +249,82 @@ function render(): void {
   requestAnimationFrame(syncWindowSize);
 }
 
-// The second segmented row depends on the source; Team renders its own range
-// selector inside the content area (like Local's window selector).
-function subSegHTML(): string {
-  if (state.source === "live") return providerSegHTML();
-  if (state.source === "local") return toolSegHTML();
+// The slim "filter line" under the source tabs holds each view's secondary
+// controls, kept compact so the tabs stay the only chunky row. Often-toggled
+// ranges are visible segments; rarely-changed tool/provider use dropdowns.
+function filterLineHTML(): string {
+  if (state.source === "live") return liveFilterHTML();
+  if (state.source === "local") return localFilterHTML();
+  if (state.source === "team") return teamFilterHTML();
   return "";
+}
+
+// Live: the Claude / Codex provider as a compact dropdown (rarely switched).
+function liveFilterHTML(): string {
+  const opts = [
+    { id: "claude", name: "Claude" },
+    { id: "codex", name: "Codex" },
+  ];
+  const current = opts.find((o) => o.id === state.provider) ?? opts[0];
+  return (
+    `<div class="filter-line">` +
+    ddCurrent("toggle-provider-dropdown", current.name, state.providerDropdownOpen) +
+    `</div>` +
+    ddList("provider", opts, state.provider, state.providerDropdownOpen)
+  );
+}
+
+// Local: tool selector (dropdown — the list grows with adapters) on the left,
+// the window range (segment — toggled often) on the right.
+function localFilterHTML(): string {
+  const apps = state.local?.apps ?? [];
+  const opts = [{ id: "all", name: "All tools" }, ...apps.map((a) => ({ id: a.id, name: a.display_name }))];
+  const current = opts.find((o) => o.id === state.localTool) ?? opts[0];
+  const windowSeg = `<div class="seg">${(["day", "week", "month"] as WindowKey[])
+    .map((w) => segButton("window", w, WINDOW_TITLE[w], state.window === w))
+    .join("")}</div>`;
+  return (
+    `<div class="filter-line">` +
+    ddCurrent("toggle-tool-dropdown", current.name, state.toolDropdownOpen) +
+    windowSeg +
+    `</div>` +
+    ddList("tool", opts, state.localTool, state.toolDropdownOpen)
+  );
+}
+
+// Team: the date range as a segment (toggled often). The model selector stays
+// in the content, next to the leaderboard it filters.
+function teamFilterHTML(): string {
+  if (!state.teamConfig?.enabled) return "";
+  const seg = (["day", "week", "month"] as WindowKey[])
+    .map((r) => segButton("team-range", r, TEAM_RANGE_LABEL[r], state.teamRange === r))
+    .join("");
+  return `<div class="filter-line"><div class="seg">${seg}</div></div>`;
+}
+
+// Shared dropdown bits (mirror the model dropdown markup) so the filter-line
+// selectors reuse the existing .dd-current / .dd-list styling + behavior. The
+// open list renders full-width *after* the filter line, not inside its flex row.
+function ddCurrent(action: string, label: string, open: boolean): string {
+  return `<button class="mc-btn dd-current" data-action="${action}"><span>${escapeHTML(
+    label,
+  )}</span><span class="chev">${open ? "▲" : "▼"}</span></button>`;
+}
+function ddList(
+  action: string,
+  opts: { id: string; name: string }[],
+  selected: string,
+  open: boolean,
+): string {
+  if (!open) return "";
+  return `<div class="dd-list">${opts
+    .map(
+      (o) =>
+        `<button class="mc-btn ${o.id === selected ? "selected" : ""}" data-action="${action}" data-value="${escapeHTML(
+          o.id,
+        )}">${escapeHTML(o.name)}</button>`,
+    )
+    .join("")}</div>`;
 }
 
 function defaultTeamDraft(): TeamConfig {
@@ -311,26 +393,6 @@ function segButton(action: string, value: string, label: string, selected: boole
   return `<button class="mc-btn ${selected ? "selected" : ""}" data-action="${action}" data-value="${value}">${label}</button>`;
 }
 
-// Subscription axis (Live): which provider's quota.
-function providerSegHTML(): string {
-  return `
-    <div class="seg provider-seg">
-      ${segButton("provider", "claude", "Claude", state.provider === "claude")}
-      ${segButton("provider", "codex", "Codex", state.provider === "codex")}
-    </div>`;
-}
-
-// API axis (Local): which tool to show, or "All" (pooled by model). Tool options
-// come from the loaded report, so the list grows as new adapters are added.
-function toolSegHTML(): string {
-  const apps = state.local?.apps ?? [];
-  const opts = [{ id: "all", name: "All" }, ...apps.map((a) => ({ id: a.id, name: a.display_name }))];
-  return `
-    <div class="seg tool-seg">
-      ${opts.map((o) => segButton("tool", o.id, o.name, state.localTool === o.id)).join("")}
-    </div>`;
-}
-
 function sourceSegHTML(): string {
   // The Team tab only appears once the user has opted in (config.enabled).
   const teamOn = !!state.teamConfig?.enabled;
@@ -345,11 +407,11 @@ function sourceSegHTML(): string {
     </div>`;
 }
 
+
 function contentHTML(): string {
   if (state.source === "team")
     return teamContentHTML({
       report: state.team,
-      range: state.teamRange,
       model: state.teamModel,
       dropdownOpen: state.teamDropdownOpen,
       selfName: state.teamConfig?.display_name ?? "",
@@ -373,25 +435,94 @@ function liveBarHTML(w: UsageWindow): string {
   const used = Math.round(w.utilization * 100);
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
-  const caption = resetCaption(w.resets_at);
+  const reset = resetCaption(w.resets_at);
+  const split = machineSplit(w); // this machine's window fraction, or null when unsure
+  let bar: string;
   switch (getTheme()) {
+    // Caption is rendered below (in `.live-foot`), not by the theme bar, so the
+    // share text can ride its right edge — pass null caption to each renderer.
     case "classic":
-      return classicQuotaBar(w.title, w.remaining, trailing, caption);
+      bar = classicQuotaBar(w.title, w.remaining, trailing, null, split, w.trailing === "Off");
+      break;
     case "arknights":
-      return akResource(w.title, w.remaining, caption, w.trailing);
+      bar = akResource(w.title, w.remaining, null, w.trailing, split);
+      break;
     default:
-      return heartBarHTML(w, trailing, caption);
+      bar = heartBarHTML(w, trailing, null, split);
   }
+  // reset countdown (left) + device-share (right) on one always-present line, so
+  // toggling "detail" changes only the right text — no line added → no resize.
+  const share = shareInfo(w);
+  const foot =
+    reset || share.text
+      ? `<div class="live-foot">
+          <span class="live-reset">${reset ? escapeHTML(reset) : ""}</span>
+          <span class="live-share${share.faint ? " faint" : ""}" title="${escapeHTML(share.title)}">${escapeHTML(share.text)}</span>
+        </div>`
+      : "";
+  // Wrap so the foot/warning stay attached to their bar; inter-window spacing
+  // comes from `.live-window` (the `.bar + .bar` selectors would be broken by a
+  // line slipped between two bars).
+  return `<div class="live-window">${bar}${foot}${etaWarnHTML(w.eta_secs)}</div>`;
 }
 
-function heartBarHTML(w: UsageWindow, trailing: string, caption: string | null): string {
+// Confidence below this hides the device split entirely (bar renders as before).
+const SHARE_MIN_CONF = 0.35;
+
+// This machine's fraction of the window for the ghost split, or null when the
+// fit isn't confident enough (the bar then renders normally, no ghost).
+function machineSplit(w: UsageWindow): number | null {
+  if (w.machine_share == null || w.share_confidence == null || w.share_confidence < SHARE_MIN_CONF) {
+    return null;
+  }
+  return clamp01(w.machine_share);
+}
+
+// "This machine vs other devices" split for the window — an estimate from
+// correlating account-wide utilization with this machine's local cost (see the
+// Rust `share` module). Hidden until the fit is confident; faded in the mid range.
+// The device-share text shown (via "detail") on the *right* of a bar's caption
+// line, so toggling it doesn't add/remove a line (no window resize). `title` is
+// the hover tooltip. Empty `text` ⇒ nothing on the right.
+function shareInfo(w: UsageWindow): { text: string; faint: boolean; title: string } {
+  if (!state.showDetail) return { text: "", faint: false, title: "" };
+  const m = w.machine_share;
+  const o = w.others_share;
+  const conf = w.share_confidence;
+  if (m == null || o == null || conf == null) return { text: "", faint: false, title: "" };
+  if (conf < SHARE_MIN_CONF) {
+    return { text: "estimating…", faint: true, title: "Device split: collecting data" };
+  }
+  const pct = (x: number) => Math.round(x * 100);
+  const title =
+    w.window_budget != null && w.window_budget > 0
+      ? `≈ ${formatDollars(w.window_budget)} = 100% of this ${w.title} window (estimated)`
+      : "estimated device split";
+  return { text: `This machine ~${pct(m)}% · Others ~${pct(o)}%`, faint: conf < 0.6, title };
+}
+
+// The burn-rate projection: shown only when the backend has judged you're on pace
+// to hit this window's limit *before* it resets — an actionable warning, not noise.
+function etaWarnHTML(etaSecs: number | null): string {
+  if (etaSecs == null) return "";
+  return `<div class="bar-eta">⚠ hits limit in ~${escapeHTML(formatDuration(etaSecs))}</div>`;
+}
+
+function heartBarHTML(
+  w: UsageWindow,
+  trailing: string,
+  caption: string | null,
+  machineShare: number | null,
+): string {
+  const hearts =
+    machineShare != null ? heartsRowSplit(w.remaining, machineShare) : heartsRow(w.remaining);
   return `
     <div class="bar">
       <div class="bar-head">
         <span class="bar-title">${escapeHTML(w.title)}</span>
         <span class="bar-trailing">${escapeHTML(trailing)}</span>
       </div>
-      <div class="hearts">${heartsRow(w.remaining)}</div>
+      <div class="hearts">${hearts}</div>
       ${caption ? `<div class="bar-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
 }
@@ -413,27 +544,71 @@ function resetCaption(iso: string | null): string | null {
 // --- Local (XP bars) ---
 
 function localHTML(): string {
-  const windowSeg = `
-    <div class="seg">
-      ${(["day", "week", "month"] as WindowKey[])
-        .map((w) => segButton("window", w, WINDOW_TITLE[w], state.window === w))
-        .join("")}
-    </div>`;
-
+  // The window range now lives in the filter line above; content is just the
+  // model breakdown for the selected tool/window.
   if (!state.local) {
-    const body = state.error
+    return state.error
       ? `<div class="msg">${escapeHTML(state.error)}</div>`
       : `<div class="msg">Loading…</div>`;
-    return windowSeg + body;
   }
 
   const { models, kind } = localModels();
   const current = models.find((m) => m.id === state.selectedModelId) ?? models[0];
   if (!current) {
-    return windowSeg + `<div class="msg">No usage for this tool in this window.</div>`;
+    return `<div class="msg">No usage for this tool in this window.</div>`;
   }
 
-  return windowSeg + kindTagHTML(kind) + dropdownHTML(models, current) + costLineHTML(current) + xpBarsHTML(current);
+  return (
+    kindTagHTML(kind) +
+    dropdownHTML(models, current) +
+    costLineHTML(current) +
+    xpBarsHTML(current) +
+    projectsHTML()
+  );
+}
+
+const PROJECTS_COLLAPSED = 4; // how many projects to show before "Show all"
+
+// "Which repo ate my tokens" — top projects by tokens over the window, pooled
+// across project-aware tools (Claude Code). Shown only in the cross-tool "All"
+// view, where a project breakdown complements the by-model one. Each project
+// uses the same per-theme magnitude bar as the model breakdown, so the styling
+// matches the theme. Collapsed to the top few; expandable to the full list.
+function projectsHTML(): string {
+  if (state.localTool !== "all") return "";
+  const projects = state.local?.projects ?? [];
+  if (projects.length === 0) return "";
+  const peak = projects[0].tokens || 1; // scale all bars to the biggest project
+  const expandable = projects.length > PROJECTS_COLLAPSED;
+  const shown = state.projectsExpanded ? projects : projects.slice(0, PROJECTS_COLLAPSED);
+
+  const bar = themeBar();
+  const rows = shown
+    .map((p) => {
+      const meta =
+        p.cost > 0 ? `${formatTokens(p.tokens)} · ${formatDollars(p.cost)}` : formatTokens(p.tokens);
+      return bar(p.project, clamp01(p.tokens / peak), meta);
+    })
+    .join("");
+
+  const toggle = expandable
+    ? `<button class="mc-btn proj-more" data-action="toggle-projects">${
+        state.projectsExpanded ? "Show less ▲" : `Show all ${projects.length} ▼`
+      }</button>`
+    : "";
+  // Wrap rows in `.xp-bars` so they get the same per-theme spacing as the model
+  // breakdown (its gap applies to .xp / .cbar / .akb alike). When expanded to the
+  // full list, cap the height with an inner scroll so "Show less" (below) stays
+  // on-screen — otherwise a long list pushes the toggle past the popover bottom.
+  const rowsClass = `xp-bars proj-rows${state.projectsExpanded ? " scroll" : ""}`;
+  return `<div class="proj-section"><div class="proj-title">Top projects</div><div class="${rowsClass}">${rows}</div>${toggle}</div>`;
+}
+
+// The active theme's magnitude bar (label · trailing + bar), shared by the model
+// breakdown and the project list so both render in the theme's style.
+function themeBar(): (label: string, frac: number, trailing: string) => string {
+  const theme = getTheme();
+  return theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
 }
 
 // Tag a single tool as a flat-rate subscription (cost is an API-rate estimate)
@@ -480,9 +655,7 @@ function xpBarsHTML(m: ModelUsage): string {
     dollars !== undefined
       ? `${formatTokens(tokens)} · ${formatDollars(dollars)}`
       : formatTokens(tokens);
-  const theme = getTheme();
-  const bar =
-    theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
+  const bar = themeBar();
   return `
     <div class="xp-bars">
       ${bar("Input", frac(m.input), trailing(m.input, m.cost?.input))}
@@ -500,22 +673,33 @@ function footerHTML(): string {
         ? (state.live?.source_label ?? "Live quota")
         : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
-  // The footer's middle line: account identity on Live, member count on Team.
+  // The footer's middle line: account identity on Live (revealed via the footer
+  // "detail" toggle), member count on Team. In live view the line is always
+  // present (a blank &nbsp; placeholder when hidden) so toggling "detail" doesn't
+  // grow/shrink the footer → no window resize.
   let midLine = "";
   if (state.source === "live") {
     // The per-account subscription (Claude login, or the ChatGPT login behind
-    // Codex). Hidden on Local, which aggregates models across accounts.
-    const acctText = state.account
-      ? [state.account.email, state.account.plan].filter(Boolean).join(" · ")
-      : "";
-    if (acctText) midLine = `<div class="account">${escapeHTML(acctText)}</div>`;
+    // Codex), shown only when "detail" is on. Hidden on Local, which aggregates
+    // models across accounts.
+    const acctText =
+      state.showDetail && state.account
+        ? [state.account.email, state.account.plan].filter(Boolean).join(" · ")
+        : "";
+    midLine = `<div class="account">${acctText ? escapeHTML(acctText) : "&nbsp;"}</div>`;
   } else if (state.source === "team" && state.team) {
     const n = state.team.members.length;
     midLine = `<div class="account">${n} member${n === 1 ? "" : "s"}</div>`;
   }
+  // "detail" toggle sits next to the "Live quota" footer label (live view only) —
+  // reveals the per-window device-share text + the account email/plan above.
+  const detail =
+    state.source === "live"
+      ? ` <button class="detail-link ${state.showDetail ? "on" : ""}" data-action="detail" title="Show this-machine share + account">detail</button>`
+      : "";
   return `
     <footer class="footer">
-      <div class="src-label">${escapeHTML(label)}</div>
+      <div class="src-label">${escapeHTML(label)}${detail}</div>
       ${midLine}
       <div class="updated">${escapeHTML(updated)}</div>
     </footer>`;
@@ -535,6 +719,7 @@ app.addEventListener("click", (e) => {
       void refresh();
       break;
     case "provider":
+      state.providerDropdownOpen = false;
       if (value && value !== state.provider) {
         state.provider = value as Provider;
         localStorage.setItem(PROVIDER_KEY, state.provider);
@@ -544,18 +729,31 @@ app.addEventListener("click", (e) => {
         state.error = "";
         render();
         void refresh();
+      } else {
+        render(); // just closed the dropdown
       }
       break;
+    case "toggle-provider-dropdown":
+      state.providerDropdownOpen = !state.providerDropdownOpen;
+      render();
+      break;
     case "tool":
+      state.toolDropdownOpen = false;
       if (value && value !== state.localTool) {
         state.localTool = value;
         state.dropdownOpen = false;
         snapSelectedModel(); // re-render from already-loaded data, no refetch
-        render();
       }
+      render();
+      break;
+    case "toggle-tool-dropdown":
+      state.toolDropdownOpen = !state.toolDropdownOpen;
+      state.dropdownOpen = false; // don't stack the model list under the tool list
+      render();
       break;
     case "theme":
       cycleTheme();
+      syncTrayTheme(); // recolor the menu-bar heart to match
       render();
       break;
     case "source":
@@ -563,6 +761,8 @@ app.addEventListener("click", (e) => {
         state.source = value as Source;
         state.error = "";
         state.dropdownOpen = false;
+        state.toolDropdownOpen = false;
+        state.providerDropdownOpen = false;
         render(); // show cached view instantly…
         void refresh(); // …then refresh in the background
       }
@@ -576,6 +776,14 @@ app.addEventListener("click", (e) => {
       break;
     case "toggle-dropdown":
       state.dropdownOpen = !state.dropdownOpen;
+      render();
+      break;
+    case "toggle-projects":
+      state.projectsExpanded = !state.projectsExpanded;
+      render();
+      break;
+    case "detail":
+      state.showDetail = !state.showDetail;
       render();
       break;
     case "select-model":
@@ -698,11 +906,19 @@ async function loadTeamConfig(): Promise<void> {
   }
 }
 
+// Push the current theme to the backend so the tray heart matches the popover
+// (localStorage is the source of truth; the backend persists its own copy).
+function syncTrayTheme(): void {
+  if (MOCK) return;
+  void invoke("set_tray_theme", { theme: getTheme() }).catch(() => {});
+}
+
 installStoneTexture();
 applyTheme();
 render();
 void refresh();
 void loadTeamConfig();
+syncTrayTheme();
 
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).

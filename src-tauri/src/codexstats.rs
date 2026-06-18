@@ -258,6 +258,11 @@ impl Window {
             resets_at: self.resets_at.and_then(epoch_to_rfc3339),
             title: window_title(self.window_minutes),
             trailing: None,
+            eta_secs: None,
+            machine_share: None,
+            others_share: None,
+            share_confidence: None,
+            window_budget: None,
         }
     }
 }

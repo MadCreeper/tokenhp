@@ -122,6 +122,98 @@ pub fn collect(window_secs: i64) -> Vec<ModelUsageDTO> {
     models
 }
 
+/// One project's pooled token + $ usage over the window — "which repo ate my
+/// tokens", for the Local tab's project breakdown.
+#[derive(Serialize, Clone)]
+pub struct ProjectUsageDTO {
+    pub project: String,
+    pub tokens: i64,
+    pub cost: f64,
+}
+
+/// Per-project Claude Code usage over the last `window_secs`, grouped by the
+/// session's working directory (`cwd`), priced per-model. Sorted desc by tokens.
+/// Synchronous (file IO) — call via `spawn_blocking`.
+pub fn collect_by_project(window_secs: i64) -> Vec<ProjectUsageDTO> {
+    let dir = dirs::home_dir()
+        .map(|h| h.join(".claude").join("projects"))
+        .unwrap_or_default();
+    let files = session_files(&dir);
+    let now = Utc::now().timestamp();
+    // project -> (model -> token totals) so each model prices at its own rate.
+    let mut acc: HashMap<String, HashMap<String, Totals>> = HashMap::new();
+
+    for file in files {
+        let fallback = encoded_dir_name(&file);
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in text.lines() {
+            if !line.contains(ASSISTANT_MARKER) {
+                continue;
+            }
+            let Ok(row) = serde_json::from_str::<Row>(line) else {
+                continue;
+            };
+            if row.r#type.as_deref() != Some("assistant") {
+                continue;
+            }
+            let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
+                continue;
+            };
+            let age = now - ts;
+            if age < 0 || age >= window_secs {
+                continue;
+            }
+            let project = row
+                .cwd
+                .as_deref()
+                .map(project_name)
+                .unwrap_or_else(|| fallback.clone());
+            let Some(msg) = row.message else { continue };
+            let Some(model) = msg.model else { continue };
+            if model.starts_with('<') {
+                continue;
+            }
+            acc.entry(project)
+                .or_default()
+                .entry(model)
+                .or_default()
+                .add(msg.usage.as_ref());
+        }
+    }
+
+    let pricing = Pricing::loaded();
+    let mut out: Vec<ProjectUsageDTO> = acc
+        .into_iter()
+        .map(|(project, models)| {
+            let mut tokens = 0i64;
+            let mut cost = 0f64;
+            for (model, t) in models {
+                let cache_create = t.cache_create_5m + t.cache_create_1h;
+                tokens += t.input + t.output + t.cache_read + cache_create;
+                if let Some(c) = pricing.cost(
+                    &model,
+                    t.input,
+                    t.output,
+                    t.cache_read,
+                    t.cache_create_5m,
+                    t.cache_create_1h,
+                ) {
+                    cost += c.total();
+                }
+            }
+            ProjectUsageDTO {
+                project,
+                tokens,
+                cost,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    out
+}
+
 #[derive(Default)]
 struct Totals {
     input: i64,
@@ -416,5 +508,20 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_name_takes_final_path_component() {
+        assert_eq!(project_name("/Users/me/projects/app"), "app");
+        assert_eq!(project_name("/Users/me/projects/app/"), "app"); // trailing slash
+        assert_eq!(project_name("C:\\work\\thing"), "thing"); // windows separators
+        assert_eq!(project_name("solo"), "solo");
+        assert_eq!(project_name("/"), "unknown");
+        assert_eq!(project_name(""), "unknown");
     }
 }

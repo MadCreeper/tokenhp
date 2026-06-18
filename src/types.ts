@@ -5,6 +5,17 @@ export interface UsageWindow {
   resets_at: string | null;
   title: string;
   trailing: string | null;
+  /** Projected seconds until this window hits its limit at the recent burn
+   *  rate — present only when that's *before* the reset (a real warning). */
+  eta_secs: number | null;
+  /** This machine's estimated share of the window (0..1); null until confident. */
+  machine_share: number | null;
+  /** Other devices' estimated share (0..1) = utilization − machine_share. */
+  others_share: number | null;
+  /** Fit confidence 0..1; UI hides the split below a threshold, hedges in mid. */
+  share_confidence: number | null;
+  /** Estimated window budget Q in local $ (tooltip/diagnostic only). */
+  window_budget: number | null;
 }
 
 export interface UsageReport {
@@ -45,10 +56,19 @@ export interface AppUsage {
   cost: number | null;
 }
 
+/** Mirrors `localstats::ProjectUsageDTO` — one project's pooled tokens + cost. */
+export interface ProjectUsage {
+  project: string;
+  tokens: number;
+  cost: number;
+}
+
 /** Mirrors `tools::LocalReport` — per-tool breakdown + model-pooled total. */
 export interface LocalReport {
   apps: AppUsage[];
   combined: ModelUsage[];
+  /** Top projects by tokens (project-aware tools only — currently Claude Code). */
+  projects: ProjectUsage[];
   source_label: string;
 }
 

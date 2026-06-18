@@ -10,9 +10,9 @@ export function mockLive(): UsageReport {
   return {
     source_label: "Live quota",
     windows: [
-      { title: "5-Hour", utilization: 0.51, remaining: 0.49, resets_at: iso((2 * 3600 + 45 * 60) * 1000), trailing: null },
-      { title: "Weekly", utilization: 0.43, remaining: 0.57, resets_at: iso(26 * 3600 * 1000), trailing: null },
-      { title: "Extra usage", utilization: 1, remaining: 0, resets_at: null, trailing: "Off" },
+      { title: "5-Hour", utilization: 0.51, remaining: 0.49, resets_at: iso((2 * 3600 + 45 * 60) * 1000), trailing: null, eta_secs: 35 * 60, machine_share: 0.34, others_share: 0.17, share_confidence: 0.82, window_budget: 42 },
+      { title: "Weekly", utilization: 0.43, remaining: 0.57, resets_at: iso(26 * 3600 * 1000), trailing: null, eta_secs: null, machine_share: 0.30, others_share: 0.13, share_confidence: 0.25, window_budget: 380 },
+      { title: "Extra usage", utilization: 1, remaining: 0, resets_at: null, trailing: "Off", eta_secs: null, machine_share: null, others_share: null, share_confidence: null, window_budget: null },
     ],
   };
 }
@@ -28,4 +28,19 @@ export const MOCK_LOCAL: LocalReport = {
     { id: "codex", display_name: "Codex", kind: "equivalent", models: [MOCK_GPT], total: MOCK_GPT.total, cost: null },
   ],
   combined: [MOCK_OPUS, MOCK_HAIKU, MOCK_GPT],
+  // A long list (12) so the showcase exercises the expand→scroll behavior.
+  projects: [
+    { project: "hp_bar", tokens: 112_400_000, cost: 138.2 },
+    { project: "perf_bench_llm_tco", tokens: 48_900_000, cost: 61.05 },
+    { project: "src-tauri", tokens: 21_300_000, cost: 14.8 },
+    { project: "find-my-stuff", tokens: 12_700_000, cost: 9.4 },
+    { project: "glm5_perf_test", tokens: 8_900_000, cost: 6.1 },
+    { project: "backend", tokens: 5_600_000, cost: 3.55 },
+    { project: "dotfiles", tokens: 3_900_000, cost: 2.2 },
+    { project: "scratch", tokens: 2_600_000, cost: 1.5 },
+    { project: "sunjichen", tokens: 1_400_000, cost: 2.49 },
+    { project: "notes", tokens: 980_000, cost: 0.61 },
+    { project: "infra", tokens: 540_000, cost: 0.33 },
+    { project: "sandbox", tokens: 210_000, cost: 0.12 },
+  ],
 };

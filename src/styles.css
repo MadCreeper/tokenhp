@@ -139,6 +139,23 @@ body {
   padding: 4px 7px;
   font-size: 13px;
 }
+/* "detail" toggle: an underlined link inline with the "Live quota" footer label
+   that reveals the device-share text + account email/plan. Dim when off. */
+.detail-link {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: 0.02em;
+  text-decoration: underline;
+  color: inherit;
+  opacity: 0.6;
+  padding: 0 0 0 2px;
+}
+.detail-link.on {
+  opacity: 1;
+}
 .seg {
   display: flex;
   gap: 6px;
@@ -216,6 +233,27 @@ body {
   font-weight: 500;
 }
 
+/* The slim secondary-control row under the source tabs (provider / tool+range /
+   range). Smaller than the tabs so they read as a refinement, not primary nav.
+   Its open dropdown list renders full-width *after* this flex row. Placed after
+   the per-theme .mc-btn rules so the compact sizing wins in every theme. */
+.filter-line {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.filter-line > .seg,
+.filter-line > .dd-current {
+  flex: 1;
+}
+.filter-line .mc-btn {
+  font-size: 10px;
+  padding: 4px 7px;
+}
+.filter-line + .dd-list {
+  margin-top: 6px;
+}
+
 /* --- Minecraft live: heart bars --- */
 .bar-head {
   display: flex;
@@ -250,6 +288,44 @@ body {
   margin-top: 4px;
 }
 
+/* Live windows are wrapped so the burn-rate warning stays with its bar; this
+   carries the inter-window gap regardless of theme. */
+.live-window + .live-window {
+  margin-top: 12px;
+}
+/* Burn-rate "you'll run out before reset" warning. Amber, attached under its bar. */
+.bar-eta {
+  margin-top: 4px;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #ffb02e;
+}
+/* Caption line under a live bar: reset countdown (left) + device-share (right).
+   One always-present row so toggling "detail" never adds/removes a line. */
+.live-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 8px;
+  color: var(--panel-text-dim);
+}
+.live-reset {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-share {
+  flex: none;
+  white-space: nowrap;
+  text-align: right;
+}
+.live-share.faint {
+  opacity: 0.65;
+}
+
 /* --- Classic bars (HealthBarStyle port) --- */
 .cbar + .cbar {
   margin-top: 12px;
@@ -273,16 +349,56 @@ body {
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.25);
   overflow: hidden;
+  position: relative;
 }
 .cbar-fill {
   height: 100%;
   border-radius: 3px;
   transition: width 0.4s ease-out;
 }
+/* Device-split: this machine's share of the drained part (others = plain track). */
+.cbar-ghost {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.28);
+  transition: left 0.4s ease-out, width 0.4s ease-out;
+}
 .cbar-caption {
   font-size: 9px;
   color: var(--panel-text-dim);
   margin-top: 3px;
+}
+
+/* --- Local: "Top projects" breakdown (which repo ate my tokens) --- */
+/* Project rows reuse the per-theme magnitude bars (xpBar/classicNeutralBar/akBar)
+   inside an .xp-bars wrapper, so only the section chrome is styled here. */
+.proj-section {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.18);
+}
+.proj-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--panel-text-dim);
+  margin-bottom: 6px;
+}
+/* When expanded to the full project list, cap the height and scroll inside, so
+   the "Show less" toggle below stays on-screen (a long list would otherwise push
+   it past the popover's bottom edge, making it unclickable). */
+.proj-rows.scroll {
+  max-height: 240px;
+  overflow-y: auto;
+}
+/* "Show all / Show less" toggle — full-width, subtle. */
+.proj-more {
+  width: 100%;
+  margin-top: 8px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
 }
 
 /* --- Arknights: 理智 hero plate (Terminal-screen replica) --- */
@@ -421,11 +537,20 @@ body {
   transform: skewX(-30deg);
   margin: 0 6px;
   overflow: hidden;
+  position: relative;
 }
 .ak-fill {
   height: 100%;
   background: #2e2e2e;
   transition: width 0.4s ease-out;
+}
+/* Device-split ghost band (this machine's drain) — both ak-bar and ak-hero-bar. */
+.ak-fill-ghost {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(60, 60, 60, 0.55);
+  transition: left 0.4s ease-out, width 0.4s ease-out;
 }
 .ak-caption {
   font-size: 9px;
