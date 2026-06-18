@@ -8,7 +8,8 @@
 //!      (see [`crate::heart_icon`]), tinted green→red by danger,
 //!   2. keeps the tray tooltip showing the exact percentages, and
 //!   3. fires a native notification when a window crosses into "low" / "critical"
-//!      (once per depletion, opt-out via the tray menu).
+//!      (once per depletion, opt-out via the tray menu), and a "full HP" cheer
+//!      when a window you'd been running low on resets back to healthy.
 //!
 //! It reuses the same credential cache and `/api/oauth/usage` fetch the popover
 //! uses, so it adds no new auth and degrades gracefully (icon left untouched)
@@ -53,6 +54,33 @@ fn severity(remaining: f64) -> u8 {
         1
     } else {
         0
+    }
+}
+
+/// Remaining-fraction at or above which a window counts as "refilled" — high
+/// enough that only a genuine window reset gets there, not jitter back over LOW.
+const REFILL_HEALTHY: f64 = 0.80;
+
+/// What a poll-to-poll change warrants. Pure so it's unit-tested without an
+/// AppHandle. `prev` is the last *notified* severity for this window.
+#[derive(PartialEq, Debug)]
+enum Crossing {
+    /// Crossed into a worse bucket — fire the depletion alert.
+    Alert,
+    /// Recovered from low/critical all the way back to healthy (a window reset)
+    /// — fire a "full HP" cheer, but only if you were actually constrained.
+    Refill,
+    None,
+}
+
+fn crossing(prev: u8, remaining: f64) -> Crossing {
+    let sev = severity(remaining);
+    if sev > prev {
+        Crossing::Alert
+    } else if prev >= 1 && remaining >= REFILL_HEALTHY {
+        Crossing::Refill
+    } else {
+        Crossing::None
     }
 }
 
@@ -389,9 +417,15 @@ fn notify_crossings(
         }
         let sev = severity(w.remaining);
         let prev = last.get(&w.title).copied().unwrap_or(0);
-        if sev > prev && alerts_on {
-            let (title, body) = alert_text(&w.title, w.remaining, sev);
-            let _ = app.notification().builder().title(title).body(body).show();
+        if alerts_on {
+            let msg = match crossing(prev, w.remaining) {
+                Crossing::Alert => Some(alert_text(&w.title, w.remaining, sev)),
+                Crossing::Refill => Some(refill_text(&w.title)),
+                Crossing::None => None,
+            };
+            if let Some((title, body)) = msg {
+                let _ = app.notification().builder().title(title).body(body).show();
+            }
         }
         // Track the new severity either way, so toggling alerts off doesn't queue
         // up a backlog that fires the instant they're re-enabled.
@@ -412,6 +446,15 @@ fn alert_text(window: &str, remaining: f64, sev: u8) -> (String, String) {
             format!("{left}% left on your {window} window."),
         )
     }
+}
+
+/// The good-news counterpart to `alert_text`: your {window} window reset back to
+/// full after you'd been running low — you're unblocked.
+fn refill_text(window: &str) -> (String, String) {
+    (
+        format!("♥ {window} refilled"),
+        format!("Full HP — your {window} quota reset. Back to it."),
+    )
 }
 
 #[cfg(test)]
@@ -480,6 +523,22 @@ mod tests {
         assert!(!step(&mut last, 0.01)); // still critical → no repeat
         assert!(!step(&mut last, 0.9)); // window reset → re-arm, no alert
         assert!(step(&mut last, 0.10)); // next depletion → alert again
+    }
+
+    #[test]
+    fn refill_cheers_once_after_recovery_only() {
+        use Crossing::*;
+        // Healthy and staying healthy → nothing (no spurious cheer on every poll).
+        assert_eq!(crossing(0, 0.90), None);
+        assert_eq!(crossing(0, 1.00), None);
+        // Were critical/low, window reset to full → a one-time refill cheer.
+        assert_eq!(crossing(2, 1.00), Refill);
+        assert_eq!(crossing(1, 0.95), Refill);
+        // Minor jitter back over the LOW line is NOT a refill (must reach HEALTHY).
+        assert_eq!(crossing(1, 0.22), None);
+        // Crossing into a worse bucket is an alert, never a refill.
+        assert_eq!(crossing(0, 0.10), Alert);
+        assert_eq!(crossing(1, 0.03), Alert);
     }
 
     #[test]

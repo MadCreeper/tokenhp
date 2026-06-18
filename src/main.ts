@@ -13,13 +13,13 @@ import type {
   UsageWindow,
 } from "./types";
 import { settingsContentHTML, teamContentHTML } from "./team";
-import { heartsRow, heartsRowSplit } from "./hearts";
+import { heartsRow, heartsRowSplit, heartsRefillHTML } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
 import { installStoneTexture } from "./texture";
 import { applyTheme, cycleTheme, getTheme, isTheme, setThemeOverride, themeLabel } from "./theme";
-import { classicNeutralBar, classicQuotaBar } from "./classicbar";
-import { akBar, akResource } from "./arknights";
+import { classicNeutralBar, classicQuotaBar, classicRefillBar } from "./classicbar";
+import { akBar, akResource, akRefillBar } from "./arknights";
 import { mockLive, MOCK_LOCAL } from "./mock";
 import "./styles.css";
 
@@ -161,6 +161,7 @@ if (sourceParam === "live" || sourceParam === "local") state.source = sourcePara
 if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expand detail
 if (params.get("expand") === "1") state.projectsExpanded = true; // showcase: full project list
 const PACE_SHOWCASE = params.get("pace") === "1"; // showcase: force an over-pace 5-Hour
+const CELEBRATE_SHOWCASE = params.get("celebrate") === "1"; // showcase: loop the refill animation
 
 // ---------------------------------------------------------------- data
 
@@ -200,6 +201,15 @@ async function refresh(): Promise<void> {
         five.eta_secs = null;
       }
     }
+    if (CELEBRATE_SHOWCASE) {
+      // Make the windows look freshly reset so the refill grows to ~full.
+      state.live.windows.forEach((w) => {
+        if (w.trailing !== "Off") {
+          w.remaining = w.title === "Weekly" ? 0.93 : 0.97;
+          w.utilization = 1 - w.remaining;
+        }
+      });
+    }
     state.local = MOCK_LOCAL;
     state.account = { email: "you@example.com", plan: "Max 20×" };
     state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.combined[0].id;
@@ -210,6 +220,10 @@ async function refresh(): Promise<void> {
     return;
   }
   if (inFlight) return;
+  // Don't interrupt a refill celebration with a background poll / re-open — the
+  // data won't meaningfully change in those ~7s, and a re-render would restart
+  // the animation. The next poll after it ends picks up fresh data.
+  if (celebrating.size) return;
   inFlight = true;
   state.loading = true;
   render();
@@ -227,6 +241,9 @@ async function refresh(): Promise<void> {
     if (state.source === "live") {
       // Subscription axis: the selected provider's quota.
       state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
+      // Celebrate any window that reset to full since we last saw it (animation
+      // is painted by the final render below).
+      armCelebration(detectRefills(state.live));
     } else if (state.source === "team") {
       // Pull the shared roster; opportunistically push our own snapshot too so
       // teammates see us (fire-and-forget — the git push can be slow).
@@ -481,7 +498,119 @@ function liveHTML(): string {
   return `<div class="msg">Loading…</div>`;
 }
 
+// --- Refill celebration -----------------------------------------------------
+// When a window you'd actually used (≥ REFILL_MIN_PRIOR utilization) resets back
+// to full (≤ REFILL_FULL_UTIL used), play a ~7s per-theme "refill" animation,
+// once per reset. The last-seen utilization is persisted per window, so a reset
+// that happened while the popover was closed still celebrates on the next open.
+const CELEBRATE_MS = 7_300; // a hair past the 7s CSS animation, then settle
+const REFILL_MIN_PRIOR = 0.5; // must have used ≥ half to "earn" the cheer
+const REFILL_FULL_UTIL = 0.2; // ...and now be back to ≥ 80% remaining (a real reset)
+const REFILL_KEY = "hpbar-refill";
+
+const celebrating = new Set<string>(); // window keys currently animating
+let celebrateTimer: ReturnType<typeof setTimeout> | undefined;
+
+const winKey = (w: UsageWindow): string => `${state.provider}/${w.title}`;
+
+function loadRefillState(): Record<string, number> {
+  try {
+    const v = JSON.parse(localStorage.getItem(REFILL_KEY) ?? "{}");
+    return v && typeof v === "object" ? (v as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+function saveRefillState(s: Record<string, number>): void {
+  try {
+    localStorage.setItem(REFILL_KEY, JSON.stringify(s));
+  } catch {
+    /* best-effort */
+  }
+}
+
+// Compare live windows against the last-seen utilization; return the keys that
+// just refilled, and update the persisted baseline.
+function detectRefills(report: UsageReport): string[] {
+  const seen = loadRefillState();
+  const refilled: string[] = [];
+  for (const w of report.windows) {
+    if (!w.resets_at || w.trailing === "Off") continue; // only resettable windows
+    const key = winKey(w);
+    const prior = seen[key];
+    if (prior != null && prior >= REFILL_MIN_PRIOR && w.utilization <= REFILL_FULL_UTIL) {
+      refilled.push(key);
+    }
+    seen[key] = w.utilization;
+  }
+  saveRefillState(seen);
+  return refilled;
+}
+
+// Mark windows as celebrating + schedule the clear. Does not render (the caller
+// renders) — `refresh` arms it and lets its own final render paint the animation.
+function armCelebration(keys: string[]): void {
+  if (!keys.length) return;
+  keys.forEach((k) => celebrating.add(k));
+  if (celebrateTimer) clearTimeout(celebrateTimer);
+  celebrateTimer = setTimeout(() => {
+    celebrating.clear();
+    render();
+  }, CELEBRATE_MS);
+}
+// Showcase only: loop the refill animation over all resettable live windows so
+// the `?celebrate=1` mock page plays it continuously (one panel per theme).
+function runCelebrationShowcase(): void {
+  const keys = (state.live?.windows ?? [])
+    .filter((w) => w.resets_at && w.trailing !== "Off")
+    .map(winKey);
+  if (!keys.length) return;
+  const loop = () => {
+    celebrating.clear();
+    keys.forEach((k) => celebrating.add(k));
+    render();
+    celebrateTimer = setTimeout(() => {
+      celebrating.clear();
+      render();
+      setTimeout(loop, 1800); // brief settled pause, then replay
+    }, CELEBRATE_MS);
+  };
+  loop();
+}
+
+// User interaction (or navigating away) ends the show so the app stays responsive.
+function cancelCelebration(): void {
+  if (!celebrating.size) return;
+  celebrating.clear();
+  if (celebrateTimer) clearTimeout(celebrateTimer);
+}
+
+// The animated stand-in for a live bar while its window is celebrating a refill.
+function celebrationWindowHTML(w: UsageWindow): string {
+  const r = clamp01(w.remaining);
+  let bar: string;
+  switch (getTheme()) {
+    case "classic":
+      bar = classicRefillBar(w.title, r);
+      break;
+    case "arknights":
+      bar = akRefillBar(w.title, r);
+      break;
+    default:
+      bar = `
+        <div class="bar">
+          <div class="bar-head">
+            <span class="bar-title">${escapeHTML(w.title)}</span>
+            <span class="bar-trailing">refilled ♥</span>
+          </div>
+          <div class="hearts">${heartsRefillHTML(r)}</div>
+        </div>`;
+  }
+  return `<div class="live-window">${bar}</div>`;
+}
+
 function liveBarHTML(w: UsageWindow): string {
+  if (celebrating.has(winKey(w))) return celebrationWindowHTML(w);
   const used = Math.round(w.utilization * 100);
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
@@ -785,6 +914,7 @@ app.addEventListener("click", (e) => {
   if (!btn) return;
   const action = btn.dataset.action;
   const value = btn.dataset.value;
+  cancelCelebration(); // a click ends the refill show; the action re-renders below
 
   switch (action) {
     case "refresh":
@@ -1003,6 +1133,7 @@ render();
 void refresh();
 void loadTeamConfig();
 syncTrayTheme();
+if (CELEBRATE_SHOWCASE) runCelebrationShowcase(); // mock page: loop the refill animation
 
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).
