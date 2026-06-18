@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HPBar — Refill Celebration</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #15161a;
+        color: #e6e6e6;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+        margin: 0 0 4px;
+      }
+      p.note {
+        margin: 0 0 20px;
+        color: #9a9a9a;
+        font-size: 13px;
+        max-width: 760px;
+      }
+      .grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 22px;
+      }
+      .cell {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .cell iframe {
+        width: 380px;
+        height: 420px;
+        border: 1px solid #2c2c2c;
+        border-radius: 6px;
+        background: #000;
+      }
+      .label {
+        font-size: 12px;
+        color: #9a9a9a;
+        text-transform: capitalize;
+      }
+      button {
+        font: inherit;
+        font-size: 13px;
+        color: #e6e6e6;
+        background: #2a2c33;
+        border: 1px solid #3a3d45;
+        border-radius: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        margin-bottom: 18px;
+      }
+      button:hover {
+        background: #34373f;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>♥ HPBar — refill celebration</h1>
+    <p class="note">
+      The ~10s animation that plays once when a quota window resets back to full after
+      you'd been running low. Each panel loops it (mock data, no Keychain / network / Tauri).
+      Arknights: orange drain → light-blue grow → settle gray. Minecraft: hearts refill
+      left→right with black/white blinking outlines. Classic: refill with a red→ramp hue shift.
+    </p>
+    <button id="replay">↻ Replay all</button>
+    <div class="grid" id="grid"></div>
+    <script type="module">
+      const themes = ["minecraft", "classic", "arknights"];
+      const grid = document.getElementById("grid");
+      function build() {
+        grid.innerHTML = "";
+        for (const theme of themes) {
+          const cell = document.createElement("div");
+          cell.className = "cell";
+          const frame = document.createElement("iframe");
+          // cache-bust so "Replay all" reloads each panel from the top
+          frame.src = `/?mock=1&theme=${theme}&source=live&celebrate=1&t=${Date.now()}`;
+          const label = document.createElement("div");
+          label.className = "label";
+          label.textContent = theme;
+          cell.append(frame, label);
+          grid.append(cell);
+        }
+      }
+      document.getElementById("replay").addEventListener("click", build);
+      build();
+    </script>
+  </body>
+</html>

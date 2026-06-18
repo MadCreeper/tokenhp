@@ -98,6 +98,40 @@ export function akResource(
     </div>`;
 }
 
+/** Refill-celebration bar (`@keyframes ak-refill`): the fill turns orange and
+ *  drains to 0, then turns light-blue and grows to `remaining`, then settles to
+ *  the normal gray. 5-Hour animates the 理智 hero plate's bar; others the row. */
+export function akRefillBar(title: string, remaining: number): string {
+  const v = clamp01(remaining);
+  const fill = `${(v * 100).toFixed(1)}%`;
+  if (title === "5-Hour") {
+    const cur = Math.round(v * 135);
+    return `
+      <div class="ak-hero">
+        <div class="ak-hero-plate">
+          <span class="ak-plus">+</span>
+          <span class="ak-hero-brain">${ICON_SANITY}</span>
+          <div class="ak-hero-mid">
+            <div class="ak-hero-num">${cur}</div>
+            <div class="ak-hero-tag">理智/135</div>
+          </div>
+          <div class="ak-hero-bar"><div class="ak-hero-fill celebrate-ak" style="--fill:${fill};--ak-normal:#454545"></div></div>
+        </div>
+      </div>`;
+  }
+  const r = RESOURCES[title] ?? { icon: ICON_ORUNDUM, zh: title, max: 100 };
+  const count = `<span class="ak-count">${Math.round(v * r.max)}<span class="ak-max">/${r.max}</span></span>`;
+  return `
+    <div class="ak-row">
+      <div class="ak-head">
+        <span class="ak-icon">${r.icon}</span>
+        <span class="ak-name">${escapeHTML(r.zh)} <span class="ak-sub">${escapeHTML(title)}</span></span>
+        ${count}
+      </div>
+      <div class="ak-bar"><div class="ak-fill celebrate-ak" style="--fill:${fill};--ak-normal:#2e2e2e"></div></div>
+    </div>`;
+}
+
 /** Local-activity magnitude bar: label / trailing head + thin skewed bar. */
 export function akBar(label: string, frac: number, trailing: string): string {
   return `

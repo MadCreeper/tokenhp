@@ -301,6 +301,98 @@ body {
   letter-spacing: 0.02em;
   color: #ffb02e;
 }
+
+/* ===== Refill celebration (≈10s, plays once when a window resets to full) ===== */
+
+/* Arknights: orange, drain to 0; light-blue, grow to --fill; settle to gray. */
+@keyframes ak-refill {
+  0% {
+    width: var(--fill);
+    background: #ef8a2b;
+  }
+  26% {
+    width: 0%;
+    background: #ef8a2b;
+  }
+  33% {
+    width: 0%;
+    background: #5fd0ff;
+  }
+  70% {
+    width: var(--fill);
+    background: #5fd0ff;
+  }
+  100% {
+    width: var(--fill);
+    background: var(--ak-normal, #2e2e2e);
+  }
+}
+.celebrate-ak {
+  width: var(--fill);
+  animation: ak-refill 10s cubic-bezier(0.45, 0, 0.2, 1) forwards;
+}
+
+/* Classic: grow from empty, red → yellow → the steady ramp color, with a pop. */
+@keyframes classic-refill {
+  0% {
+    width: 0%;
+    background: #e84a3d;
+  }
+  45% {
+    background: #f2c94c;
+  }
+  82% {
+    width: var(--fill);
+    filter: brightness(1.55);
+  }
+  100% {
+    width: var(--fill);
+    background: var(--cl-normal, #3fcc47);
+    filter: brightness(1);
+  }
+}
+.celebrate-classic {
+  width: var(--fill);
+  animation: classic-refill 10s ease-out forwards;
+}
+
+/* Minecraft: a back row of empty hearts + a front row filled to remaining that
+   reveals heart-by-heart left→right, all outlines blinking black↔white. */
+.mc-celebrate {
+  position: relative;
+  display: inline-block;
+}
+.mc-back,
+.mc-front {
+  display: flex;
+  gap: 2px;
+}
+.mc-front {
+  position: absolute;
+  inset: 0;
+  animation: mc-wipe 8s steps(10, end) forwards;
+}
+@keyframes mc-wipe {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+.mc-celebrate .ho {
+  animation: mc-blink 0.42s steps(1) infinite;
+}
+@keyframes mc-blink {
+  0%,
+  49% {
+    fill: #000;
+  }
+  50%,
+  100% {
+    fill: #fff;
+  }
+}
 /* Caption line under a live bar: reset countdown (left) + device-share (right).
    One always-present row so toggling "detail" never adds/removes a line. */
 .live-foot {

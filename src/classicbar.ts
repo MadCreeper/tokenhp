@@ -108,3 +108,21 @@ export function classicQuotaBar(
 export function classicNeutralBar(title: string, frac: number, trailing: string): string {
   return barHTML(title, frac, ACCENT, trailing, null);
 }
+
+/** Refill-celebration bar: the fill grows from empty to `remaining` with a
+ *  red→yellow→ramp hue shift (CSS `@keyframes classic-refill`). `--cl-normal` is
+ *  the steady ramp color it settles to. */
+export function classicRefillBar(title: string, remaining: number): string {
+  const r = clamp01(remaining);
+  const normal = css(rampColor(r));
+  return `
+    <div class="cbar">
+      <div class="cbar-head">
+        <span class="cbar-title">${escapeHTML(title)}</span>
+        <span class="cbar-trailing">refilled</span>
+      </div>
+      <div class="cbar-track">
+        <div class="cbar-fill celebrate-classic" style="--fill:${(r * 100).toFixed(1)}%;--cl-normal:${normal}"></div>
+      </div>
+    </div>`;
+}

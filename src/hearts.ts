@@ -84,6 +84,45 @@ export function heartsRow(value: number): string {
 const GHOST_BODY = "#6b2222";
 const GHOST_SPARKLE = "#8a3838";
 
+// --- Refill celebration ----------------------------------------------------
+// A heart whose outline pixels carry a class (`ho`) so CSS can blink them
+// black↔white during the refill animation.
+function heartSVGCelebrate(fill: number): string {
+  const f = clamp01(fill);
+  const filledBodyCols = Math.max(0, Math.min(BODY_COL_COUNT, Math.round(f * BODY_COL_COUNT)));
+  const lastFilledCol = FIRST_BODY_COL + filledBodyCols - 1;
+  let rects = "";
+  for (let y = 0; y < PATTERN.length; y++) {
+    const row = PATTERN[y];
+    for (let x = 0; x < row.length; x++) {
+      const code = row[x];
+      if (code === 1) {
+        rects += `<rect class="ho" x="${x}" y="${y}" width="1" height="1" fill="${OUTLINE}"/>`;
+        continue;
+      }
+      const color = pixelColor(code, x <= lastFilledCol);
+      if (!color) continue;
+      rects += `<rect x="${x}" y="${y}" width="1" height="1" fill="${color}"/>`;
+    }
+  }
+  return `<svg class="heart" viewBox="0 0 7 7" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg">${rects}</svg>`;
+}
+
+/**
+ * Two stacked heart rows for the refill animation: a back row of empty hearts
+ * (the blinking-outline backdrop) and a front row filled to `remaining` that CSS
+ * reveals left→right (the "refill"). Both rows' outlines blink via the `ho` class.
+ */
+export function heartsRefillHTML(remaining: number): string {
+  let back = "";
+  let front = "";
+  for (let i = 0; i < 10; i++) {
+    back += heartSVGCelebrate(0);
+    front += heartSVGCelebrate(fillForHeart(i, remaining));
+  }
+  return `<div class="mc-celebrate"><div class="mc-back">${back}</div><div class="mc-front">${front}</div></div>`;
+}
+
 /** A full heart drawn in an explicit body/sparkle tone (outline unchanged). */
 function tonedHeartSVG(body: string, sparkle: string): string {
   let rects = "";
