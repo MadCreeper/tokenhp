@@ -43,6 +43,43 @@ function loadProvider(): Provider {
   return localStorage.getItem(PROVIDER_KEY) === "codex" ? "codex" : "claude";
 }
 
+// Remember the last-viewed tab/window/tool across launches so the popover opens
+// where you left it (the Swift app always reset to Live, which was annoying when
+// you live in Local or Team). Stored as one small JSON blob; invalid/old values
+// fall back to the defaults below. The Team source is only restored once we've
+// confirmed it's still enabled (see loadTeamConfig).
+const VIEW_KEY = "hpbar-view";
+interface SavedView {
+  source?: Source;
+  window?: WindowKey;
+  localTool?: string;
+  teamRange?: WindowKey;
+}
+function loadView(): SavedView {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "{}");
+    return v && typeof v === "object" ? (v as SavedView) : {};
+  } catch {
+    return {};
+  }
+}
+function saveView(): void {
+  if (MOCK) return;
+  try {
+    const v: SavedView = {
+      source: state.source,
+      window: state.window,
+      localTool: state.localTool,
+      teamRange: state.teamRange,
+    };
+    localStorage.setItem(VIEW_KEY, JSON.stringify(v));
+  } catch {
+    /* localStorage may be unavailable; persistence is best-effort */
+  }
+}
+const isWindowKey = (v: unknown): v is WindowKey => v === "day" || v === "week" || v === "month";
+const isSource = (v: unknown): v is Source => v === "live" || v === "local" || v === "team";
+
 const WINDOW_SECS: Record<WindowKey, number> = {
   day: 86_400,
   week: 604_800,
@@ -83,12 +120,13 @@ interface State {
   teamStatusOk: boolean;
 }
 
+const savedView = loadView();
 const state: State = {
   provider: loadProvider(),
-  source: "live",
+  source: isSource(savedView.source) ? savedView.source : "live",
   view: "main",
-  window: "day",
-  localTool: "all",
+  window: isWindowKey(savedView.window) ? savedView.window : "day",
+  localTool: typeof savedView.localTool === "string" ? savedView.localTool : "all",
   selectedModelId: null,
   dropdownOpen: false,
   toolDropdownOpen: false,
@@ -103,7 +141,7 @@ const state: State = {
   updatedAt: "",
   teamConfig: null,
   team: null,
-  teamRange: "day",
+  teamRange: isWindowKey(savedView.teamRange) ? savedView.teamRange : "day",
   teamModel: "all",
   teamDropdownOpen: false,
   teamExpanded: new Set(),
@@ -743,6 +781,7 @@ app.addEventListener("click", (e) => {
         state.localTool = value;
         state.dropdownOpen = false;
         snapSelectedModel(); // re-render from already-loaded data, no refetch
+        saveView();
       }
       render();
       break;
@@ -763,6 +802,7 @@ app.addEventListener("click", (e) => {
         state.dropdownOpen = false;
         state.toolDropdownOpen = false;
         state.providerDropdownOpen = false;
+        saveView();
         render(); // show cached view instantly…
         void refresh(); // …then refresh in the background
       }
@@ -770,6 +810,7 @@ app.addEventListener("click", (e) => {
     case "window":
       if (value && value !== state.window) {
         state.window = value as WindowKey;
+        saveView();
         render();
         void refresh();
       }
@@ -797,6 +838,7 @@ app.addEventListener("click", (e) => {
       if (value && value !== state.teamRange) {
         state.teamRange = value as WindowKey;
         state.teamDropdownOpen = false;
+        saveView();
         render();
         void refresh();
       }
@@ -900,6 +942,13 @@ async function loadTeamConfig(): Promise<void> {
   if (MOCK) return;
   try {
     state.teamConfig = await invoke<TeamConfig>("get_team_config");
+    // We may have restored source="team" from a previous session; if sharing is
+    // no longer enabled, the Team tab won't render, so fall back to Live.
+    if (state.source === "team" && !state.teamConfig.enabled) {
+      state.source = "live";
+      saveView();
+      void refresh();
+    }
     render();
   } catch {
     /* leave the Team tab hidden if config can't be read */
