@@ -8,6 +8,7 @@
 :root {
   /* MinecraftPalette, ported from MinecraftThemes.swift */
   --panel-face: #c6c6c6;
+  --panel-bg: #c6c6c6; /* the panel's background per theme — used by the projects fade */
   --frame: #1e1e1e;
   --bevel-light: #ffffff;
   --bevel-shadow: #555555;
@@ -30,6 +31,7 @@ body.theme-classic {
   --panel-text-dim: #6e6e73;
   --error: #c93c34;
   --window-bg: #ececf0;
+  --panel-bg: #ececf0;
   font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", sans-serif;
 }
 body.theme-arknights {
@@ -37,6 +39,7 @@ body.theme-arknights {
   --panel-text-dim: #6d6d6d;
   --error: #b3382f;
   --window-bg: #d8d8d8;
+  --panel-bg: #dcdcdc;
   font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
   font-weight: 400;
 }
@@ -118,6 +121,20 @@ body {
   text-transform: uppercase;
   letter-spacing: 1px;
   font-weight: 500;
+}
+/* On Live the title is the provider switch (click to flip Claude⇄Codex); the
+   tool-cycle chip reuses the same swap glyph. */
+.title-switch {
+  cursor: pointer;
+}
+.title-swap {
+  font-size: 0.8em;
+  opacity: 0.5;
+  margin-left: 2px;
+}
+.title-switch:hover .title-swap,
+.tool-cycle:hover .title-swap {
+  opacity: 1;
 }
 .spinner {
   font-size: 12px;
@@ -233,18 +250,24 @@ body {
   font-weight: 500;
 }
 
-/* The slim secondary-control row under the source tabs (provider / tool+range /
-   range). Smaller than the tabs so they read as a refinement, not primary nav.
-   Its open dropdown list renders full-width *after* this flex row. Placed after
-   the per-theme .mc-btn rules so the compact sizing wins in every theme. */
+/* The slim secondary-control row under the source tabs (tool chip + range, or
+   the range alone on Team). Smaller than the tabs so it reads as a refinement,
+   not primary nav. Placed after the per-theme .mc-btn rules so the compact
+   sizing wins in every theme. */
 .filter-line {
   display: flex;
   gap: 6px;
   align-items: stretch;
 }
 .filter-line > .seg,
-.filter-line > .dd-current {
+.filter-line > .tool-cycle {
   flex: 1;
+}
+/* The tool chip's name on the left, the swap glyph trailing on the right. */
+.tool-cycle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 .filter-line .mc-btn {
   font-size: 10px;
@@ -479,10 +502,28 @@ body {
 }
 /* When expanded to the full project list, cap the height and scroll inside, so
    the "Show less" toggle below stays on-screen (a long list would otherwise push
-   it past the popover's bottom edge, making it unclickable). */
+   it past the popover's bottom edge, making it unclickable). The browser
+   scrollbar is hidden (it never matched the theme); a soft fade hints at more. */
 .proj-rows.scroll {
   max-height: 240px;
   overflow-y: auto;
+  scrollbar-width: none; /* Firefox */
+}
+.proj-rows.scroll::-webkit-scrollbar {
+  display: none; /* the macOS/Windows WebKit webview */
+}
+.proj-scroll-wrap {
+  position: relative;
+}
+.proj-scroll-wrap::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22px;
+  pointer-events: none;
+  background: linear-gradient(transparent, var(--panel-bg));
 }
 /* "Show all / Show less" toggle — full-width, subtle. */
 .proj-more {
@@ -690,6 +731,10 @@ body {
   gap: 4px;
   max-height: 168px;
   overflow-y: auto;
+  scrollbar-width: none; /* Firefox */
+}
+.dd-list::-webkit-scrollbar {
+  display: none; /* the macOS/Windows WebKit webview — no unthemed bar */
 }
 
 .kind-tag {

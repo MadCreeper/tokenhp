@@ -97,8 +97,6 @@ interface State {
   localTool: string; // API axis (Local): "all" or a tool id
   selectedModelId: string | null;
   dropdownOpen: boolean; // Local: the model dropdown
-  toolDropdownOpen: boolean; // Local: the tool selector (All / Claude Code / …)
-  providerDropdownOpen: boolean; // Live: the Claude / Codex selector
   projectsExpanded: boolean; // Local "Top projects": show all vs the top few
   showDetail: boolean; // Live: reveal the device-share text + account email/plan
   live: UsageReport | null;
@@ -129,8 +127,6 @@ const state: State = {
   localTool: typeof savedView.localTool === "string" ? savedView.localTool : "all",
   selectedModelId: null,
   dropdownOpen: false,
-  toolDropdownOpen: false,
-  providerDropdownOpen: false,
   projectsExpanded: false,
   showDetail: false,
   live: null,
@@ -320,43 +316,25 @@ function render(): void {
 // controls, kept compact so the tabs stay the only chunky row. Often-toggled
 // ranges are visible segments; rarely-changed tool/provider use dropdowns.
 function filterLineHTML(): string {
-  if (state.source === "live") return liveFilterHTML();
+  // Live has no filter row — the provider toggle lives in the title (headerHTML).
   if (state.source === "local") return localFilterHTML();
   if (state.source === "team") return teamFilterHTML();
   return "";
 }
 
-// Live: the Claude / Codex provider as a compact dropdown (rarely switched).
-function liveFilterHTML(): string {
-  const opts = [
-    { id: "claude", name: "Claude" },
-    { id: "codex", name: "Codex" },
-  ];
-  const current = opts.find((o) => o.id === state.provider) ?? opts[0];
-  return (
-    `<div class="filter-line">` +
-    ddCurrent("toggle-provider-dropdown", current.name, state.providerDropdownOpen) +
-    `</div>` +
-    ddList("provider", opts, state.provider, state.providerDropdownOpen)
-  );
-}
-
-// Local: tool selector (dropdown — the list grows with adapters) on the left,
-// the window range (segment — toggled often) on the right.
+// Local: the tool as a click-to-cycle chip (advances All → Claude Code → … on
+// click) on the left; the window range (segment — toggled often) on the right.
 function localFilterHTML(): string {
   const apps = state.local?.apps ?? [];
   const opts = [{ id: "all", name: "All tools" }, ...apps.map((a) => ({ id: a.id, name: a.display_name }))];
   const current = opts.find((o) => o.id === state.localTool) ?? opts[0];
+  const chip = `<button class="mc-btn tool-cycle" data-action="tool-cycle" title="Switch tool">${escapeHTML(
+    current.name,
+  )} <span class="title-swap">⇄</span></button>`;
   const windowSeg = `<div class="seg">${(["day", "week", "month"] as WindowKey[])
     .map((w) => segButton("window", w, WINDOW_TITLE[w], state.window === w))
     .join("")}</div>`;
-  return (
-    `<div class="filter-line">` +
-    ddCurrent("toggle-tool-dropdown", current.name, state.toolDropdownOpen) +
-    windowSeg +
-    `</div>` +
-    ddList("tool", opts, state.localTool, state.toolDropdownOpen)
-  );
+  return `<div class="filter-line">${chip}${windowSeg}</div>`;
 }
 
 // Team: the date range as a segment (toggled often). The model selector stays
@@ -367,31 +345,6 @@ function teamFilterHTML(): string {
     .map((r) => segButton("team-range", r, TEAM_RANGE_LABEL[r], state.teamRange === r))
     .join("");
   return `<div class="filter-line"><div class="seg">${seg}</div></div>`;
-}
-
-// Shared dropdown bits (mirror the model dropdown markup) so the filter-line
-// selectors reuse the existing .dd-current / .dd-list styling + behavior. The
-// open list renders full-width *after* the filter line, not inside its flex row.
-function ddCurrent(action: string, label: string, open: boolean): string {
-  return `<button class="mc-btn dd-current" data-action="${action}"><span>${escapeHTML(
-    label,
-  )}</span><span class="chev">${open ? "▲" : "▼"}</span></button>`;
-}
-function ddList(
-  action: string,
-  opts: { id: string; name: string }[],
-  selected: string,
-  open: boolean,
-): string {
-  if (!open) return "";
-  return `<div class="dd-list">${opts
-    .map(
-      (o) =>
-        `<button class="mc-btn ${o.id === selected ? "selected" : ""}" data-action="${action}" data-value="${escapeHTML(
-          o.id,
-        )}">${escapeHTML(o.name)}</button>`,
-    )
-    .join("")}</div>`;
 }
 
 function defaultTeamDraft(): TeamConfig {
@@ -437,9 +390,17 @@ function headerHTML(): string {
           ? "Codex Quota"
           : "Claude Quota"
         : "Token Usage";
+  // On Live the title doubles as the provider switch: click to flip Claude⇄Codex
+  // (it already names the provider), so Live needs no separate control row.
+  const titleHTML =
+    state.source === "live"
+      ? `<span class="title title-switch" data-action="provider-cycle" title="Switch to ${
+          state.provider === "codex" ? "Claude" : "Codex"
+        }">${escapeHTML(title)} <span class="title-swap">⇄</span></span>`
+      : `<span class="title">${escapeHTML(title)}</span>`;
   return `
     <header class="header">
-      <span class="title">${escapeHTML(title)}</span>
+      ${titleHTML}
       ${state.loading ? `<span class="spinner">…</span>` : ""}
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings" title="Team settings">⚙</button>
@@ -802,8 +763,12 @@ function projectsHTML(): string {
   // breakdown (its gap applies to .xp / .cbar / .akb alike). When expanded to the
   // full list, cap the height with an inner scroll so "Show less" (below) stays
   // on-screen — otherwise a long list pushes the toggle past the popover bottom.
-  const rowsClass = `xp-bars proj-rows${state.projectsExpanded ? " scroll" : ""}`;
-  return `<div class="proj-section"><div class="proj-title">Top projects</div><div class="${rowsClass}">${rows}</div>${toggle}</div>`;
+  // When expanded, the rows sit in a capped, internally-scrolling box (so "Show
+  // less" stays on-screen) wrapped by `.proj-scroll-wrap`, which paints the soft
+  // bottom fade hinting there's more. The browser scrollbar itself is hidden (CSS).
+  const rowsDiv = `<div class="xp-bars proj-rows${state.projectsExpanded ? " scroll" : ""}">${rows}</div>`;
+  const body = state.projectsExpanded ? `<div class="proj-scroll-wrap">${rowsDiv}</div>` : rowsDiv;
+  return `<div class="proj-section"><div class="proj-title">Top projects</div>${body}${toggle}</div>`;
 }
 
 // The active theme's magnitude bar (label · trailing + bar), shared by the model
@@ -921,40 +886,27 @@ app.addEventListener("click", (e) => {
       maybeUploadTeam(); // also push our latest usage up (rate-limited)
       void refresh();
       break;
-    case "provider":
-      state.providerDropdownOpen = false;
-      if (value && value !== state.provider) {
-        state.provider = value as Provider;
-        localStorage.setItem(PROVIDER_KEY, state.provider);
-        // Provider only drives the subscription (Live) view + its account footer.
-        state.live = null;
-        state.account = null;
-        state.error = "";
-        render();
-        void refresh();
-      } else {
-        render(); // just closed the dropdown
-      }
+    case "provider-cycle":
+      // Title click on Live: flip Claude⇄Codex (only two providers).
+      state.provider = state.provider === "codex" ? "claude" : "codex";
+      localStorage.setItem(PROVIDER_KEY, state.provider);
+      state.live = null; // provider drives the Live quota + its account footer
+      state.account = null;
+      state.error = "";
+      render();
+      void refresh();
       break;
-    case "toggle-provider-dropdown":
-      state.providerDropdownOpen = !state.providerDropdownOpen;
+    case "tool-cycle": {
+      // Tool chip click: advance to the next tool (wraps), no refetch.
+      const ids = ["all", ...(state.local?.apps ?? []).map((a) => a.id)];
+      const i = ids.indexOf(state.localTool);
+      state.localTool = ids[(i + 1) % ids.length] ?? "all";
+      state.dropdownOpen = false;
+      snapSelectedModel(); // re-render from already-loaded data
+      saveView();
       render();
       break;
-    case "tool":
-      state.toolDropdownOpen = false;
-      if (value && value !== state.localTool) {
-        state.localTool = value;
-        state.dropdownOpen = false;
-        snapSelectedModel(); // re-render from already-loaded data, no refetch
-        saveView();
-      }
-      render();
-      break;
-    case "toggle-tool-dropdown":
-      state.toolDropdownOpen = !state.toolDropdownOpen;
-      state.dropdownOpen = false; // don't stack the model list under the tool list
-      render();
-      break;
+    }
     case "theme":
       cycleTheme();
       syncTrayTheme(); // recolor the menu-bar heart to match
@@ -965,8 +917,6 @@ app.addEventListener("click", (e) => {
         state.source = value as Source;
         state.error = "";
         state.dropdownOpen = false;
-        state.toolDropdownOpen = false;
-        state.providerDropdownOpen = false;
         saveView();
         render(); // show cached view instantly…
         void refresh(); // …then refresh in the background
