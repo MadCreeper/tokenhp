@@ -160,6 +160,7 @@ const sourceParam = params.get("source");
 if (sourceParam === "live" || sourceParam === "local") state.source = sourceParam;
 if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expand detail
 if (params.get("expand") === "1") state.projectsExpanded = true; // showcase: full project list
+const PACE_SHOWCASE = params.get("pace") === "1"; // showcase: force an over-pace 5-Hour
 
 // ---------------------------------------------------------------- data
 
@@ -188,6 +189,17 @@ function maybeUploadTeam(): void {
 async function refresh(): Promise<void> {
   if (MOCK) {
     state.live = mockLive();
+    if (PACE_SHOWCASE) {
+      // Force the 5-Hour window over an even spend-down so the pace cue shows:
+      // ~65% used at ~45% of the window elapsed → "20% over pace". eta is nulled
+      // because the stronger "hits limit" warning would otherwise suppress it.
+      const five = state.live.windows.find((w) => w.title === "5-Hour");
+      if (five) {
+        five.utilization = 0.65;
+        five.remaining = 0.35;
+        five.eta_secs = null;
+      }
+    }
     state.local = MOCK_LOCAL;
     state.account = { email: "you@example.com", plan: "Max 20×" };
     state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.combined[0].id;
@@ -474,6 +486,8 @@ function liveBarHTML(w: UsageWindow): string {
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
   const reset = resetCaption(w.resets_at);
+  const pace = paceNote(w); // "20% over pace" on the 5-Hour bar when burning fast
+  const resetText = [reset, pace].filter(Boolean).join(" · ");
   const split = machineSplit(w); // this machine's window fraction, or null when unsure
   let bar: string;
   switch (getTheme()) {
@@ -492,9 +506,9 @@ function liveBarHTML(w: UsageWindow): string {
   // toggling "detail" changes only the right text — no line added → no resize.
   const share = shareInfo(w);
   const foot =
-    reset || share.text
+    resetText || share.text
       ? `<div class="live-foot">
-          <span class="live-reset">${reset ? escapeHTML(reset) : ""}</span>
+          <span class="live-reset">${resetText ? escapeHTML(resetText) : ""}</span>
           <span class="live-share${share.faint ? " faint" : ""}" title="${escapeHTML(share.title)}">${escapeHTML(share.text)}</span>
         </div>`
       : "";
@@ -563,6 +577,27 @@ function heartBarHTML(
       <div class="hearts">${hearts}</div>
       ${caption ? `<div class="bar-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
+}
+
+// Even-pace check: how far along the window are you in *time* vs in *usage*?
+// Only the 5-Hour window — the one you actively manage; "over pace" on the
+// 7-day window early in the week is normal and not actionable.
+const PACE_WINDOW_SECS: Record<string, number> = { "5-Hour": 5 * 3600 };
+const PACE_THRESHOLD = 0.12; // only flag a meaningful lead (12 percentage points)
+
+// "20% over pace" when you've burned notably more than an even spend-down would
+// predict by now — a gentle nudge to slow before you hit the harder eta warning.
+// null when on/under pace, unknown duration, or the eta warning is already shown.
+function paceNote(w: UsageWindow): string | null {
+  if (w.eta_secs != null) return null; // the stronger "hits limit" warning wins
+  const dur = PACE_WINDOW_SECS[w.title];
+  if (!dur || !w.resets_at) return null;
+  const ts = Date.parse(w.resets_at);
+  if (Number.isNaN(ts)) return null;
+  const elapsed = clamp01((dur - (ts - Date.now()) / 1000) / dur); // fraction of window elapsed
+  const over = w.utilization - elapsed; // >0 ⇒ ahead of an even spend-down
+  if (over <= PACE_THRESHOLD) return null;
+  return `${Math.round(over * 100)}% over pace`;
 }
 
 function resetCaption(iso: string | null): string | null {
