@@ -9,12 +9,10 @@ import { xpBar } from "./xpbar";
 import { classicNeutralBar } from "./classicbar";
 import { akBar } from "./arknights";
 
-const RANGE_LABEL: Record<string, string> = { day: "Today", week: "7d", month: "30d" };
-
-/** The range segment + model dropdown + leaderboard, for the Team tab. */
+/** The model dropdown + leaderboard, for the Team tab. (The date-range segment
+ *  lives in the filter line above, rendered by main.ts.) */
 export function teamContentHTML(args: {
   report: TeamReport | null;
-  range: string;
   model: string; // "all" or a model id
   dropdownOpen: boolean;
   selfName: string; // your locally-set display name (authoritative for your row)
@@ -23,26 +21,15 @@ export function teamContentHTML(args: {
   error: string;
   theme: Theme;
 }): string {
-  const seg = `
-    <div class="seg">
-      ${(["day", "week", "month"] as const)
-        .map(
-          (r) =>
-            `<button class="mc-btn ${args.range === r ? "selected" : ""}" data-action="team-range" data-value="${r}">${RANGE_LABEL[r]}</button>`,
-        )
-        .join("")}
-    </div>`;
-
   if (!args.report) {
-    const body = args.error
+    return args.error
       ? `<div class="msg error">${escapeHTML(args.error)}</div>`
       : `<div class="msg">Loading…</div>`;
-    return seg + body;
   }
 
   const report = args.report;
   if (report.members.length === 0) {
-    return seg + `<div class="msg">No members yet. Share your usage to seed the team.</div>`;
+    return `<div class="msg">No members yet. Share your usage to seed the team.</div>`;
   }
 
   const dropdown = modelDropdownHTML(report, args.model, args.dropdownOpen);
@@ -66,7 +53,7 @@ export function teamContentHTML(args: {
       }),
     )
     .join("");
-  return seg + dropdown + `<div class="team-list">${rows}</div>`;
+  return dropdown + `<div class="team-list">${rows}</div>`;
 }
 
 // The model selector — same markup as the local-usage dropdown, with its own

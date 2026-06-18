@@ -49,6 +49,8 @@ const WINDOW_SECS: Record<WindowKey, number> = {
   month: 2_592_000,
 };
 const WINDOW_TITLE: Record<WindowKey, string> = { day: "24h", week: "7d", month: "30d" };
+// Team uses calendar-ish labels ("Today") where Local uses durations ("24h").
+const TEAM_RANGE_LABEL: Record<WindowKey, string> = { day: "Today", week: "7d", month: "30d" };
 
 interface State {
   provider: Provider; // subscription axis (Live): whose quota
@@ -57,7 +59,9 @@ interface State {
   window: WindowKey;
   localTool: string; // API axis (Local): "all" or a tool id
   selectedModelId: string | null;
-  dropdownOpen: boolean;
+  dropdownOpen: boolean; // Local: the model dropdown
+  toolDropdownOpen: boolean; // Local: the tool selector (All / Claude Code / …)
+  providerDropdownOpen: boolean; // Live: the Claude / Codex selector
   projectsExpanded: boolean; // Local "Top projects": show all vs the top few
   showDetail: boolean; // Live: reveal the device-share text + account email/plan
   live: UsageReport | null;
@@ -87,6 +91,8 @@ const state: State = {
   localTool: "all",
   selectedModelId: null,
   dropdownOpen: false,
+  toolDropdownOpen: false,
+  providerDropdownOpen: false,
   projectsExpanded: false,
   showDetail: false,
   live: null,
@@ -115,6 +121,7 @@ if (isTheme(themeParam)) setThemeOverride(themeParam);
 const sourceParam = params.get("source");
 if (sourceParam === "live" || sourceParam === "local") state.source = sourceParam;
 if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expand detail
+if (params.get("expand") === "1") state.projectsExpanded = true; // showcase: full project list
 
 // ---------------------------------------------------------------- data
 
@@ -233,7 +240,7 @@ function render(): void {
       : `<main class="panel">
       ${headerHTML()}
       ${sourceSegHTML()}
-      ${subSegHTML()}
+      ${filterLineHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
     </main>`;
@@ -242,12 +249,82 @@ function render(): void {
   requestAnimationFrame(syncWindowSize);
 }
 
-// The second segmented row depends on the source; Team renders its own range
-// selector inside the content area (like Local's window selector).
-function subSegHTML(): string {
-  if (state.source === "live") return providerSegHTML();
-  if (state.source === "local") return toolSegHTML();
+// The slim "filter line" under the source tabs holds each view's secondary
+// controls, kept compact so the tabs stay the only chunky row. Often-toggled
+// ranges are visible segments; rarely-changed tool/provider use dropdowns.
+function filterLineHTML(): string {
+  if (state.source === "live") return liveFilterHTML();
+  if (state.source === "local") return localFilterHTML();
+  if (state.source === "team") return teamFilterHTML();
   return "";
+}
+
+// Live: the Claude / Codex provider as a compact dropdown (rarely switched).
+function liveFilterHTML(): string {
+  const opts = [
+    { id: "claude", name: "Claude" },
+    { id: "codex", name: "Codex" },
+  ];
+  const current = opts.find((o) => o.id === state.provider) ?? opts[0];
+  return (
+    `<div class="filter-line">` +
+    ddCurrent("toggle-provider-dropdown", current.name, state.providerDropdownOpen) +
+    `</div>` +
+    ddList("provider", opts, state.provider, state.providerDropdownOpen)
+  );
+}
+
+// Local: tool selector (dropdown — the list grows with adapters) on the left,
+// the window range (segment — toggled often) on the right.
+function localFilterHTML(): string {
+  const apps = state.local?.apps ?? [];
+  const opts = [{ id: "all", name: "All tools" }, ...apps.map((a) => ({ id: a.id, name: a.display_name }))];
+  const current = opts.find((o) => o.id === state.localTool) ?? opts[0];
+  const windowSeg = `<div class="seg">${(["day", "week", "month"] as WindowKey[])
+    .map((w) => segButton("window", w, WINDOW_TITLE[w], state.window === w))
+    .join("")}</div>`;
+  return (
+    `<div class="filter-line">` +
+    ddCurrent("toggle-tool-dropdown", current.name, state.toolDropdownOpen) +
+    windowSeg +
+    `</div>` +
+    ddList("tool", opts, state.localTool, state.toolDropdownOpen)
+  );
+}
+
+// Team: the date range as a segment (toggled often). The model selector stays
+// in the content, next to the leaderboard it filters.
+function teamFilterHTML(): string {
+  if (!state.teamConfig?.enabled) return "";
+  const seg = (["day", "week", "month"] as WindowKey[])
+    .map((r) => segButton("team-range", r, TEAM_RANGE_LABEL[r], state.teamRange === r))
+    .join("");
+  return `<div class="filter-line"><div class="seg">${seg}</div></div>`;
+}
+
+// Shared dropdown bits (mirror the model dropdown markup) so the filter-line
+// selectors reuse the existing .dd-current / .dd-list styling + behavior. The
+// open list renders full-width *after* the filter line, not inside its flex row.
+function ddCurrent(action: string, label: string, open: boolean): string {
+  return `<button class="mc-btn dd-current" data-action="${action}"><span>${escapeHTML(
+    label,
+  )}</span><span class="chev">${open ? "▲" : "▼"}</span></button>`;
+}
+function ddList(
+  action: string,
+  opts: { id: string; name: string }[],
+  selected: string,
+  open: boolean,
+): string {
+  if (!open) return "";
+  return `<div class="dd-list">${opts
+    .map(
+      (o) =>
+        `<button class="mc-btn ${o.id === selected ? "selected" : ""}" data-action="${action}" data-value="${escapeHTML(
+          o.id,
+        )}">${escapeHTML(o.name)}</button>`,
+    )
+    .join("")}</div>`;
 }
 
 function defaultTeamDraft(): TeamConfig {
@@ -316,26 +393,6 @@ function segButton(action: string, value: string, label: string, selected: boole
   return `<button class="mc-btn ${selected ? "selected" : ""}" data-action="${action}" data-value="${value}">${label}</button>`;
 }
 
-// Subscription axis (Live): which provider's quota.
-function providerSegHTML(): string {
-  return `
-    <div class="seg provider-seg">
-      ${segButton("provider", "claude", "Claude", state.provider === "claude")}
-      ${segButton("provider", "codex", "Codex", state.provider === "codex")}
-    </div>`;
-}
-
-// API axis (Local): which tool to show, or "All" (pooled by model). Tool options
-// come from the loaded report, so the list grows as new adapters are added.
-function toolSegHTML(): string {
-  const apps = state.local?.apps ?? [];
-  const opts = [{ id: "all", name: "All" }, ...apps.map((a) => ({ id: a.id, name: a.display_name }))];
-  return `
-    <div class="seg tool-seg">
-      ${opts.map((o) => segButton("tool", o.id, o.name, state.localTool === o.id)).join("")}
-    </div>`;
-}
-
 function sourceSegHTML(): string {
   // The Team tab only appears once the user has opted in (config.enabled).
   const teamOn = !!state.teamConfig?.enabled;
@@ -355,7 +412,6 @@ function contentHTML(): string {
   if (state.source === "team")
     return teamContentHTML({
       report: state.team,
-      range: state.teamRange,
       model: state.teamModel,
       dropdownOpen: state.teamDropdownOpen,
       selfName: state.teamConfig?.display_name ?? "",
@@ -488,28 +544,21 @@ function resetCaption(iso: string | null): string | null {
 // --- Local (XP bars) ---
 
 function localHTML(): string {
-  const windowSeg = `
-    <div class="seg">
-      ${(["day", "week", "month"] as WindowKey[])
-        .map((w) => segButton("window", w, WINDOW_TITLE[w], state.window === w))
-        .join("")}
-    </div>`;
-
+  // The window range now lives in the filter line above; content is just the
+  // model breakdown for the selected tool/window.
   if (!state.local) {
-    const body = state.error
+    return state.error
       ? `<div class="msg">${escapeHTML(state.error)}</div>`
       : `<div class="msg">Loading…</div>`;
-    return windowSeg + body;
   }
 
   const { models, kind } = localModels();
   const current = models.find((m) => m.id === state.selectedModelId) ?? models[0];
   if (!current) {
-    return windowSeg + `<div class="msg">No usage for this tool in this window.</div>`;
+    return `<div class="msg">No usage for this tool in this window.</div>`;
   }
 
   return (
-    windowSeg +
     kindTagHTML(kind) +
     dropdownHTML(models, current) +
     costLineHTML(current) +
@@ -548,8 +597,11 @@ function projectsHTML(): string {
       }</button>`
     : "";
   // Wrap rows in `.xp-bars` so they get the same per-theme spacing as the model
-  // breakdown (its gap applies to .xp / .cbar / .akb alike).
-  return `<div class="proj-section"><div class="proj-title">Top projects</div><div class="xp-bars">${rows}</div>${toggle}</div>`;
+  // breakdown (its gap applies to .xp / .cbar / .akb alike). When expanded to the
+  // full list, cap the height with an inner scroll so "Show less" (below) stays
+  // on-screen — otherwise a long list pushes the toggle past the popover bottom.
+  const rowsClass = `xp-bars proj-rows${state.projectsExpanded ? " scroll" : ""}`;
+  return `<div class="proj-section"><div class="proj-title">Top projects</div><div class="${rowsClass}">${rows}</div>${toggle}</div>`;
 }
 
 // The active theme's magnitude bar (label · trailing + bar), shared by the model
@@ -667,6 +719,7 @@ app.addEventListener("click", (e) => {
       void refresh();
       break;
     case "provider":
+      state.providerDropdownOpen = false;
       if (value && value !== state.provider) {
         state.provider = value as Provider;
         localStorage.setItem(PROVIDER_KEY, state.provider);
@@ -676,15 +729,27 @@ app.addEventListener("click", (e) => {
         state.error = "";
         render();
         void refresh();
+      } else {
+        render(); // just closed the dropdown
       }
       break;
+    case "toggle-provider-dropdown":
+      state.providerDropdownOpen = !state.providerDropdownOpen;
+      render();
+      break;
     case "tool":
+      state.toolDropdownOpen = false;
       if (value && value !== state.localTool) {
         state.localTool = value;
         state.dropdownOpen = false;
         snapSelectedModel(); // re-render from already-loaded data, no refetch
-        render();
       }
+      render();
+      break;
+    case "toggle-tool-dropdown":
+      state.toolDropdownOpen = !state.toolDropdownOpen;
+      state.dropdownOpen = false; // don't stack the model list under the tool list
+      render();
       break;
     case "theme":
       cycleTheme();
@@ -696,6 +761,8 @@ app.addEventListener("click", (e) => {
         state.source = value as Source;
         state.error = "";
         state.dropdownOpen = false;
+        state.toolDropdownOpen = false;
+        state.providerDropdownOpen = false;
         render(); // show cached view instantly…
         void refresh(); // …then refresh in the background
       }

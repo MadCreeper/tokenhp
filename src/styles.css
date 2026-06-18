@@ -233,6 +233,27 @@ body {
   font-weight: 500;
 }
 
+/* The slim secondary-control row under the source tabs (provider / tool+range /
+   range). Smaller than the tabs so they read as a refinement, not primary nav.
+   Its open dropdown list renders full-width *after* this flex row. Placed after
+   the per-theme .mc-btn rules so the compact sizing wins in every theme. */
+.filter-line {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.filter-line > .seg,
+.filter-line > .dd-current {
+  flex: 1;
+}
+.filter-line .mc-btn {
+  font-size: 10px;
+  padding: 4px 7px;
+}
+.filter-line + .dd-list {
+  margin-top: 6px;
+}
+
 /* --- Minecraft live: heart bars --- */
 .bar-head {
   display: flex;
@@ -363,6 +384,13 @@ body {
   letter-spacing: 0.06em;
   color: var(--panel-text-dim);
   margin-bottom: 6px;
+}
+/* When expanded to the full project list, cap the height and scroll inside, so
+   the "Show less" toggle below stays on-screen (a long list would otherwise push
+   it past the popover's bottom edge, making it unclickable). */
+.proj-rows.scroll {
+  max-height: 240px;
+  overflow-y: auto;
 }
 /* "Show all / Show less" toggle — full-width, subtle. */
 .proj-more {
