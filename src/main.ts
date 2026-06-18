@@ -379,23 +379,35 @@ function liveBarHTML(w: UsageWindow): string {
   const used = Math.round(w.utilization * 100);
   const left = Math.round(w.remaining * 100);
   const trailing = w.trailing ?? `${used}% used · ${left}% left`;
-  const caption = resetCaption(w.resets_at);
+  const reset = resetCaption(w.resets_at);
   const split = machineSplit(w); // this machine's window fraction, or null when unsure
   let bar: string;
   switch (getTheme()) {
+    // Caption is rendered below (in `.live-foot`), not by the theme bar, so the
+    // share text can ride its right edge — pass null caption to each renderer.
     case "classic":
-      bar = classicQuotaBar(w.title, w.remaining, trailing, caption, split, w.trailing === "Off");
+      bar = classicQuotaBar(w.title, w.remaining, trailing, null, split, w.trailing === "Off");
       break;
     case "arknights":
-      bar = akResource(w.title, w.remaining, caption, w.trailing, split);
+      bar = akResource(w.title, w.remaining, null, w.trailing, split);
       break;
     default:
-      bar = heartBarHTML(w, trailing, caption, split);
+      bar = heartBarHTML(w, trailing, null, split);
   }
-  // Wrap so the optional warning/share lines stay attached to their bar and
-  // inter-window spacing comes from `.live-window` (the `.bar + .bar` selectors
-  // would be broken by a line slipped between two bars).
-  return `<div class="live-window">${bar}${shareSublabelHTML(w)}${etaWarnHTML(w.eta_secs)}</div>`;
+  // reset countdown (left) + device-share (right) on one always-present line, so
+  // toggling "detail" changes only the right text — no line added → no resize.
+  const share = shareInfo(w);
+  const foot =
+    reset || share.text
+      ? `<div class="live-foot">
+          <span class="live-reset">${reset ? escapeHTML(reset) : ""}</span>
+          <span class="live-share${share.faint ? " faint" : ""}" title="${escapeHTML(share.title)}">${escapeHTML(share.text)}</span>
+        </div>`
+      : "";
+  // Wrap so the foot/warning stay attached to their bar; inter-window spacing
+  // comes from `.live-window` (the `.bar + .bar` selectors would be broken by a
+  // line slipped between two bars).
+  return `<div class="live-window">${bar}${foot}${etaWarnHTML(w.eta_secs)}</div>`;
 }
 
 // Confidence below this hides the device split entirely (bar renders as before).
@@ -413,24 +425,24 @@ function machineSplit(w: UsageWindow): number | null {
 // "This machine vs other devices" split for the window — an estimate from
 // correlating account-wide utilization with this machine's local cost (see the
 // Rust `share` module). Hidden until the fit is confident; faded in the mid range.
-function shareSublabelHTML(w: UsageWindow): string {
-  if (!state.showDetail) return ""; // revealed via the "detail" toggle
+// The device-share text shown (via "detail") on the *right* of a bar's caption
+// line, so toggling it doesn't add/remove a line (no window resize). `title` is
+// the hover tooltip. Empty `text` ⇒ nothing on the right.
+function shareInfo(w: UsageWindow): { text: string; faint: boolean; title: string } {
+  if (!state.showDetail) return { text: "", faint: false, title: "" };
   const m = w.machine_share;
   const o = w.others_share;
   const conf = w.share_confidence;
-  if (m == null || o == null || conf == null) return ""; // no estimate at all yet
-  // We have an estimate but it's not confident enough to commit to numbers —
-  // tell the user it's working and accumulating, rather than showing nothing.
+  if (m == null || o == null || conf == null) return { text: "", faint: false, title: "" };
   if (conf < SHARE_MIN_CONF) {
-    return `<div class="share-sub faint">Device split · estimating…</div>`;
+    return { text: "estimating…", faint: true, title: "Device split: collecting data" };
   }
   const pct = (x: number) => Math.round(x * 100);
-  const budget =
+  const title =
     w.window_budget != null && w.window_budget > 0
-      ? `≈ ${formatDollars(w.window_budget)} = 100% of this ${escapeHTML(w.title)} window (estimated)`
+      ? `≈ ${formatDollars(w.window_budget)} = 100% of this ${w.title} window (estimated)`
       : "estimated device split";
-  const faint = conf < 0.6 ? " faint" : "";
-  return `<div class="share-sub${faint}" title="${escapeHTML(budget)}">This machine ~${pct(m)}% · Others ~${pct(o)}%</div>`;
+  return { text: `This machine ~${pct(m)}% · Others ~${pct(o)}%`, faint: conf < 0.6, title };
 }
 
 // The burn-rate projection: shown only when the backend has judged you're on pace
@@ -610,15 +622,19 @@ function footerHTML(): string {
         : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
   // The footer's middle line: account identity on Live (revealed via the footer
-  // "detail" toggle), member count on Team.
+  // "detail" toggle), member count on Team. In live view the line is always
+  // present (a blank &nbsp; placeholder when hidden) so toggling "detail" doesn't
+  // grow/shrink the footer → no window resize.
   let midLine = "";
-  if (state.source === "live" && state.showDetail) {
+  if (state.source === "live") {
     // The per-account subscription (Claude login, or the ChatGPT login behind
-    // Codex). Hidden on Local, which aggregates models across accounts.
-    const acctText = state.account
-      ? [state.account.email, state.account.plan].filter(Boolean).join(" · ")
-      : "";
-    if (acctText) midLine = `<div class="account">${escapeHTML(acctText)}</div>`;
+    // Codex), shown only when "detail" is on. Hidden on Local, which aggregates
+    // models across accounts.
+    const acctText =
+      state.showDetail && state.account
+        ? [state.account.email, state.account.plan].filter(Boolean).join(" · ")
+        : "";
+    midLine = `<div class="account">${acctText ? escapeHTML(acctText) : "&nbsp;"}</div>`;
   } else if (state.source === "team" && state.team) {
     const n = state.team.members.length;
     midLine = `<div class="account">${n} member${n === 1 ? "" : "s"}</div>`;

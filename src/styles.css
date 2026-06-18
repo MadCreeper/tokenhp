@@ -280,14 +280,28 @@ body {
   letter-spacing: 0.02em;
   color: #ffb02e;
 }
-/* Device-split sublabel: "This machine ~X% · Others ~Y%" under the bar. */
-.share-sub {
+/* Caption line under a live bar: reset countdown (left) + device-share (right).
+   One always-present row so toggling "detail" never adds/removes a line. */
+.live-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
   margin-top: 4px;
   font-size: 8px;
-  letter-spacing: 0.02em;
   color: var(--panel-text-dim);
 }
-.share-sub.faint {
+.live-reset {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-share {
+  flex: none;
+  white-space: nowrap;
+  text-align: right;
+}
+.live-share.faint {
   opacity: 0.65;
 }
 
