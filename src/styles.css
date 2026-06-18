@@ -593,3 +593,155 @@ body {
   font-size: 9px;
   color: var(--panel-text-dim);
 }
+
+/* --- Team leaderboard --- */
+.team-models {
+  margin: 8px 0 2px;
+}
+.team-list {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  margin-top: 8px;
+}
+.team-row {
+  cursor: pointer;
+}
+.team-row.team-stale {
+  opacity: 0.5;
+}
+/* --- Expanded top-projects list --- */
+.team-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0 2px 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--bevel-shadow);
+}
+.theme-classic .team-projects,
+.theme-arknights .team-projects {
+  border-left-color: #c4c4c4;
+}
+.team-proj {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--panel-text-dim);
+}
+.theme-classic .team-proj,
+.theme-arknights .team-proj {
+  font-size: 11px;
+}
+.team-proj-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-proj-val {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.team-proj-empty {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  font-style: italic;
+}
+.team-sub {
+  font-size: 8px;
+  color: var(--panel-text-dim);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.theme-classic .team-sub,
+.theme-arknights .team-sub {
+  font-size: 10px;
+}
+
+/* --- Team settings form --- */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.settings-label {
+  font-size: 10px;
+  color: var(--panel-text);
+}
+.settings-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 5px 7px;
+  background: #ffffff;
+  color: #1c1c1e;
+  border: 1px solid #b9b9c0;
+  border-radius: 4px;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+.settings-input:focus {
+  outline: none;
+  border-color: #0a84ff;
+}
+.settings-help {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+  line-height: 1.45;
+}
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.settings-check input {
+  cursor: pointer;
+}
+.settings-share-title {
+  font-size: 10px;
+  color: var(--panel-text);
+  margin-top: 2px;
+}
+.settings-share {
+  display: flex;
+  gap: 14px;
+}
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.settings-actions .mc-btn {
+  flex: 1;
+  text-align: center;
+}
+.mc-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.settings-status {
+  font-size: 9px;
+  text-align: center;
+  margin-top: 2px;
+  word-break: break-word;
+  line-height: 1.4;
+}
+.settings-status.ok {
+  color: #2e7d32;
+}
+.settings-status.err {
+  color: var(--error);
+}

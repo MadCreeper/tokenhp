@@ -84,7 +84,7 @@ fn decode_b64url(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Pull the login email out of `~/.claude.json`. Same file/shape on every OS.
-fn read_email() -> Option<String> {
+pub fn read_email() -> Option<String> {
     let path = dirs::home_dir()?.join(".claude.json");
     let raw = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
