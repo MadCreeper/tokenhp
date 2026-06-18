@@ -171,7 +171,7 @@ async function refresh(): Promise<void> {
   }
   if (inFlight) return;
   // Don't interrupt a refill celebration with a background poll / re-open — the
-  // data won't meaningfully change in those ~10s, and a re-render would restart
+  // data won't meaningfully change in those ~7s, and a re-render would restart
   // the animation. The next poll after it ends picks up fresh data.
   if (celebrating.size) return;
   inFlight = true;
@@ -450,10 +450,10 @@ function liveHTML(): string {
 
 // --- Refill celebration -----------------------------------------------------
 // When a window you'd actually used (≥ REFILL_MIN_PRIOR utilization) resets back
-// to full (≤ REFILL_FULL_UTIL used), play a ~10s per-theme "refill" animation,
+// to full (≤ REFILL_FULL_UTIL used), play a ~7s per-theme "refill" animation,
 // once per reset. The last-seen utilization is persisted per window, so a reset
 // that happened while the popover was closed still celebrates on the next open.
-const CELEBRATE_MS = 10_300; // a hair past the 10s CSS animation, then settle
+const CELEBRATE_MS = 7_300; // a hair past the 7s CSS animation, then settle
 const REFILL_MIN_PRIOR = 0.5; // must have used ≥ half to "earn" the cheer
 const REFILL_FULL_UTIL = 0.2; // ...and now be back to ≥ 80% remaining (a real reset)
 const REFILL_KEY = "hpbar-refill";

@@ -308,11 +308,11 @@ body {
 @keyframes ak-refill {
   0% {
     width: var(--fill);
-    background: #ef8a2b;
+    background: #ff8800;
   }
   26% {
     width: 0%;
-    background: #ef8a2b;
+    background: #ff8800;
   }
   33% {
     width: 0%;
@@ -329,7 +329,7 @@ body {
 }
 .celebrate-ak {
   width: var(--fill);
-  animation: ak-refill 10s cubic-bezier(0.45, 0, 0.2, 1) forwards;
+  animation: ak-refill 7s cubic-bezier(0.45, 0, 0.2, 1) forwards;
 }
 
 /* Classic: grow from empty, red → yellow → the steady ramp color, with a pop. */
@@ -353,7 +353,7 @@ body {
 }
 .celebrate-classic {
   width: var(--fill);
-  animation: classic-refill 10s ease-out forwards;
+  animation: classic-refill 7s ease-out forwards;
 }
 
 /* Minecraft: a back row of empty hearts + a front row filled to remaining that
@@ -370,7 +370,7 @@ body {
 .mc-front {
   position: absolute;
   inset: 0;
-  animation: mc-wipe 8s steps(10, end) forwards;
+  animation: mc-wipe 5.5s steps(10, end) forwards;
 }
 @keyframes mc-wipe {
   from {
@@ -381,7 +381,7 @@ body {
   }
 }
 .mc-celebrate .ho {
-  animation: mc-blink 0.42s steps(1) infinite;
+  animation: mc-blink 0.26s steps(1) infinite;
 }
 @keyframes mc-blink {
   0%,
