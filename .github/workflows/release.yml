@@ -30,6 +30,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the annotated-tag object so release notes can read its message
 
       - name: Install Node
         uses: actions/setup-node@v4
@@ -63,6 +65,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Use the annotated tag's message as the release notes (its body is the
+      # changelog), with the install caveat appended. Falls back to just the
+      # caveat if the tag has no message.
+      - name: Release notes from tag
+        shell: bash
+        run: |
+          {
+            echo 'RELEASE_BODY<<RELEASE_EOF'
+            git tag -l --format='%(contents)' "${{ github.ref_name }}"
+            printf '\n---\nCross-platform build (macOS · Linux · Windows). Unsigned; see the README for install caveats.\n'
+            echo 'RELEASE_EOF'
+          } >> "$GITHUB_ENV"
+
       - name: Build + release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -70,7 +85,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "HPBar ${{ github.ref_name }}"
-          releaseBody: "Cross-platform HPBar build — Claude usage in your tray. Unsigned; see README for install caveats."
+          releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: false
           prerelease: true
           args: ${{ matrix.args }}
