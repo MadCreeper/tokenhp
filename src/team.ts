@@ -144,9 +144,22 @@ function seenLabel(m: MemberView): string {
 
 // ---------------------------------------------------------------- settings
 
-/** The team settings form, rendered inside `.content` of the settings view. */
+/** Which section of the settings form is showing. */
+export type SettingsTab = "ssh" | "db" | "team";
+
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+  { id: "ssh", label: "SSH" },
+  { id: "db", label: "Database" },
+  { id: "team", label: "Team" },
+];
+
+/** The team settings form, rendered inside `.content` of the settings view.
+ *  The connection/team fields are split across tabs so the panel stays short;
+ *  the master toggle and the Test/Save actions stay outside the tabs since they
+ *  apply to the whole config. */
 export function settingsContentHTML(args: {
   draft: TeamConfig;
+  tab: SettingsTab;
   status: string;
   statusOk: boolean;
   testing: boolean;
@@ -158,43 +171,60 @@ export function settingsContentHTML(args: {
       ? `<div class="settings-status ${args.statusOk ? "ok" : "err"}">${escapeHTML(args.status)}</div>`
       : "";
 
+  const tabs = SETTINGS_TABS.map(
+    (t) =>
+      `<button class="mc-btn ${t.id === args.tab ? "selected" : ""}" data-action="settings-tab" data-value="${t.id}">${t.label}</button>`,
+  ).join("");
+
   return `
     <div class="settings">
-      ${check("Enable team sharing", "enabled", d.enabled)}
+      ${toggle("Enable team sharing", "enabled", d.enabled)}
       <p class="settings-help">
         Shares your token usage to a self-hosted Postgres reached over an SSH tunnel
         (no web server). Uses your existing SSH access — no DB password is stored.
         Opt-in; off by default.
       </p>
 
-      <div class="settings-share-title">SSH tunnel</div>
-      ${field("Host", "ssh_host", d.ssh_host, "vps.example.com")}
-      ${field("User", "ssh_user", d.ssh_user, "you")}
-      ${field("Port", "ssh_port", String(d.ssh_port), "22", "number")}
-      ${field("Password (optional)", "ssh_password", d.ssh_password, "leave blank to use SSH key", "password")}
+      <div class="seg settings-tabs">${tabs}</div>
+      <div class="settings-pane">${tabPaneHTML(args.tab, d)}</div>
 
-      <div class="settings-share-title">Database (on the VPS)</div>
-      ${field("Name", "db_name", d.db_name, "hpbar")}
-      ${field("User", "db_user", d.db_user, "hpbar")}
-      ${field("Host", "db_host", d.db_host, "127.0.0.1")}
-      ${field("Port", "db_port", String(d.db_port), "5432", "number")}
-
-      <div class="settings-share-title">Team</div>
-      ${field("Team name", "team_name", d.team_name, "My Team")}
-      ${field("Your display name", "display_name", d.display_name, "")}
-      ${field("Top projects (on expand)", "top_projects", String(d.top_projects), "5", "number")}
-
-      <div class="settings-share-title">Share</div>
-      <div class="settings-share">
-        ${check("Tokens", "share_tokens", d.share_tokens)}
-        ${check("Cost", "share_cost", d.share_cost)}
-        ${check("Project", "share_project", d.share_project)}
-      </div>
       <div class="settings-actions">
         <button class="mc-btn" data-action="team-test" ${args.testing ? "disabled" : ""}>Test Connection</button>
         <button class="mc-btn selected" data-action="team-save">Save</button>
       </div>
       ${status}
+    </div>`;
+}
+
+/** The fields for the active settings tab. */
+function tabPaneHTML(tab: SettingsTab, d: TeamConfig): string {
+  if (tab === "ssh") {
+    return `
+      <div class="settings-share-title">SSH tunnel</div>
+      ${field("Host", "ssh_host", d.ssh_host, "vps.example.com")}
+      ${field("User", "ssh_user", d.ssh_user, "you")}
+      ${field("Port", "ssh_port", String(d.ssh_port), "22", "number")}
+      ${field("Password (optional)", "ssh_password", d.ssh_password, "leave blank to use SSH key", "password")}`;
+  }
+  if (tab === "db") {
+    return `
+      <div class="settings-share-title">Database (on the VPS)</div>
+      ${field("Name", "db_name", d.db_name, "hpbar")}
+      ${field("User", "db_user", d.db_user, "hpbar")}
+      ${field("Host", "db_host", d.db_host, "127.0.0.1")}
+      ${field("Port", "db_port", String(d.db_port), "5432", "number")}`;
+  }
+  return `
+    <div class="settings-share-title">Team</div>
+    ${field("Team name", "team_name", d.team_name, "My Team")}
+    ${field("Your display name", "display_name", d.display_name, "")}
+    ${field("Top projects (on expand)", "top_projects", String(d.top_projects), "5", "number")}
+
+    <div class="settings-share-title">Share</div>
+    <div class="settings-share">
+      ${toggle("Tokens", "share_tokens", d.share_tokens)}
+      ${toggle("Cost", "share_cost", d.share_cost)}
+      ${toggle("Project", "share_project", d.share_project)}
     </div>`;
 }
 
@@ -214,10 +244,13 @@ function field(
     </label>`;
 }
 
-function check(label: string, name: string, checked: boolean): string {
+/** A theme-aware on/off switch. Keeps a real (hidden) checkbox so the shared
+ *  `input` handler in main.ts still binds it via `el.type === "checkbox"`. */
+function toggle(label: string, name: string, checked: boolean): string {
   return `
-    <label class="settings-check">
+    <label class="settings-toggle">
+      <span class="settings-toggle-label">${escapeHTML(label)}</span>
       <input type="checkbox" data-field="${name}" ${checked ? "checked" : ""} />
-      <span>${escapeHTML(label)}</span>
+      <span class="settings-toggle-track"><span class="settings-toggle-knob"></span></span>
     </label>`;
 }

@@ -930,6 +930,13 @@ body {
   flex-direction: column;
   gap: 8px;
 }
+/* The active tab's fields. Carries the same inter-field spacing the whole form
+   used to have, now that the fields live one level down from `.settings`. */
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .settings-row {
   display: flex;
   flex-direction: column;
@@ -957,29 +964,144 @@ body {
   outline: none;
   border-color: #0a84ff;
 }
+/* Inputs pick up each theme's surface/border so they stop reading as a
+   generic white box dropped into the panel. */
+.theme-minecraft .settings-input {
+  background: #0f0f0f;
+  color: #e8e8e8;
+  border: 2px solid var(--frame);
+  border-radius: 0;
+  box-shadow: inset 2px 2px 0 rgba(0, 0, 0, 0.5);
+}
+.theme-minecraft .settings-input::placeholder {
+  color: #7c7c7c;
+}
+.theme-minecraft .settings-input:focus {
+  border-color: #d8d8d8;
+}
+.theme-arknights .settings-input {
+  background: #fbfbfb;
+  color: #1c1c1c;
+  border: 1px solid #bdbdbd;
+  border-radius: 2px;
+}
+.theme-arknights .settings-input::placeholder {
+  color: #9a9a9a;
+}
+.theme-arknights .settings-input:focus {
+  border-color: #1c1c1c;
+}
 .settings-help {
   font-size: 9px;
   color: var(--panel-text-dim);
   line-height: 1.45;
 }
-.settings-check {
+/* On/off switch. The native checkbox is kept (visually hidden but focusable)
+   so the shared input handler still sees a checkbox; the track + knob are the
+   visible control and recolor per theme. */
+.settings-toggle {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 10px;
   font-size: 11px;
   cursor: pointer;
 }
-.settings-check input {
-  cursor: pointer;
+.settings-toggle-label {
+  color: var(--panel-text);
+}
+.settings-toggle > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.settings-toggle-track {
+  position: relative;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 38px;
+  height: 20px;
+  border-radius: 999px;
+  background: #c9c9cf;
+  transition: background 0.15s ease;
+}
+.settings-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.15s ease;
+}
+.settings-toggle > input:checked ~ .settings-toggle-track {
+  background: #34c759;
+}
+.settings-toggle > input:checked ~ .settings-toggle-track .settings-toggle-knob {
+  transform: translateX(18px);
+}
+.settings-toggle > input:focus-visible ~ .settings-toggle-track {
+  outline: 2px solid var(--panel-text-dim);
+  outline-offset: 2px;
+}
+/* Minecraft: square stone pill with a chunky frame; green when on. */
+.theme-minecraft .settings-toggle-track {
+  border-radius: 0;
+  background: #4a4a4f;
+  box-shadow:
+    0 0 0 2px var(--frame),
+    inset 1px 1px 0 rgba(255, 255, 255, 0.15),
+    inset -1px -1px 0 rgba(0, 0, 0, 0.4);
+}
+.theme-minecraft .settings-toggle-knob {
+  border-radius: 0;
+  background: #c6c6c6;
+  box-shadow:
+    inset 1px 1px 0 rgba(255, 255, 255, 0.5),
+    inset -1px -1px 0 rgba(0, 0, 0, 0.35);
+}
+.theme-minecraft .settings-toggle > input:checked ~ .settings-toggle-track {
+  background: #6abf3f;
+}
+/* Classic: macOS-style blue when on. */
+.theme-classic .settings-toggle > input:checked ~ .settings-toggle-track {
+  background: #0a84ff;
+}
+/* Arknights: sharp light plate that inverts to black when on, like its tags. */
+.theme-arknights .settings-toggle-track {
+  border-radius: 2px;
+  background: #d9d9d9;
+  box-shadow: inset 0 0 0 1px #bdbdbd;
+}
+.theme-arknights .settings-toggle-knob {
+  border-radius: 1px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px #bdbdbd;
+}
+.theme-arknights .settings-toggle > input:checked ~ .settings-toggle-track {
+  background: #2f9fd6;
+  box-shadow: inset 0 0 0 1px #2f9fd6;
+}
+.theme-arknights .settings-toggle > input:checked ~ .settings-toggle-track .settings-toggle-knob {
+  box-shadow: inset 0 0 0 1px #2f9fd6;
 }
 .settings-share-title {
   font-size: 10px;
   color: var(--panel-text);
   margin-top: 2px;
 }
+.theme-arknights .settings-share-title {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
 .settings-share {
   display: flex;
-  gap: 14px;
+  flex-direction: column;
+  gap: 8px;
 }
 .settings-actions {
   display: flex;

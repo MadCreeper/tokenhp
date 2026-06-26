@@ -12,7 +12,7 @@ import type {
   UsageReport,
   UsageWindow,
 } from "./types";
-import { settingsContentHTML, teamContentHTML } from "./team";
+import { settingsContentHTML, teamContentHTML, type SettingsTab } from "./team";
 import { heartsRow, heartsRowSplit, heartsRefillHTML } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
@@ -113,6 +113,7 @@ interface State {
   teamDropdownOpen: boolean;
   teamExpanded: Set<string>; // member ids whose top-projects are expanded
   teamDraft: TeamConfig | null; // edit buffer for the settings form
+  settingsTab: SettingsTab; // which section of the settings form is showing
   teamTesting: boolean;
   teamStatus: string;
   teamStatusOk: boolean;
@@ -142,6 +143,7 @@ const state: State = {
   teamDropdownOpen: false,
   teamExpanded: new Set(),
   teamDraft: null,
+  settingsTab: "ssh",
   teamTesting: false,
   teamStatus: "",
   teamStatusOk: false,
@@ -295,6 +297,7 @@ function render(): void {
       ? `<main class="panel">${settingsHeaderHTML()}<section class="content">${settingsContentHTML(
           {
             draft: state.teamDraft ?? defaultTeamDraft(),
+            tab: state.settingsTab,
             status: state.teamStatus,
             statusOk: state.teamStatusOk,
             testing: state.teamTesting,
@@ -983,6 +986,10 @@ app.addEventListener("click", (e) => {
       state.view = "main";
       render();
       break;
+    case "settings-tab":
+      if (value) state.settingsTab = value as SettingsTab;
+      render();
+      break;
     case "team-test":
       void testTeam();
       break;
@@ -1009,6 +1016,7 @@ app.addEventListener("input", (e) => {
 
 function openSettings(): void {
   state.teamDraft = { ...defaultTeamDraft() };
+  state.settingsTab = "ssh";
   state.teamStatus = "";
   state.teamStatusOk = false;
   state.teamTesting = false;
