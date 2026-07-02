@@ -1,6 +1,8 @@
 # Cross-platform release builds. Triggered by tags like `v0.2.0`.
 # Produces .app/.dmg (macOS, universal), .deb/.rpm/.AppImage (Linux), and
-# .msi/.exe (Windows), attached to a published prerelease (alpha).
+# .msi/.exe (Windows). A tag with a prerelease suffix (`-beta`, `-alpha`) is
+# published as a GitHub prerelease; a plain `vX.Y.Z` tag is a full release —
+# matching the in-app updater's Stable/Beta/Alpha channels.
 name: Release
 
 on:
@@ -87,5 +89,6 @@ jobs:
           releaseName: "HPBar ${{ github.ref_name }}"
           releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: false
-          prerelease: true
+          # Prerelease iff the tag carries a suffix (e.g. -beta, -alpha).
+          prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
