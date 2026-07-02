@@ -148,6 +148,23 @@ export interface TeamReport {
   generated_at: string;
 }
 
+/** Mirrors `update::UpdateInfo` — the result of a check against GitHub Releases. */
+export interface UpdateInfo {
+  current: string; // running build's version
+  latest: string; // chosen release's version (tag without the leading "v")
+  latest_tag: string; // raw tag, e.g. "v0.5.1-beta"
+  available: boolean; // latest is newer than current for this channel
+  channel: string; // "stable" | "beta" | "alpha"
+  count: number; // how many releases are eligible for this channel
+  notes: string; // release body / changelog (Markdown)
+  html_url: string; // the release page (fallback when no platform asset)
+  published_at: string; // ISO-8601, or ""
+  asset_name: string; // installer asset for this platform, or ""
+  asset_url: string;
+  asset_size: number;
+  has_asset: boolean; // false when an update exists but ships no installer here
+}
+
 /** Mirrors `team::store::TeamHandshake`. */
 export interface TeamHandshake {
   ok: boolean;

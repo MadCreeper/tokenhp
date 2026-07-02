@@ -13,6 +13,14 @@ The Minecraft-style pixel font used by the Minecraft theme.
 Used and redistributed under the SIL OFL 1.1, which permits bundling with and
 distribution alongside applications.
 
+## Lucide (icons)
+
+The Arknights theme's header icons (settings gear, refresh) are Lucide line
+icons, embedded as inline SVG.
+
+- Source: <https://lucide.dev>
+- License: ISC — <https://github.com/lucide-icons/lucide/blob/main/LICENSE>
+
 ## Arknights icons
 
 The Arknights theme bundles small icons (理智 / Sanity, 源石 / Originite Prime,

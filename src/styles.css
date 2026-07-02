@@ -156,6 +156,25 @@ body {
   padding: 4px 7px;
   font-size: 13px;
 }
+/* Themed icon buttons (settings/refresh) carry an inline SVG instead of a
+   glyph; center it and give each theme's art the right size. */
+.mc-btn.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.mc-btn.icon svg {
+  display: block;
+}
+.theme-minecraft .mc-btn.icon svg {
+  width: 16px;
+  height: 16px;
+  image-rendering: pixelated;
+}
+.theme-arknights .mc-btn.icon svg {
+  width: 15px;
+  height: 15px;
+}
 /* "detail" toggle: an underlined link inline with the "Live quota" footer label
    that reveals the device-share text + account email/plan. Dim when off. */
 .detail-link {
@@ -1128,4 +1147,77 @@ body {
 }
 .settings-status.err {
   color: var(--error);
+}
+
+/* --- Update + About sections --- */
+.update-result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.update-result.up-to-date {
+  font-size: 10px;
+  color: var(--panel-text-dim);
+  text-align: center;
+}
+.update-version {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--panel-text);
+}
+.update-asset {
+  font-weight: 400;
+  font-size: 9px;
+  color: var(--panel-text-dim);
+}
+.update-warn {
+  font-size: 9px;
+  color: var(--error);
+}
+.update-notes {
+  font-size: 9px;
+  line-height: 1.45;
+  color: var(--panel-text-dim);
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--frame);
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.04);
+}
+.about-fineprint {
+  font-size: 8.5px;
+  color: var(--panel-text-dim);
+  line-height: 1.45;
+  margin-top: 4px;
+}
+.about-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.about-name {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--panel-text);
+}
+.about-version {
+  font-size: 11px;
+  color: var(--panel-text-dim);
+}
+.about-tagline {
+  font-size: 10px;
+  color: var(--panel-text-dim);
+  line-height: 1.45;
+}
+.about-links {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.about-links .about-link {
+  flex: 1;
+  text-align: center;
 }

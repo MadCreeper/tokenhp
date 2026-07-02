@@ -16,6 +16,7 @@ pub mod pricing;
 pub mod share;
 pub mod team;
 pub mod tools;
+pub mod update;
 pub mod usage;
 
 use credentials::CredentialCache;
@@ -177,7 +178,11 @@ pub fn run() {
             set_team_config,
             test_team_connection,
             upload_team_snapshot,
-            fetch_team
+            fetch_team,
+            update::app_version,
+            update::check_update,
+            update::download_and_install_update,
+            update::open_external
         ])
         .setup(|app| {
             // macOS: run as a menu-bar accessory — no Dock icon, no app menu.

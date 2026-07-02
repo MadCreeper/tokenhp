@@ -9,10 +9,18 @@ import type {
   TeamConfig,
   TeamHandshake,
   TeamReport,
+  UpdateInfo,
   UsageReport,
   UsageWindow,
 } from "./types";
 import { settingsContentHTML, teamContentHTML, type SettingsTab } from "./team";
+import {
+  aboutSectionHTML,
+  updateSectionHTML,
+  type SettingsSection,
+  type UpdateChannel,
+} from "./about";
+import { refreshIcon, settingsIcon } from "./icons";
 import { heartsRow, heartsRowSplit, heartsRefillHTML } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
@@ -41,6 +49,20 @@ type View = "main" | "settings";
 const PROVIDER_KEY = "hpbar-provider";
 function loadProvider(): Provider {
   return localStorage.getItem(PROVIDER_KEY) === "codex" ? "codex" : "claude";
+}
+
+// The update channel persists like the provider — a single small string.
+const CHANNEL_KEY = "hpbar-channel";
+function loadChannel(): UpdateChannel {
+  const v = localStorage.getItem(CHANNEL_KEY);
+  return v === "beta" || v === "alpha" ? v : "stable";
+}
+function saveChannel(c: UpdateChannel): void {
+  try {
+    localStorage.setItem(CHANNEL_KEY, c);
+  } catch {
+    /* best-effort */
+  }
 }
 
 // Remember the last-viewed tab/window/tool across launches so the popover opens
@@ -113,10 +135,19 @@ interface State {
   teamDropdownOpen: boolean;
   teamExpanded: Set<string>; // member ids whose top-projects are expanded
   teamDraft: TeamConfig | null; // edit buffer for the settings form
-  settingsTab: SettingsTab; // which section of the settings form is showing
+  settingsTab: SettingsTab; // which sub-tab of the Team form is showing
+  settingsSection: SettingsSection; // top-level settings section (Update/Team/About)
   teamTesting: boolean;
   teamStatus: string;
   teamStatusOk: boolean;
+  // Update / About
+  appVersion: string; // running build's version, from the Rust side
+  updateChannel: UpdateChannel;
+  updateInfo: UpdateInfo | null;
+  updateChecking: boolean;
+  updateDownloading: boolean;
+  updateStatus: string;
+  updateStatusOk: boolean;
 }
 
 const savedView = loadView();
@@ -144,9 +175,17 @@ const state: State = {
   teamExpanded: new Set(),
   teamDraft: null,
   settingsTab: "ssh",
+  settingsSection: "update",
   teamTesting: false,
   teamStatus: "",
   teamStatusOk: false,
+  appVersion: "",
+  updateChannel: loadChannel(),
+  updateInfo: null,
+  updateChecking: false,
+  updateDownloading: false,
+  updateStatus: "",
+  updateStatusOk: false,
 };
 
 const app = document.getElementById("app")!;
@@ -294,15 +333,7 @@ const PANEL_WIDTH = 360;
 function render(): void {
   app.innerHTML =
     state.view === "settings"
-      ? `<main class="panel">${settingsHeaderHTML()}<section class="content">${settingsContentHTML(
-          {
-            draft: state.teamDraft ?? defaultTeamDraft(),
-            tab: state.settingsTab,
-            status: state.teamStatus,
-            statusOk: state.teamStatusOk,
-            testing: state.teamTesting,
-          },
-        )}</section></main>`
+      ? `<main class="panel">${settingsHeaderHTML()}${settingsSectionSegHTML()}<section class="content">${settingsBodyHTML()}</section></main>`
       : `<main class="panel">
       ${headerHTML()}
       ${sourceSegHTML()}
@@ -406,18 +437,60 @@ function headerHTML(): string {
       ${titleHTML}
       ${state.loading ? `<span class="spinner">…</span>` : ""}
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
-      <button class="mc-btn icon" data-action="settings" title="Team settings">⚙</button>
-      <button class="mc-btn icon" data-action="refresh" title="Refresh">⟳</button>
+      <button class="mc-btn icon" data-action="settings" title="Settings">${settingsIcon(getTheme())}</button>
+      <button class="mc-btn icon" data-action="refresh" title="Refresh">${refreshIcon(getTheme())}</button>
     </header>`;
 }
 
 function settingsHeaderHTML(): string {
   return `
     <header class="header">
-      <span class="title">Team Settings</span>
+      <span class="title">Settings</span>
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings-close" title="Back">✕</button>
     </header>`;
+}
+
+// Top-level settings sections. Update first (universally useful); Team only
+// after that since it's opt-in; About last.
+const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
+  { id: "update", label: "Update" },
+  { id: "team", label: "Team" },
+  { id: "about", label: "About" },
+];
+
+function settingsSectionSegHTML(): string {
+  const seg = SETTINGS_SECTIONS.map(
+    (s) =>
+      `<button class="mc-btn ${s.id === state.settingsSection ? "selected" : ""}" data-action="settings-section" data-value="${s.id}">${s.label}</button>`,
+  ).join("");
+  return `<div class="seg">${seg}</div>`;
+}
+
+// Render the active section's body. Team reuses the existing form (with its own
+// SSH/DB/Team sub-tabs); Update and About come from about.ts.
+function settingsBodyHTML(): string {
+  if (state.settingsSection === "team") {
+    return settingsContentHTML({
+      draft: state.teamDraft ?? defaultTeamDraft(),
+      tab: state.settingsTab,
+      status: state.teamStatus,
+      statusOk: state.teamStatusOk,
+      testing: state.teamTesting,
+    });
+  }
+  if (state.settingsSection === "about") {
+    return aboutSectionHTML({ version: state.appVersion });
+  }
+  return updateSectionHTML({
+    channel: state.updateChannel,
+    info: state.updateInfo,
+    status: state.updateStatus,
+    statusOk: state.updateStatusOk,
+    checking: state.updateChecking,
+    downloading: state.updateDownloading,
+    version: state.appVersion,
+  });
 }
 
 function segButton(action: string, value: string, label: string, selected: boolean): string {
@@ -990,6 +1063,32 @@ app.addEventListener("click", (e) => {
       if (value) state.settingsTab = value as SettingsTab;
       render();
       break;
+    case "settings-section":
+      if (value && value !== state.settingsSection) {
+        state.settingsSection = value as SettingsSection;
+        render();
+        // Auto-check the first time Update is opened with nothing cached.
+        if (state.settingsSection === "update" && !state.updateInfo) void checkUpdate();
+      }
+      break;
+    case "update-channel":
+      if (value && value !== state.updateChannel) {
+        state.updateChannel = value as UpdateChannel;
+        saveChannel(state.updateChannel);
+        state.updateInfo = null; // result no longer matches the channel
+        render();
+        void checkUpdate();
+      }
+      break;
+    case "update-check":
+      void checkUpdate();
+      break;
+    case "update-install":
+      void installUpdate();
+      break;
+    case "open-url":
+      if (value) void invoke("open_external", { target: value }).catch(() => {});
+      break;
     case "team-test":
       void testTeam();
       break;
@@ -1017,11 +1116,73 @@ app.addEventListener("input", (e) => {
 function openSettings(): void {
   state.teamDraft = { ...defaultTeamDraft() };
   state.settingsTab = "ssh";
+  state.settingsSection = "update";
   state.teamStatus = "";
   state.teamStatusOk = false;
   state.teamTesting = false;
+  state.updateStatus = "";
   state.view = "settings";
   render();
+  void loadAppVersion();
+  // Land on Update with a check already in flight, so there's nothing to click
+  // for the common "is there a new version?" case.
+  void checkUpdate();
+}
+
+// The running build's version (cheap, cached after the first call).
+async function loadAppVersion(): Promise<void> {
+  if (state.appVersion) return;
+  if (MOCK) {
+    state.appVersion = "0.0.0-mock";
+    return;
+  }
+  try {
+    state.appVersion = await invoke<string>("app_version");
+    render();
+  } catch {
+    /* leave blank; the UI shows "?" */
+  }
+}
+
+async function checkUpdate(): Promise<void> {
+  if (MOCK || state.updateChecking) return;
+  state.updateChecking = true;
+  state.updateStatus = "";
+  render();
+  try {
+    state.updateInfo = await invoke<UpdateInfo>("check_update", { channel: state.updateChannel });
+    state.updateStatusOk = true;
+    state.updateStatus = ""; // the result block conveys latest/running/count
+  } catch (err) {
+    state.updateInfo = null;
+    state.updateStatusOk = false;
+    state.updateStatus = String(err);
+  } finally {
+    state.updateChecking = false;
+    render();
+  }
+}
+
+async function installUpdate(): Promise<void> {
+  const info = state.updateInfo;
+  if (MOCK || !info || !info.has_asset || state.updateDownloading) return;
+  state.updateDownloading = true;
+  state.updateStatus = "";
+  render();
+  try {
+    const path = await invoke<string>("download_and_install_update", {
+      url: info.asset_url,
+      name: info.asset_name,
+    });
+    state.updateStatusOk = true;
+    state.updateStatus = `Opened the installer (saved to ${path}).`;
+  } catch (err) {
+    state.updateStatusOk = false;
+    state.updateStatus = String(err);
+  } finally {
+    state.updateDownloading = false;
+    render();
+  }
 }
 
 async function testTeam(): Promise<void> {

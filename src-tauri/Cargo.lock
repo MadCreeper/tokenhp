@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "hpbar"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
