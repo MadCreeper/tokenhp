@@ -45,13 +45,22 @@ function akGhost(remaining: number, machineShare: number | null | undefined): st
   return `<div class="ak-fill-ghost" style="left:${(clamp01(remaining) * 100).toFixed(1)}%;width:${(clamp01(machineShare) * 100).toFixed(1)}%"></div>`;
 }
 
+// On a drop, the fill shrinks from its previous width (--hp-from) with a flash;
+// returns the extra class + CSS var to splice onto the fill div.
+function akHurt(hurtFrom?: number | null): { cls: string; var: string } {
+  if (hurtFrom == null) return { cls: "", var: "" };
+  return { cls: " hp-drop", var: `;--hp-from:${(clamp01(hurtFrom) * 100).toFixed(1)}%` };
+}
+
 function akSanityHero(
   remaining: number,
   caption: string | null,
   machineShare?: number | null,
+  hurtFrom?: number | null,
 ): string {
   const v = clamp01(remaining);
   const cur = Math.round(v * 135);
+  const hurt = akHurt(hurtFrom);
   return `
     <div class="ak-hero">
       <div class="ak-hero-plate">
@@ -61,7 +70,7 @@ function akSanityHero(
           <div class="ak-hero-num">${cur}</div>
           <div class="ak-hero-tag">理智/135</div>
         </div>
-        <div class="ak-hero-bar"><div class="ak-hero-fill" style="width:${(v * 100).toFixed(1)}%"></div>${akGhost(v, machineShare)}</div>
+        <div class="ak-hero-bar"><div class="ak-hero-fill${hurt.cls}" style="width:${(v * 100).toFixed(1)}%${hurt.var}"></div>${akGhost(v, machineShare)}</div>
       </div>
       ${caption ? `<div class="ak-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
@@ -79,10 +88,12 @@ export function akResource(
   caption: string | null,
   trailingOverride: string | null,
   machineShare?: number | null,
+  hurtFrom?: number | null,
 ): string {
-  if (title === "5-Hour") return akSanityHero(remaining, caption, machineShare);
+  if (title === "5-Hour") return akSanityHero(remaining, caption, machineShare, hurtFrom);
   const r = RESOURCES[title] ?? { icon: ICON_ORUNDUM, zh: title, max: 100 };
   const v = clamp01(remaining);
+  const hurt = akHurt(hurtFrom);
   const count = trailingOverride
     ? `<span class="ak-count ak-off">${escapeHTML(trailingOverride)}</span>`
     : `<span class="ak-count">${Math.round(v * r.max)}<span class="ak-max">/${r.max}</span></span>`;
@@ -93,7 +104,7 @@ export function akResource(
         <span class="ak-name">${escapeHTML(r.zh)} <span class="ak-sub">${escapeHTML(title)}</span></span>
         ${count}
       </div>
-      <div class="ak-bar"><div class="ak-fill" style="width:${(v * 100).toFixed(1)}%"></div>${akGhost(v, machineShare)}</div>
+      <div class="ak-bar"><div class="ak-fill${hurt.cls}" style="width:${(v * 100).toFixed(1)}%${hurt.var}"></div>${akGhost(v, machineShare)}</div>
       ${caption ? `<div class="ak-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
 }

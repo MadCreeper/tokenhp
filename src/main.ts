@@ -199,6 +199,7 @@ if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expa
 if (params.get("expand") === "1") state.projectsExpanded = true; // showcase: full project list
 const PACE_SHOWCASE = params.get("pace") === "1"; // showcase: force an over-pace 5-Hour
 const CELEBRATE_SHOWCASE = params.get("celebrate") === "1"; // showcase: loop the refill animation
+const HURT_SHOWCASE = params.get("hurt") === "1"; // showcase: loop the HP-drop animation
 
 // ---------------------------------------------------------------- data
 
@@ -278,9 +279,10 @@ async function refresh(): Promise<void> {
     if (state.source === "live") {
       // Subscription axis: the selected provider's quota.
       state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
-      // Celebrate any window that reset to full since we last saw it (animation
-      // is painted by the final render below).
+      // Celebrate any window that reset to full since we last saw it, and flash
+      // any window that dropped (animations are painted by the final render below).
       armCelebration(detectRefills(state.live));
+      armDamage(detectDamage(state.live));
     } else if (state.source === "team") {
       // Pull the shared roster; opportunistically push our own snapshot too so
       // teammates see us (fire-and-forget — the git push can be slow).
@@ -615,11 +617,79 @@ function runCelebrationShowcase(): void {
   loop();
 }
 
+// Showcase only: loop the HP-drop animation over the live windows so the
+// `?hurt=1` mock page plays it continuously. Each cycle drops every window a
+// notch (animating from its base level), then restores and replays.
+function runHurtShowcase(): void {
+  const windows = (state.live?.windows ?? []).filter((w) => w.trailing !== "Off");
+  if (!windows.length) return;
+  const base = windows.map((w) => clamp01(w.remaining));
+  const loop = () => {
+    windows.forEach((w, i) => {
+      hurting.set(winKey(w), base[i]);
+      const to = Math.max(0.05, base[i] - 0.14);
+      w.remaining = to;
+      w.utilization = 1 - to;
+    });
+    render();
+    hurtTimer = setTimeout(() => {
+      hurting.clear();
+      windows.forEach((w, i) => {
+        w.remaining = base[i];
+        w.utilization = 1 - base[i];
+      });
+      render();
+      setTimeout(loop, 1400); // brief settled pause, then replay
+    }, HURT_MS);
+  };
+  loop();
+}
+
 // User interaction (or navigating away) ends the show so the app stays responsive.
 function cancelCelebration(): void {
   if (!celebrating.size) return;
   celebrating.clear();
   if (celebrateTimer) clearTimeout(celebrateTimer);
+}
+
+// --- Damage (HP drop) animation ---------------------------------------------
+// The mirror of the refill cheer: when a live window's remaining fraction *falls*
+// between polls, flash the bar once (Classic/Arknights shrink smoothly from the
+// old level; Minecraft shakes the heart row). Tracked in-memory only — a drop
+// that happened while the popover was closed shouldn't ambush you on reopen, and
+// a first load (no baseline yet) never animates.
+const HURT_MS = 850; // a hair past the ~0.7s CSS animation
+const HURT_MIN_DROP = 0.02; // ignore sub-2% jitter / rounding wobble
+const lastRemaining = new Map<string, number>(); // window key → remaining at last poll
+const hurting = new Map<string, number>(); // window key → remaining *before* the drop (animate from)
+let hurtTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Compare this report to the last poll; return the keys that dropped mapped to
+// their previous (higher) remaining, and update the baseline.
+function detectDamage(report: UsageReport): Map<string, number> {
+  const dropped = new Map<string, number>();
+  for (const w of report.windows) {
+    const key = winKey(w);
+    const prev = lastRemaining.get(key);
+    lastRemaining.set(key, w.remaining);
+    if (w.trailing === "Off") continue; // disabled window has no meaningful level
+    if (prev != null && prev - w.remaining >= HURT_MIN_DROP) {
+      dropped.set(key, clamp01(prev));
+    }
+  }
+  return dropped;
+}
+
+// Arm the hurt flash for the dropped windows + schedule the clear. Like
+// `armCelebration`, it doesn't render — the caller's final render paints it.
+function armDamage(dropped: Map<string, number>): void {
+  if (!dropped.size) return;
+  dropped.forEach((from, k) => hurting.set(k, from));
+  if (hurtTimer) clearTimeout(hurtTimer);
+  hurtTimer = setTimeout(() => {
+    hurting.clear();
+    render();
+  }, HURT_MS);
 }
 
 // The animated stand-in for a live bar while its window is celebrating a refill.
@@ -655,18 +725,19 @@ function liveBarHTML(w: UsageWindow): string {
   const pace = paceNote(w); // "20% over pace" on the 5-Hour bar when burning fast
   const resetText = [reset, pace].filter(Boolean).join(" · ");
   const split = machineSplit(w); // this machine's window fraction, or null when unsure
+  const hurtFrom = hurting.get(winKey(w)) ?? null; // pre-drop level to animate down from
   let bar: string;
   switch (getTheme()) {
     // Caption is rendered below (in `.live-foot`), not by the theme bar, so the
     // share text can ride its right edge — pass null caption to each renderer.
     case "classic":
-      bar = classicQuotaBar(w.title, w.remaining, trailing, null, split, w.trailing === "Off");
+      bar = classicQuotaBar(w.title, w.remaining, trailing, null, split, w.trailing === "Off", hurtFrom);
       break;
     case "arknights":
-      bar = akResource(w.title, w.remaining, null, w.trailing, split);
+      bar = akResource(w.title, w.remaining, null, w.trailing, split, hurtFrom);
       break;
     default:
-      bar = heartBarHTML(w, trailing, null, split);
+      bar = heartBarHTML(w, trailing, null, split, hurtFrom);
   }
   // reset countdown (left) + device-share (right) on one always-present line, so
   // toggling "detail" changes only the right text — no line added → no resize.
@@ -731,16 +802,20 @@ function heartBarHTML(
   trailing: string,
   caption: string | null,
   machineShare: number | null,
+  hurtFrom: number | null = null,
 ): string {
   const hearts =
     machineShare != null ? heartsRowSplit(w.remaining, machineShare) : heartsRow(w.remaining);
+  // On a drop, shake+flash the heart row (Minecraft damage). The hearts already
+  // show the new, lower level; the class just animates the hit.
+  const hurt = hurtFrom != null ? " hp-hurt" : "";
   return `
     <div class="bar">
       <div class="bar-head">
         <span class="bar-title">${escapeHTML(w.title)}</span>
         <span class="bar-trailing">${escapeHTML(trailing)}</span>
       </div>
-      <div class="hearts">${hearts}</div>
+      <div class="hearts${hurt}">${hearts}</div>
       ${caption ? `<div class="bar-caption">${escapeHTML(caption)}</div>` : ""}
     </div>`;
 }
@@ -1253,6 +1328,7 @@ void refresh();
 void loadTeamConfig();
 syncTrayTheme();
 if (CELEBRATE_SHOWCASE) runCelebrationShowcase(); // mock page: loop the refill animation
+if (HURT_SHOWCASE) runHurtShowcase(); // mock page: loop the HP-drop animation
 
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).

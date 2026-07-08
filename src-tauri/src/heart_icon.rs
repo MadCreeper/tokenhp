@@ -24,6 +24,13 @@ const PATTERN: [[u8; 7]; 7] = [
 
 const GRID: u32 = 7;
 
+/// Filled-pixel count of each PATTERN row, top→bottom. The heart's area is
+/// concentrated in its wide upper rows and tapers to a 1-pixel tip, so a fill
+/// measured by row *height* badly under-reads: 25% remaining lights only the
+/// narrow bottom ~3% of the area and the heart looks nearly empty. We use these
+/// weights to place the fill line by *area* instead (see [`area_fill_line`]).
+const ROW_WEIGHT: [u32; GRID as usize] = [4, 7, 7, 7, 5, 3, 1];
+
 pub type Rgb = (u8, u8, u8);
 
 /// Colours for one heart render: the lit (filled) pixels and the drained (empty)
@@ -135,6 +142,30 @@ fn fixed_hue_style(
     }
 }
 
+/// The output-pixel row at/above which pixels are lit, chosen so the lit heart
+/// *area* is fraction `r` of the whole. Fills from the bottom up, spending the
+/// area budget row by row (partial-lighting the row it runs out on), so the
+/// gauge reads true — 25% remaining lights ~a quarter of the heart, not a sliver.
+/// Returns `0.0` at full (all lit) and `h` at empty (none lit).
+fn area_fill_line(r: f64, h: u32) -> f64 {
+    let total: f64 = ROW_WEIGHT.iter().sum::<u32>() as f64;
+    let target = r.clamp(0.0, 1.0) * total; // area to light, measured from the bottom
+    let mut acc = 0.0;
+    let mut boundary = GRID as f64; // grid-row line (from the top); GRID = bottom edge = empty
+    for row in (0..GRID as usize).rev() {
+        let wgt = ROW_WEIGHT[row] as f64;
+        if acc + wgt <= target {
+            acc += wgt;
+            boundary = row as f64; // this whole row is lit; line rises to its top edge
+        } else {
+            let frac = if wgt > 0.0 { (target - acc) / wgt } else { 0.0 }; // lit share of this row
+            boundary = row as f64 + (1.0 - frac); // light only its bottom `frac`
+            break;
+        }
+    }
+    boundary / GRID as f64 * h as f64
+}
+
 fn pixel(code: u8, lit: bool, s: &HeartStyle) -> Option<Rgb> {
     match (code, lit) {
         (1, true) => Some(s.full_outline),
@@ -157,7 +188,8 @@ pub fn render_rgba_styled(remaining: f64, scale: u32, style: &HeartStyle) -> (Ve
     let h = GRID * scale;
     let r = remaining.clamp(0.0, 1.0);
     // Rows at or below this line are lit; 0 ⇒ all lit (full), h ⇒ none (empty).
-    let fill_line = (1.0 - r) * h as f64;
+    // Placed by heart *area* (not raw height) so the level reads honestly.
+    let fill_line = area_fill_line(r, h);
 
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     for oy in 0..h {
@@ -268,6 +300,38 @@ mod tests {
                 .count()
         };
         assert!(lit_count(1.0) > lit_count(0.2), "full heart should have more lit pixels");
+    }
+
+    #[test]
+    fn fill_tracks_area_not_height() {
+        // Lit fraction should follow the *area* budget: a 25%-remaining heart must
+        // light roughly a quarter of its pixels, not the ~3% a height-based fill
+        // gave (which made the tray heart look nearly empty). Use a style whose lit
+        // pixels are uniquely identifiable so we can count them.
+        let style = HeartStyle {
+            full_body: (0, 255, 0),
+            full_sparkle: (0, 255, 0),
+            full_outline: (0, 255, 0),
+            empty_body: (10, 10, 10),
+            empty_sparkle: (10, 10, 10),
+            empty_outline: (10, 10, 10),
+        };
+        let lit_frac = |r: f64| {
+            let (rgba, w, h) = render_rgba_styled(r, 8, &style);
+            let lit = (0..(w * h))
+                .filter(|i| {
+                    let p = (*i * 4) as usize;
+                    rgba[p + 3] == 0xff && rgba[p + 1] == 255 && rgba[p] == 0
+                })
+                .count();
+            let total = (0..(w * h)).filter(|i| rgba[(*i * 4 + 3) as usize] == 0xff).count();
+            lit as f64 / total as f64
+        };
+        // Within ~8% of the target — chunky pixels won't be exact, but must be far
+        // from the old height-based 0.03 at r=0.25.
+        assert!((lit_frac(0.25) - 0.25).abs() < 0.08, "25% got {}", lit_frac(0.25));
+        assert!((lit_frac(0.50) - 0.50).abs() < 0.08, "50% got {}", lit_frac(0.50));
+        assert!((lit_frac(0.75) - 0.75).abs() < 0.08, "75% got {}", lit_frac(0.75));
     }
 
     #[test]

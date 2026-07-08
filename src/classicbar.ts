@@ -53,6 +53,7 @@ function barHTML(
   caption: string | null,
   trackColor?: string,
   ghost?: { left: number; width: number; color?: string },
+  hurtFrom?: number | null,
 ): string {
   const grad =
     typeof fillColor === "string"
@@ -63,6 +64,9 @@ function barHTML(
   const ghostDiv = ghost
     ? `<div class="cbar-ghost" style="left:${(clamp01(ghost.left) * 100).toFixed(1)}%;width:${(clamp01(ghost.width) * 100).toFixed(1)}%${ghost.color ? `;background:${ghost.color}` : ""}"></div>`
     : "";
+  // On a drop, animate the fill shrinking from its previous width (--hp-from).
+  const hurt = hurtFrom != null ? " hp-drop" : "";
+  const hurtVar = hurtFrom != null ? `;--hp-from:${(clamp01(hurtFrom) * 100).toFixed(1)}%` : "";
   return `
     <div class="cbar">
       <div class="cbar-head">
@@ -70,7 +74,7 @@ function barHTML(
         <span class="cbar-trailing">${escapeHTML(trailing)}</span>
       </div>
       <div class="cbar-track"${trackStyle}>
-        <div class="cbar-fill" style="width:${(clamp01(fillFrac) * 100).toFixed(1)}%;background:${grad}"></div>
+        <div class="cbar-fill${hurt}" style="width:${(clamp01(fillFrac) * 100).toFixed(1)}%;background:${grad}${hurtVar}"></div>
         ${ghostDiv}
       </div>
       ${caption ? `<div class="cbar-caption">${escapeHTML(caption)}</div>` : ""}
@@ -91,6 +95,7 @@ export function classicQuotaBar(
   caption: string | null,
   machineShare?: number | null,
   off?: boolean,
+  hurtFrom?: number | null,
 ): string {
   if (off) {
     return barHTML(title, 0, "transparent", trailing, caption, "rgba(0,0,0,0.14)");
@@ -101,7 +106,7 @@ export function classicQuotaBar(
     machineShare != null
       ? { left: remaining, width: machineShare, color: css(mix(base, WHITE, 0.5)) } // mine: lighter, ghostly
       : undefined;
-  return barHTML(title, remaining, base, trailing, caption, track, ghost);
+  return barHTML(title, remaining, base, trailing, caption, track, ghost, hurtFrom);
 }
 
 /** Magnitude bar — single accent color; width already encodes the value. */
