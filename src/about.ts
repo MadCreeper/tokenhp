@@ -3,10 +3,10 @@
 // owner of state. The HTTP/download work lives Rust-side (the popover's CSP
 // blocks frontend fetches); these just render and emit data-action buttons.
 
-import type { UpdateInfo } from "./types";
+import type { AppControls, UpdateInfo } from "./types";
 import { escapeHTML } from "./util";
 
-export type SettingsSection = "update" | "team" | "about";
+export type SettingsSection = "general" | "update" | "team" | "about";
 export type UpdateChannel = "stable" | "beta" | "alpha";
 
 const REPO_URL = "https://github.com/MadCreeper/tokenhp";
@@ -129,6 +129,47 @@ export function aboutSectionHTML(args: { version: string }): string {
       </div>
 
       <p class="about-fineprint">Made by MadCreeper · MIT-licensed · unsigned builds.</p>
+    </div>`;
+}
+
+/** The General section: app controls relocated from the (now macOS-absent) tray
+ *  menu — Open at login, Quota alerts, single-device calibration — plus Quit.
+ *  While `controls` is null (still loading) the toggles render disabled. Each
+ *  toggle carries `data-field="ctl-<key>"`; main.ts's input handler routes those
+ *  to the backend. Quit fires `data-action="quit-app"`. */
+export function generalSectionHTML(args: {
+  controls: AppControls | null;
+  glass?: boolean;
+}): string {
+  const c = args.controls;
+  // Backend-controlled toggles carry data-field="ctl-<key>" (routed to the
+  // backend); `field`-form toggles (like glass) carry the raw field name and are
+  // handled frontend-side. `disabled` gates the ctl ones until controls load.
+  const toggle = (label: string, hint: string, field: string, on: boolean, disabled = false) => `
+    <label class="settings-toggle ctl-toggle">
+      <span class="settings-toggle-label">${escapeHTML(label)}<span class="ctl-hint">${escapeHTML(hint)}</span></span>
+      <input type="checkbox" data-field="${field}" ${on ? "checked" : ""}${disabled ? " disabled" : ""} />
+      <span class="settings-toggle-track"><span class="settings-toggle-knob"></span></span>
+    </label>`;
+  // Liquid Glass is macOS-only; only shown when a glass state is passed in.
+  const glass =
+    args.glass === undefined
+      ? ""
+      : toggle(
+          "Liquid Glass",
+          "Translucent widget-style backdrop (macOS)",
+          "glass",
+          args.glass,
+        );
+  return `
+    <div class="settings general">
+      ${glass}
+      ${toggle("Open at login", "Launch HPBar when you sign in", "ctl-autostart", !!c?.autostart, !c)}
+      ${toggle("Quota alerts", "Notify on low / critical quota", "ctl-alerts", !!c?.alerts, !c)}
+      ${toggle("Only device here", "Assume this is your only active machine", "ctl-calibrate", !!c?.calibrate, !c)}
+      <div class="general-foot">
+        <button class="mc-btn general-quit" data-action="quit-app">Quit HPBar</button>
+      </div>
     </div>`;
 }
 

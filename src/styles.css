@@ -50,7 +50,12 @@ body.theme-arknights {
   box-sizing: border-box;
 }
 
-html,
+/* <html> is always transparent so a transparent native window can show through;
+   the per-theme solid background lives on <body>, which fills the window (it
+   auto-sizes to the panel). The classic theme clears <body> too — see below. */
+html {
+  background: transparent;
+}
 body {
   background: var(--window-bg);
   overflow: hidden;
@@ -78,7 +83,104 @@ body {
 .theme-classic .panel {
   background: #ececf0;
   border: 1px solid #d4d4da;
-  border-radius: 12px;
+  /* Widget-like generous rounding (matches the native glass cornerRadius set in
+     build_popover's apply_liquid_glass). */
+  border-radius: 18px;
+}
+
+/* --- Liquid glass (macOS, classic theme) --- */
+/* Two classes, both stamped by main.ts on <html>:
+   - `mac`: the popover window is transparent on macOS, so the classic body must
+     be transparent too — this makes the rounded .panel define the window shape
+     (rounded corners) whether or not glass is enabled.
+   - `glass`: the Liquid Glass look is ON (macOS + the Settings toggle). The
+     native NSGlassEffectView backdrop (see build_popover) sits behind, and the
+     panel goes translucent to ride on it; frostiness is the OS's own knob
+     (System Settings → Appearance → Liquid Glass). Toggle glass off → panel
+     stays opaque (the base rule) → a plain rounded popover / the fallback.
+   Other platforms / themes get neither class and keep the opaque look. */
+html.mac body.theme-classic {
+  background: transparent;
+}
+/* Focused (the popover is up and key): like native widgets in focus — near
+   solid, full colour, dark text. 0.94, not lower: the clear glass behind
+   barely blurs, so anything under ~0.9 lets crisp dark content bleed through
+   and reads as "translucent" over busy/dark windows. The transition animates
+   the widget-style morph between solid (focused) and liquid glass (unfocused). */
+html.glass body.theme-classic .panel {
+  background: rgba(245, 245, 248, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  /* Specular rim like the native material: bright top edge, faint bottom. */
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.51),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.18);
+  transition:
+    background 0.35s ease,
+    border-color 0.35s ease,
+    box-shadow 0.35s ease,
+    filter 0.35s ease;
+}
+/* Unfocused: native widgets go clear glass — barely tinted, monochrome, white
+   text regardless of light/dark mode. main.ts toggles `blurred` on <html>.
+   (The popover currently hides on blur, so this mostly shows as a brief flash —
+   but it's the correct state if we ever pin the popover open.) */
+html.glass.blurred body.theme-classic {
+  --panel-text: #ffffff;
+  --panel-text-dim: rgba(255, 255, 255, 0.75);
+}
+html.glass.blurred body.theme-classic .panel {
+  /* Fully transparent — no CSS film. The native glass alone carries the look,
+     so the panel is exactly as clear/frosted as the system's Liquid Glass
+     setting dictates (any constant tint here becomes an opacity floor that
+     keeps the clear end from ever reaching the system's). Text stays legible on
+     bare glass via white + shadow. box-shadow cleared: the focused rule's white
+     inset rim would otherwise persist and read as extra whiteness. */
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: none;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  /* "No colour": desaturate the page like the system's glassy widget state.
+     (A CSS filter only touches our pixels — the native glass is unaffected.) */
+  filter: grayscale(1);
+}
+/* Chrome (tabs, buttons, tracks, dividers) is opaque near-white by default —
+   the main reason the panel read whiter than a system widget on bare glass.
+   In the glass state make it all translucent so the warm material shows through
+   instead. Focused mode keeps its solid controls unchanged. */
+html.glass.blurred body.theme-classic .mc-btn {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+html.glass.blurred body.theme-classic .mc-btn.selected {
+  background: rgba(255, 255, 255, 0.3);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+html.glass.blurred body.theme-classic .cbar-track {
+  background: rgba(255, 255, 255, 0.22);
+}
+/* Bright white fills like native widget bars (weather range / battery rings),
+   not the dim grey that grayscale() makes of the coloured focused fills.
+   `!important` beats the inline gradient set by classicbar.ts. The ghost
+   (device-share) segment stays a step dimmer so it still reads as separate. */
+html.glass.blurred body.theme-classic .cbar-fill {
+  background: rgba(255, 255, 255, 0.92) !important;
+}
+html.glass.blurred body.theme-classic .cbar-ghost {
+  background: rgba(255, 255, 255, 0.5) !important;
+}
+html.glass.blurred body.theme-classic .header {
+  border-bottom-color: rgba(255, 255, 255, 0.18);
+}
+/* Honour the accessibility setting the way native glass does: go solid.
+   Only the panel needs overriding — the transparent body keeps the rounded
+   window shape, and the opaque panel over the (hidden) glass reads as solid. */
+@media (prefers-reduced-transparency: reduce) {
+  html.glass body.theme-classic .panel {
+    background: #ececf0;
+    border: 1px solid #d4d4da;
+    box-shadow: none;
+  }
 }
 .theme-arknights .panel {
   background: #dcdcdc;
@@ -116,6 +218,13 @@ body {
 .title::before {
   content: "♥ ";
   color: #e01c1c;
+}
+/* Classic header title reads like a widget title: larger + semibold, above the
+   medium-weight body labels. Scoped to classic so other themes are unaffected. */
+.theme-classic .title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
 }
 .theme-arknights .title {
   text-transform: uppercase;
@@ -237,7 +346,7 @@ body {
   background: #e2e2e7;
   color: #1c1c1e;
   border: 1px solid #c9c9cf;
-  border-radius: 6px;
+  border-radius: 10px;
   font-size: 12px;
 }
 .theme-classic .mc-btn:hover {
@@ -543,15 +652,17 @@ body {
   margin-bottom: 4px;
 }
 .cbar-title {
-  font-size: 11px;
-  font-weight: 600;
+  /* Widget-like scale: SF at medium weight, a touch larger than the old
+     compact 11px/600 (which read heavier/denser than macOS widgets). */
+  font-size: 12px;
+  font-weight: 500;
 }
 .cbar-trailing {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--panel-text-dim);
 }
 .cbar-track {
-  height: 10px;
+  height: 6px;
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.25);
   overflow: hidden;
@@ -571,7 +682,7 @@ body {
   transition: left 0.4s ease-out, width 0.4s ease-out;
 }
 .cbar-caption {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--panel-text-dim);
   margin-top: 3px;
 }
@@ -1180,6 +1291,36 @@ body {
 .theme-arknights .settings-toggle > input:checked ~ .settings-toggle-track .settings-toggle-knob {
   box-shadow: inset 0 0 0 1px #2f9fd6;
 }
+/* --- General section (relocated tray-menu controls, macOS) --- */
+.settings.general {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* The control toggles wrap a two-line label (name + hint), so anchor the switch
+   to the top of the row rather than centering it against the taller label. */
+.ctl-toggle {
+  align-items: flex-start;
+}
+.ctl-toggle .settings-toggle-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ctl-hint {
+  font-size: 9px;
+  color: var(--panel-text-dim);
+}
+.general-foot {
+  margin-top: 4px;
+  display: flex;
+}
+.general-quit {
+  flex: 1;
+  text-align: center;
+  color: var(--error);
+}
+
 .settings-share-title {
   font-size: 10px;
   color: var(--panel-text);

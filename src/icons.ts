@@ -101,6 +101,24 @@ const AK_REFRESH = akLine(
   `<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`,
 );
 
+// Lucide `pin`. Classic reuses it too: a monochrome line pin suits its macOS
+// look better than the colour 📌 emoji would among the plain glyphs.
+const AK_PIN = akLine(
+  `<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>`,
+);
+
+/** A blocky pushpin: round head, collar, needle. */
+function mcPin(): string {
+  return pixelSVG((x, y) => {
+    const dx = x + 0.5 - 8;
+    const dy = y + 0.5 - 5;
+    if (Math.hypot(dx, dy) <= 3.4) return true; // head
+    if (y === 9 && x >= 5 && x <= 10) return true; // collar
+    if (y >= 10 && y <= 12 && (x === 7 || x === 8)) return true; // needle
+    return y === 13 && x === 8; // needle tip
+  });
+}
+
 // ---------------------------------------------------------------- dispatch
 
 export function settingsIcon(theme: Theme): string {
@@ -113,4 +131,9 @@ export function refreshIcon(theme: Theme): string {
   if (theme === "minecraft") return mcRefresh();
   if (theme === "arknights") return AK_REFRESH;
   return "⟳";
+}
+
+export function pinIcon(theme: Theme): string {
+  if (theme === "minecraft") return mcPin();
+  return AK_PIN;
 }

@@ -1,3 +1,11 @@
+/** Mirrors the Rust `AppControls` — tray-menu toggles relocated to Settings
+ *  (macOS has no native tray menu since Tahoe; see lib.rs `build_tray`). */
+export interface AppControls {
+  autostart: boolean;
+  alerts: boolean;
+  calibrate: boolean;
+}
+
 /** Mirrors the Rust `usage::UsageWindow`. */
 export interface UsageWindow {
   utilization: number;

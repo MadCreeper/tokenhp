@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import type {
   Account,
+  AppControls,
   LocalReport,
   ModelUsage,
   TeamConfig,
@@ -16,11 +17,12 @@ import type {
 import { settingsContentHTML, teamContentHTML, type SettingsTab } from "./team";
 import {
   aboutSectionHTML,
+  generalSectionHTML,
   updateSectionHTML,
   type SettingsSection,
   type UpdateChannel,
 } from "./about";
-import { refreshIcon, settingsIcon } from "./icons";
+import { pinIcon, refreshIcon, settingsIcon } from "./icons";
 import { heartsRow, heartsRowSplit, heartsRefillHTML } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
@@ -36,8 +38,40 @@ import "./styles.css";
 // force the view. Used by showcase.html and for screenshots.
 const params = new URLSearchParams(location.search);
 const MOCK = params.has("mock");
+// macOS has no native tray menu (Tahoe would show it on left-click), so the
+// popover hosts its controls in a "General" settings section. Linux/Windows keep
+// the native tray menu, so they don't show that section. The webview UA reliably
+// carries the OS; `?os=mac` forces it on for showcase pages.
+const IS_MAC = /Mac/i.test(navigator.userAgent) || params.get("os") === "mac";
 // In the browser there's no Tauri window to fix the width, so pin it to match.
 if (MOCK) document.documentElement.style.width = "360px";
+
+// Liquid Glass look (macOS only), user-toggleable in Settings → General.
+// Default on. Two <html> classes gate the CSS:
+//   `mac`   — the popover window is transparent on macOS, so the classic body
+//             is transparent and the rounded panel defines the window shape
+//             (rounded corners) whether or not glass is on.
+//   `glass` — the glass styling is active: panel goes translucent to ride on the
+//             native NSGlassEffectView backdrop. Off → panel stays opaque (a
+//             plain rounded popover) and the native view is hidden (set_glass_enabled).
+// The `blurred` class (focused↔unfocused widget states) is toggled from Rust in
+// build_popover's Focused handler via eval — DOM focus/blur and onFocusChanged
+// both proved unreliable in the WKWebView; the Rust window event is the one that
+// fires. applyTheme() rewrites body.className wholesale, so these live on <html>.
+const GLASS_KEY = "hpbar-glass";
+function glassEnabled(): boolean {
+  return localStorage.getItem(GLASS_KEY) !== "0"; // default on
+}
+if (IS_MAC && !MOCK) {
+  const root = document.documentElement;
+  root.classList.add("mac");
+  if (glassEnabled()) {
+    root.classList.add("glass");
+  } else {
+    // Native glass view is created visible; hide it to honour the stored off.
+    void invoke("set_glass_enabled", { enabled: false }).catch(() => {});
+  }
+}
 
 const POLL_MS = 30 * 60 * 1000; // refresh every 30 min, like the Swift app
 
@@ -50,6 +84,11 @@ const PROVIDER_KEY = "hpbar-provider";
 function loadProvider(): Provider {
   return localStorage.getItem(PROVIDER_KEY) === "codex" ? "codex" : "claude";
 }
+
+// Pinned popover: stays up on focus loss, floating like a desktop widget (the
+// glassy "blurred" style is its unfocused look). The backend owns the actual
+// don't-hide-on-blur behaviour; we re-sync it on launch below.
+const PIN_KEY = "hpbar-pinned";
 
 // The update channel persists like the provider — a single small string.
 const CHANNEL_KEY = "hpbar-channel";
@@ -121,6 +160,7 @@ interface State {
   dropdownOpen: boolean; // Local: the model dropdown
   projectsExpanded: boolean; // Local "Top projects": show all vs the top few
   showDetail: boolean; // Live: reveal the device-share text + account email/plan
+  pinned: boolean; // keep the popover up on focus loss (desktop-widget mode)
   live: UsageReport | null;
   local: LocalReport | null;
   account: Account | null;
@@ -140,7 +180,8 @@ interface State {
   teamTesting: boolean;
   teamStatus: string;
   teamStatusOk: boolean;
-  // Update / About
+  // General (relocated tray-menu controls; macOS only) + Update / About
+  appControls: AppControls | null; // null until loaded from the backend
   appVersion: string; // running build's version, from the Rust side
   updateChannel: UpdateChannel;
   updateInfo: UpdateInfo | null;
@@ -161,6 +202,7 @@ const state: State = {
   dropdownOpen: false,
   projectsExpanded: false,
   showDetail: false,
+  pinned: localStorage.getItem(PIN_KEY) === "1",
   live: null,
   local: null,
   account: null,
@@ -179,6 +221,7 @@ const state: State = {
   teamTesting: false,
   teamStatus: "",
   teamStatusOk: false,
+  appControls: null,
   appVersion: "",
   updateChannel: loadChannel(),
   updateInfo: null,
@@ -187,6 +230,12 @@ const state: State = {
   updateStatus: "",
   updateStatusOk: false,
 };
+
+// Re-arm the backend's don't-hide-on-blur behaviour from the stored preference
+// (the Rust flag resets to false on every launch).
+if (!MOCK && state.pinned) {
+  invoke("set_pinned", { pinned: true }).catch(() => {});
+}
 
 const app = document.getElementById("app")!;
 
@@ -438,6 +487,9 @@ function headerHTML(): string {
     <header class="header">
       ${titleHTML}
       ${state.loading ? `<span class="spinner">…</span>` : ""}
+      <button class="mc-btn icon ${state.pinned ? "selected" : ""}" data-action="pin" title="${
+        state.pinned ? "Unpin" : "Pin as floating widget"
+      }">${pinIcon(getTheme())}</button>
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings" title="Settings">${settingsIcon(getTheme())}</button>
       <button class="mc-btn icon" data-action="refresh" title="Refresh">${refreshIcon(getTheme())}</button>
@@ -453,9 +505,12 @@ function settingsHeaderHTML(): string {
     </header>`;
 }
 
-// Top-level settings sections. Update first (universally useful); Team only
-// after that since it's opt-in; About last.
+// Top-level settings sections. General (app controls + Quit) leads on macOS,
+// where it replaces the tray menu; then Update (universally useful), Team
+// (opt-in), About. General is macOS-only — elsewhere the tray menu still owns
+// those toggles, so showing them here too would desync the menu's checkmarks.
 const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
+  ...(IS_MAC ? [{ id: "general" as const, label: "General" }] : []),
   { id: "update", label: "Update" },
   { id: "team", label: "Team" },
   { id: "about", label: "About" },
@@ -472,6 +527,13 @@ function settingsSectionSegHTML(): string {
 // Render the active section's body. Team reuses the existing form (with its own
 // SSH/DB/Team sub-tabs); Update and About come from about.ts.
 function settingsBodyHTML(): string {
+  if (state.settingsSection === "general") {
+    return generalSectionHTML({
+      controls: state.appControls,
+      // Liquid Glass toggle is macOS-only.
+      glass: IS_MAC ? glassEnabled() : undefined,
+    });
+  }
   if (state.settingsSection === "team") {
     return settingsContentHTML({
       draft: state.teamDraft ?? defaultTeamDraft(),
@@ -1063,6 +1125,16 @@ app.addEventListener("click", (e) => {
       syncTrayTheme(); // recolor the menu-bar heart to match
       render();
       break;
+    case "pin":
+      state.pinned = !state.pinned;
+      try {
+        localStorage.setItem(PIN_KEY, state.pinned ? "1" : "0");
+      } catch {
+        /* best-effort */
+      }
+      if (!MOCK) void invoke("set_pinned", { pinned: state.pinned }).catch(() => {});
+      render();
+      break;
     case "source":
       if (value && value !== state.source) {
         state.source = value as Source;
@@ -1164,6 +1236,10 @@ app.addEventListener("click", (e) => {
     case "open-url":
       if (value) void invoke("open_external", { target: value }).catch(() => {});
       break;
+    case "quit-app":
+      // The only Quit affordance on macOS now that the tray has no menu.
+      if (!MOCK) void invoke("quit_app").catch(() => {});
+      break;
     case "team-test":
       void testTeam();
       break;
@@ -1178,7 +1254,26 @@ app.addEventListener("click", (e) => {
 app.addEventListener("input", (e) => {
   const el = e.target as HTMLInputElement;
   const field = el.dataset.field;
-  if (!field || !state.teamDraft) return;
+  if (!field) return;
+  // General-section controls (macOS): route straight to the backend.
+  if (field.startsWith("ctl-")) {
+    void applyControl(field.slice(4) as keyof AppControls, el.checked);
+    return;
+  }
+  // Liquid Glass toggle (macOS, frontend setting): flip the `glass` class and
+  // show/hide the native backdrop.
+  if (field === "glass") {
+    const on = el.checked;
+    try {
+      localStorage.setItem(GLASS_KEY, on ? "1" : "0");
+    } catch {
+      /* best-effort */
+    }
+    document.documentElement.classList.toggle("glass", on);
+    void invoke("set_glass_enabled", { enabled: on }).catch(() => {});
+    return;
+  }
+  if (!state.teamDraft) return;
   const draft = state.teamDraft as unknown as Record<string, unknown>;
   draft[field] =
     el.type === "checkbox"
@@ -1199,9 +1294,40 @@ function openSettings(): void {
   state.view = "settings";
   render();
   void loadAppVersion();
+  if (IS_MAC) void loadAppControls(); // General section (macOS)
   // Land on Update with a check already in flight, so there's nothing to click
   // for the common "is there a new version?" case.
   void checkUpdate();
+}
+
+// The relocated tray-menu toggles' current state (macOS). Loaded when settings
+// opens so the General section reflects the real backend values.
+async function loadAppControls(): Promise<void> {
+  if (MOCK) {
+    state.appControls = { autostart: false, alerts: true, calibrate: false };
+    render();
+    return;
+  }
+  try {
+    state.appControls = await invoke<AppControls>("get_app_controls");
+    render();
+  } catch {
+    /* leave null; toggles stay disabled */
+  }
+}
+
+// Push one control change to the backend, reflecting it optimistically. On
+// failure, re-read the real state so the toggle can't drift out of sync.
+async function applyControl(key: keyof AppControls, on: boolean): Promise<void> {
+  if (state.appControls) state.appControls[key] = on;
+  if (MOCK) return;
+  const cmd =
+    key === "autostart" ? "set_autostart" : key === "alerts" ? "set_alerts_enabled" : "set_calibrate";
+  try {
+    await invoke(cmd, { enabled: on });
+  } catch {
+    void loadAppControls(); // reconcile with the backend's actual state
+  }
 }
 
 // The running build's version (cheap, cached after the first call).
@@ -1329,6 +1455,16 @@ void loadTeamConfig();
 syncTrayTheme();
 if (CELEBRATE_SHOWCASE) runCelebrationShowcase(); // mock page: loop the refill animation
 if (HURT_SHOWCASE) runHurtShowcase(); // mock page: loop the HP-drop animation
+// Showcase: `?view=settings[&section=general]` deep-links into the settings view
+// (there's no click to simulate in a screenshot). Honors the section if valid.
+if (params.get("view") === "settings") {
+  openSettings();
+  const sec = params.get("section");
+  if (sec && SETTINGS_SECTIONS.some((s) => s.id === sec)) {
+    state.settingsSection = sec as SettingsSection;
+    render();
+  }
+}
 
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).

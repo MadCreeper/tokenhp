@@ -1,6 +1,6 @@
 [package]
 name = "hpbar"
-version = "0.5.2"
+version = "0.6.0"
 description = "HP Bar — Claude subscription usage in your menu bar / tray"
 authors = ["MadCreeper"]
 edition = "2021"
@@ -21,7 +21,7 @@ tauri-build = { version = "2", features = [] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-autostart = "2"
 # Native low/critical-quota notifications (Ambient HP). Official Tauri plugin.
 tauri-plugin-notification = "2"
@@ -40,6 +40,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # Keychain access is macOS-only; Linux/Windows read a plaintext file instead.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# Native NSVisualEffectView backdrop for the "liquid glass" prototype (Tier 1).
+window-vibrancy = "0.5"
+# Reach the WKWebView to clear its opaque underPageBackgroundColor (see lib.rs),
+# and NSGlassEffectView for the real Liquid Glass (macOS 26+). objc2-foundation
+# is already in the tree via wry, so it adds no new download.
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", default-features = false, features = ["NSGeometry"] }
 
 [profile.release]
 opt-level = "s"   # optimise for size — this is a tiny menu-bar utility

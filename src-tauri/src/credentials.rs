@@ -84,16 +84,21 @@ impl CredentialCache {
     /// A usable credential. Reads storage only when the cache is empty or the
     /// cached token is within the refresh margin of expiry.
     pub fn get(&self) -> Result<ClaudeCredentials, CredError> {
-        {
-            let guard = self.cached.lock().unwrap();
-            if let Some(c) = guard.as_ref() {
-                if !c.is_stale() {
-                    return Ok(c.clone());
-                }
+        // Hold the lock across the storage read. Otherwise concurrent startup
+        // callers (usage fetch, account fetch, ambient poll, team upload) all
+        // find the cache empty, all drop the lock, and all read the Keychain —
+        // a cache stampede that fires one macOS password prompt *per caller*.
+        // Serialising here means the first reader prompts once; the rest block
+        // on the lock and then see the warmed cache. Keychain reads are rare
+        // (only when empty/near-expiry), so the contention is negligible.
+        let mut guard = self.cached.lock().unwrap();
+        if let Some(c) = guard.as_ref() {
+            if !c.is_stale() {
+                return Ok(c.clone());
             }
         }
         let fresh = load_from_storage()?;
-        *self.cached.lock().unwrap() = Some(fresh.clone());
+        *guard = Some(fresh.clone());
         Ok(fresh)
     }
 

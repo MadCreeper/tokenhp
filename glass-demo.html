@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HPBar — Liquid Glass preview</title>
+    <style>
+      /* ============================================================
+         Liquid-glass PREVIEW (browser-only, no Tauri).
+         This simulates the native macOS vibrancy with CSS
+         `backdrop-filter: blur()` over a wallpaper. The real
+         NSVisualEffectView will look a touch richer (it also
+         desaturates toward the material, and macOS 26 restyles it),
+         but this is a faithful proxy for tuning tint / blur / border /
+         contrast. Whatever numbers you settle on here port 1:1 to
+         `.theme-classic .panel` in src/styles.css.
+         ============================================================ */
+      :root {
+        --blur: 30px;
+        --sat: 1.8;
+        --tint-r: 245;
+        --tint-g: 245;
+        --tint-b: 248;
+        --tint-a: 0.5;
+        --text: #2b2b2e;
+        --text-dim: #6e6e73;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        font-family: -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+        overflow: hidden;
+        color: #fff;
+      }
+
+      /* ---- Wallpaper layer (the thing the glass blurs) ---- */
+      #wall {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        background-size: cover;
+        background-position: center;
+      }
+      .wall-sequoia {
+        background:
+          radial-gradient(120% 90% at 15% 15%, #ff8a4c 0%, transparent 45%),
+          radial-gradient(120% 90% at 85% 20%, #ff4d9d 0%, transparent 50%),
+          radial-gradient(140% 120% at 70% 90%, #6a4cff 0%, transparent 55%),
+          linear-gradient(135deg, #3a1c71, #d76d77 55%, #ffaf7b);
+      }
+      .wall-light {
+        background:
+          radial-gradient(90% 80% at 20% 20%, #ffffff 0%, transparent 60%),
+          radial-gradient(90% 80% at 80% 80%, #dfe7ff 0%, transparent 60%),
+          linear-gradient(135deg, #eef2f8, #cfd8ea);
+      }
+      .wall-dark {
+        background:
+          radial-gradient(90% 80% at 25% 20%, #2a3550 0%, transparent 55%),
+          radial-gradient(90% 80% at 80% 85%, #10243a 0%, transparent 55%),
+          linear-gradient(135deg, #0c1119, #1b2333);
+      }
+      .wall-busy {
+        background:
+          repeating-linear-gradient(45deg, rgba(255,255,255,.08) 0 14px, transparent 14px 28px),
+          conic-gradient(from 30deg, #ff5f6d, #ffc371, #47e5bc, #4a8fe7, #a06bff, #ff5f6d);
+      }
+      /* Fake text/window shapes so the blur has structure to reveal,
+         like real desktop content behind the popover. */
+      #wall::after {
+        content: "";
+        position: absolute; inset: 0;
+        background:
+          linear-gradient(90deg, rgba(255,255,255,.14) 0 40%, transparent 40%) 40px 120px / 260px 12px no-repeat,
+          linear-gradient(90deg, rgba(255,255,255,.10) 0 60%, transparent 60%) 40px 150px / 320px 12px no-repeat,
+          linear-gradient(90deg, rgba(0,0,0,.14) 0 50%, transparent 50%) 60px 380px / 300px 14px no-repeat,
+          linear-gradient(90deg, rgba(0,0,0,.10) 0 70%, transparent 70%) 60px 410px / 360px 14px no-repeat;
+      }
+
+      /* ---- The popover (faithful classic theme + glass) ---- */
+      #stage { position: fixed; inset: 0; z-index: 1; }
+      .popover {
+        position: absolute;
+        top: 90px; left: 90px;
+        width: 340px;
+        cursor: grab;
+      }
+      .popover:active { cursor: grabbing; }
+
+      .panel {
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        color: var(--text);
+        border-radius: 12px;
+        /* THE GLASS — these four properties are what you're tuning */
+        background: rgba(var(--tint-r), var(--tint-g), var(--tint-b), var(--tint-a));
+        -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+        backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+        border: 1px solid rgba(255, 255, 255, 0.45);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.6),
+          0 10px 34px rgba(0, 0, 0, 0.28);
+      }
+
+      .header {
+        display: flex; align-items: center; gap: 8px;
+        border-bottom: 1px solid rgba(0,0,0,0.12);
+        padding-bottom: 8px;
+      }
+      .heart { color: #e0524a; font-size: 16px; }
+      .title { font-size: 13px; font-weight: 600; }
+      .pct { margin-left: auto; font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }
+
+      .seg {
+        display: flex; gap: 2px;
+        background: rgba(0,0,0,0.08);
+        border-radius: 7px; padding: 2px;
+        font-size: 11px; font-weight: 600;
+      }
+      .seg button {
+        flex: 1; border: 0; background: transparent; color: var(--text-dim);
+        padding: 3px 0; border-radius: 5px; font: inherit; cursor: pointer;
+      }
+      .seg button.on {
+        background: rgba(255,255,255,0.85); color: var(--text);
+        box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+      }
+
+      .cbar + .cbar { margin-top: 12px; }
+      .cbar-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+      .cbar-title { font-size: 11px; font-weight: 600; }
+      .cbar-trailing { font-size: 11px; color: var(--text-dim); }
+      .cbar-track { height: 10px; border-radius: 3px; background: rgba(0,0,0,0.25); overflow: hidden; }
+      .cbar-fill { height: 100%; border-radius: 3px; }
+      .cbar-caption { font-size: 9px; color: var(--text-dim); margin-top: 3px; }
+
+      .footer { display: flex; gap: 6px; padding-top: 4px; }
+      .footer button {
+        flex: 1; font: inherit; font-size: 11px; font-weight: 600;
+        color: var(--text); border: 1px solid rgba(0,0,0,0.12);
+        background: rgba(255,255,255,0.5); border-radius: 7px; padding: 5px 0; cursor: pointer;
+      }
+
+      /* ---- Controls ---- */
+      #controls {
+        position: fixed; top: 16px; right: 16px; z-index: 2;
+        width: 250px;
+        background: rgba(20,22,28,0.82);
+        -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 12px; padding: 14px;
+        font-size: 12px; color: #e8e8ea;
+      }
+      #controls h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: #9aa0ad; margin-bottom: 10px; }
+      .row { margin-bottom: 11px; }
+      .row label { display: flex; justify-content: space-between; margin-bottom: 4px; color: #c7ccd6; }
+      .row label b { color: #fff; font-variant-numeric: tabular-nums; }
+      .row input[type=range] { width: 100%; accent-color: #6a9bff; }
+      .walls, .tints { display: flex; gap: 6px; flex-wrap: wrap; }
+      .walls button, .tints button {
+        flex: 1 1 auto; min-width: 46px; font: inherit; font-size: 11px;
+        color: #dfe3ea; background: rgba(255,255,255,0.08);
+        border: 1px solid transparent; border-radius: 6px; padding: 5px 4px; cursor: pointer;
+      }
+      .walls button.on, .tints button.on { border-color: #6a9bff; background: rgba(106,155,255,0.22); color: #fff; }
+      #css {
+        margin-top: 4px; width: 100%; height: 132px; resize: none;
+        font-family: ui-monospace, monospace; font-size: 10.5px; line-height: 1.5;
+        color: #cde3ff; background: rgba(0,0,0,0.35);
+        border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 8px;
+      }
+      .hint { color: #838a97; font-size: 10.5px; line-height: 1.5; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="wall" class="wall-sequoia"></div>
+
+    <div id="stage">
+      <div class="popover" id="pop">
+        <div class="panel">
+          <div class="header">
+            <span class="heart">&#9829;</span>
+            <span class="title">HP Bar</span>
+            <span class="pct">62%</span>
+          </div>
+          <div class="seg">
+            <button class="on">Live</button>
+            <button>Local</button>
+          </div>
+          <div>
+            <div class="cbar">
+              <div class="cbar-head"><span class="cbar-title">Current session</span><span class="cbar-trailing">62%</span></div>
+              <div class="cbar-track"><div class="cbar-fill" style="width:62%;background:linear-gradient(to bottom,#6fce72,#4caf50)"></div></div>
+              <div class="cbar-caption">resets 3:00 PM</div>
+            </div>
+            <div class="cbar">
+              <div class="cbar-head"><span class="cbar-title">Weekly &middot; all models</span><span class="cbar-trailing">41%</span></div>
+              <div class="cbar-track"><div class="cbar-fill" style="width:41%;background:linear-gradient(to bottom,#eec14a,#e0a92e)"></div></div>
+              <div class="cbar-caption">resets Mon 12:00 AM</div>
+            </div>
+            <div class="cbar">
+              <div class="cbar-head"><span class="cbar-title">Weekly &middot; Opus</span><span class="cbar-trailing">18%</span></div>
+              <div class="cbar-track"><div class="cbar-fill" style="width:18%;background:linear-gradient(to bottom,#e6685c,#d9584a)"></div></div>
+            </div>
+          </div>
+          <div class="footer">
+            <button>Settings</button>
+            <button>Refresh</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="controls">
+      <h2>Glass tuner</h2>
+
+      <div class="row">
+        <label>Blur <b id="vblur">30px</b></label>
+        <input type="range" id="blur" min="0" max="60" step="1" value="30" />
+      </div>
+      <div class="row">
+        <label>Tint opacity <b id="vtint">0.50</b></label>
+        <input type="range" id="tint" min="0" max="1" step="0.02" value="0.5" />
+      </div>
+      <div class="row">
+        <label>Saturation <b id="vsat">1.8</b></label>
+        <input type="range" id="sat" min="1" max="2.5" step="0.05" value="1.8" />
+      </div>
+
+      <div class="row">
+        <label>Tint base</label>
+        <div class="tints">
+          <button data-r="245" data-g="245" data-b="248" data-text="#2b2b2e" class="on">Light</button>
+          <button data-r="255" data-g="255" data-b="255" data-text="#2b2b2e">White</button>
+          <button data-r="30" data-g="30" data-b="34" data-text="#f2f2f5">Dark</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Wallpaper (drag the popover too)</label>
+        <div class="walls">
+          <button data-w="sequoia" class="on">Sequoia</button>
+          <button data-w="light">Light</button>
+          <button data-w="dark">Dark</button>
+          <button data-w="busy">Busy</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Port these into styles.css</label>
+        <textarea id="css" readonly></textarea>
+      </div>
+      <div class="hint">
+        Simulated with CSS backdrop-filter. Native vibrancy on macOS&nbsp;26 will read
+        a little richer, but tint / proportion / contrast map directly.
+      </div>
+    </div>
+
+    <script>
+      const root = document.documentElement;
+      const $ = (id) => document.getElementById(id);
+      const state = { blur: 30, sat: 1.8, tint: 0.5, r: 245, g: 245, b: 248, text: "#2b2b2e" };
+
+      function apply() {
+        root.style.setProperty("--blur", state.blur + "px");
+        root.style.setProperty("--sat", state.sat);
+        root.style.setProperty("--tint-a", state.tint);
+        root.style.setProperty("--tint-r", state.r);
+        root.style.setProperty("--tint-g", state.g);
+        root.style.setProperty("--tint-b", state.b);
+        root.style.setProperty("--text", state.text);
+        $("vblur").textContent = state.blur + "px";
+        $("vsat").textContent = (+state.sat).toFixed(2);
+        $("vtint").textContent = (+state.tint).toFixed(2);
+        $("css").value =
+          "/* .theme-classic .panel */\n" +
+          "background: rgba(" + state.r + ", " + state.g + ", " + state.b + ", " + (+state.tint).toFixed(2) + ");\n" +
+          "-webkit-backdrop-filter: blur(" + state.blur + "px) saturate(" + (+state.sat).toFixed(2) + ");\n" +
+          "backdrop-filter: blur(" + state.blur + "px) saturate(" + (+state.sat).toFixed(2) + ");\n\n" +
+          "/* Native match: NSVisualEffectMaterial::" +
+          (state.r < 100 ? "HudWindow" : "Popover") + " */";
+      }
+
+      $("blur").oninput = (e) => { state.blur = +e.target.value; apply(); };
+      $("sat").oninput  = (e) => { state.sat  = +e.target.value; apply(); };
+      $("tint").oninput = (e) => { state.tint = +e.target.value; apply(); };
+
+      document.querySelectorAll(".tints button").forEach((b) => {
+        b.onclick = () => {
+          document.querySelectorAll(".tints button").forEach((x) => x.classList.remove("on"));
+          b.classList.add("on");
+          state.r = +b.dataset.r; state.g = +b.dataset.g; state.b = +b.dataset.b; state.text = b.dataset.text;
+          apply();
+        };
+      });
+      document.querySelectorAll(".walls button").forEach((b) => {
+        b.onclick = () => {
+          document.querySelectorAll(".walls button").forEach((x) => x.classList.remove("on"));
+          b.classList.add("on");
+          $("wall").className = "wall-" + b.dataset.w;
+        };
+      });
+
+      // Drag the popover across the wallpaper.
+      const pop = $("pop");
+      let drag = null;
+      pop.addEventListener("pointerdown", (e) => {
+        drag = { x: e.clientX - pop.offsetLeft, y: e.clientY - pop.offsetTop };
+        pop.setPointerCapture(e.pointerId);
+      });
+      pop.addEventListener("pointermove", (e) => {
+        if (!drag) return;
+        pop.style.left = (e.clientX - drag.x) + "px";
+        pop.style.top = (e.clientY - drag.y) + "px";
+      });
+      pop.addEventListener("pointerup", () => { drag = null; });
+
+      apply();
+    </script>
+  </body>
+</html>
