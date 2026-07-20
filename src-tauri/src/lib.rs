@@ -537,7 +537,11 @@ fn force_key_window_appearance(win: &WebviewWindow) {
             Some(imp),
             c"c@:".as_ptr(),
         );
-        if !added {
+        // class_addMethod returns the raw ObjC BOOL, which is `bool` on arm64 but
+        // `signed char` (i8) on x86_64 — so `!added` only compiles on Apple Silicon.
+        // Bool::from_raw normalises both to a portable Rust bool (fixes the
+        // universal-build x86_64 slice).
+        if !Bool::from_raw(added).as_bool() {
             eprintln!("[hpbar] hasKeyAppearance override not added");
         }
     });
