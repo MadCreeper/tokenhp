@@ -89,11 +89,16 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
         .map_err(|e| FetchError::Credentials(e.to_string()))?;
 
     if credentials.is_expired() {
-        creds.invalidate();
+        // Note we do *not* schedule a re-read: storage still holds this same
+        // dead token until Claude Code refreshes it. See `credentials`.
+        creds.mark_rejected();
         return Err(FetchError::TokenExpired);
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| FetchError::Network(e.to_string()))?;
     let resp = client
         .get(USAGE_URL)
         .header("Authorization", format!("Bearer {}", credentials.access_token))
@@ -108,9 +113,10 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
         200 => {}
         401 => {
             // The cached token was rejected — almost always because Claude Code
-            // rotated it out from under us. Drop our cache so the next fetch
-            // re-reads storage (picking up the new token) instead of looping.
-            creds.invalidate();
+            // rotated it out from under us. Mark it dead; the next fetch picks
+            // up the replacement as soon as Claude Code writes one, without
+            // re-reading (and re-prompting for) storage in the meantime.
+            creds.mark_rejected();
             return Err(FetchError::Unauthorized);
         }
         429 => return Err(FetchError::RateLimited),

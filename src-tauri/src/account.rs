@@ -83,9 +83,10 @@ fn decode_b64url(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Pull the login email out of `~/.claude.json`. Same file/shape on every OS.
+/// Pull the login email out of `~/.claude.json` (or `$CLAUDE_CONFIG_DIR`'s copy
+/// — see [`crate::credentials::claude_json_path`]). Same shape on every OS.
 pub fn read_email() -> Option<String> {
-    let path = dirs::home_dir()?.join(".claude.json");
+    let path = crate::credentials::claude_json_path()?;
     let raw = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     v.get("oauthAccount")?

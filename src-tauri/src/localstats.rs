@@ -41,8 +41,8 @@ pub struct ModelUsageDTO {
 /// Claude Code [`crate::tools::ToolAdapter`] implementation's data source.
 /// Synchronous (file IO) — call via `spawn_blocking`.
 pub fn collect(window_secs: i64) -> Vec<ModelUsageDTO> {
-    let projects = dirs::home_dir()
-        .map(|h| h.join(".claude").join("projects"))
+    let projects = crate::credentials::claude_config_dir()
+        .map(|d| d.join("projects"))
         .unwrap_or_default();
 
     let files = session_files(&projects);
@@ -135,8 +135,8 @@ pub struct ProjectUsageDTO {
 /// session's working directory (`cwd`), priced per-model. Sorted desc by tokens.
 /// Synchronous (file IO) — call via `spawn_blocking`.
 pub fn collect_by_project(window_secs: i64) -> Vec<ProjectUsageDTO> {
-    let dir = dirs::home_dir()
-        .map(|h| h.join(".claude").join("projects"))
+    let dir = crate::credentials::claude_config_dir()
+        .map(|d| d.join("projects"))
         .unwrap_or_default();
     let files = session_files(&dir);
     let now = Utc::now().timestamp();
@@ -341,8 +341,8 @@ struct ProjAcc {
 /// message timestamps, so daily/weekly/monthly sums never overlap. Synchronous
 /// (file IO) — call via `spawn_blocking`.
 pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
-    let projects_dir = dirs::home_dir()
-        .map(|h| h.join(".claude").join("projects"))
+    let projects_dir = crate::credentials::claude_config_dir()
+        .map(|d| d.join("projects"))
         .unwrap_or_default();
     let files = session_files(&projects_dir);
 

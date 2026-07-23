@@ -90,6 +90,14 @@ async fn fetch_usage(
     Ok(report)
 }
 
+/// Explicit user retry: let the next fetch look at Claude Code's credential
+/// storage again even if it appears unchanged. Background polls never do this —
+/// on macOS a read can raise a Keychain prompt (see `credentials`).
+#[tauri::command]
+fn recheck_credentials(cache: tauri::State<'_, CredentialCache>) {
+    cache.allow_recheck();
+}
+
 /// Login identity for the footer (email + plan). Best-effort: returns whatever
 /// can be read from local Claude Code state, with empty fields otherwise.
 #[tauri::command]
@@ -271,6 +279,7 @@ pub fn run() {
             fetch_codex_quota,
             fetch_account,
             fetch_codex_account,
+            recheck_credentials,
             set_tray_theme,
             set_pinned,
             set_glass_enabled,
@@ -332,6 +341,12 @@ pub fn run() {
                         });
                     });
                 }
+            }
+            // Record every read of Claude Code's credential storage, so a report
+            // of "the CLI logged me out" can be checked against whether HPBar
+            // touched the item anywhere near that time.
+            if let Ok(dir) = app.path().app_config_dir() {
+                app.state::<CredentialCache>().set_audit_dir(dir);
             }
             spawn_team_uploader();
             // Ambient HP: keep the menu-bar heart + tooltip live, and alert on

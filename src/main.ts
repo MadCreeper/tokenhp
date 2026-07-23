@@ -1097,7 +1097,12 @@ app.addEventListener("click", (e) => {
   switch (action) {
     case "refresh":
       maybeUploadTeam(); // also push our latest usage up (rate-limited)
-      void refresh();
+      // An explicit click is the one moment we're allowed to look at Claude
+      // Code's credential storage again even if it appears unchanged — a
+      // background poll must never do that (it can raise a Keychain prompt).
+      // No-op when the cached token is healthy.
+      if (MOCK) void refresh();
+      else void invoke("recheck_credentials").catch(() => {}).then(() => refresh());
       break;
     case "provider-cycle":
       // Title click on Live: flip Claude⇄Codex (only two providers).

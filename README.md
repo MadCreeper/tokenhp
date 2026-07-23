@@ -110,10 +110,18 @@ Token is read from `%USERPROFILE%\.claude\.credentials.json` — **no prompt**.
 
 | OS | Source | Prompt? |
 |----|--------|---------|
-| macOS | Keychain item `Claude Code-credentials` (via `keyring`) | once per token rotation |
-| Linux / Windows | `~/.claude/.credentials.json` plaintext file | **never** |
+| macOS | Keychain item `Claude Code-credentials`, read via `/usr/bin/security` — the same tool Claude Code stores it with, so the item already trusts it | **never** |
+| Linux / Windows | `~/.claude/.credentials.json` plaintext file (Claude Code uses no OS keyring on either) | **never** |
 
-HPBar never logs in itself — it reuses your Claude Code login and only reads it.
+`$CLAUDE_CONFIG_DIR` is honoured everywhere Claude Code honours it — the
+credentials file and session logs move with it.
+
+HPBar never logs in itself — it reuses your Claude Code login and **only reads**
+it: it never writes the item, never deletes it, and never refreshes the token
+(refreshing would rotate the CLI's refresh token and log you out for real). It
+also reads as rarely as it can — only once Claude Code has actually written a
+new token. Why that matters, and how it's enforced:
+[docs/credential-access.md](docs/credential-access.md).
 
 ## 🛠 Develop
 
@@ -262,10 +270,15 @@ GNOME 需要安装 [AppIndicator 扩展](https://extensions.gnome.org/extension/
 
 | 系统 | 来源 | 是否弹窗 |
 |------|------|---------|
-| macOS | 钥匙串项 `Claude Code-credentials`（通过 `keyring`） | 每次令牌轮换时一次 |
-| Linux / Windows | `~/.claude/.credentials.json` 明文文件 | **从不** |
+| macOS | 钥匙串项 `Claude Code-credentials`，通过 `/usr/bin/security` 读取 —— 这正是 Claude Code 自己写入该项所用的工具，钥匙串本就信任它 | **从不** |
+| Linux / Windows | `~/.claude/.credentials.json` 明文文件（这两个平台上 Claude Code 都不使用系统钥匙串） | **从不** |
 
-HPBar 自身不做任何登录，只复用并读取你的 Claude Code 登录信息。
+如果设置了 `$CLAUDE_CONFIG_DIR`，HPBar 会跟随该目录（凭据文件与会话日志都在其中）。
+
+HPBar 自身不做任何登录，只复用你的 Claude Code 登录信息，并且**只读**：从不写入、
+从不删除，也从不刷新令牌（刷新会轮换 CLI 的 refresh token，真的把你登出）。读取频率
+也压到最低 —— 只有当 Claude Code 确实写入了新令牌时才会去读。原因与具体保障见
+[docs/credential-access.md](docs/credential-access.md)。
 
 ## 🛠 开发
 
