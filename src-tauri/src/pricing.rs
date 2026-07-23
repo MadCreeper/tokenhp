@@ -94,6 +94,57 @@ fn user_overrides() -> HashMap<String, ModelPrice> {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Pricing::loaded()` tolerates a malformed table by falling back to empty,
+    /// which would silently zero every cost. Fail loudly here instead.
+    #[test]
+    fn bundled_table_parses() {
+        let table: HashMap<String, ModelPrice> =
+            serde_json::from_str(BUNDLED).expect("pricing.json is not valid JSON");
+        assert!(table.len() > 30, "bundled table looks truncated");
+        for id in ["claude-opus-4-8", "claude-fable-5", "kimi-k3", "glm-5.2"] {
+            assert!(table.contains_key(id), "missing {id}");
+        }
+    }
+
+    /// Every rate is a sane, positive-or-zero dollars-per-million figure — a
+    /// stray factor of 1000 (or a per-token rate pasted in) shows up here.
+    #[test]
+    fn rates_are_plausible() {
+        let table: HashMap<String, ModelPrice> = serde_json::from_str(BUNDLED).unwrap();
+        for (id, p) in &table {
+            for (label, rate) in [
+                ("input", p.input),
+                ("output", p.output),
+                ("cache_read", p.cache_read),
+                ("cache_create", p.cache_create),
+                ("cache_create_1h", p.cache_create_1h.unwrap_or(0.0)),
+            ] {
+                assert!(
+                    (0.0..=500.0).contains(&rate),
+                    "{id}.{label} = {rate} is out of range"
+                );
+            }
+            assert!(p.output >= p.input, "{id}: output cheaper than input?");
+            assert!(p.cache_read <= p.input, "{id}: cache read dearer than input?");
+        }
+    }
+
+    #[test]
+    fn cost_is_per_million_tokens() {
+        let table: HashMap<String, ModelPrice> = serde_json::from_str(BUNDLED).unwrap();
+        let pricing = Pricing { table };
+        // 1M input + 1M output on Opus 4.8 = $5 + $25.
+        let cost = pricing.cost("claude-opus-4-8", 1_000_000, 1_000_000, 0, 0, 0).unwrap();
+        assert!((cost.total() - 30.0).abs() < 1e-9, "got {}", cost.total());
+        // Date-suffixed IDs fall back to the base entry.
+        assert!(pricing.cost("claude-haiku-4-5-20251001", 1_000_000, 0, 0, 0, 0).is_some());
+    }
+}
+
 /// `claude-haiku-4-5-20251001` → `claude-haiku-4-5` (drop trailing date stamp).
 pub fn strip_date_suffix(id: &str) -> String {
     let mut parts: Vec<&str> = id.split('-').collect();
