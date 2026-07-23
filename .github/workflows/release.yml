@@ -73,6 +73,16 @@ jobs:
       - name: Release notes from tag
         shell: bash
         run: |
+          # actions/checkout resolves the tag to a SHA and leaves a *lightweight*
+          # tag behind, and `%(contents)` on a lightweight tag silently falls
+          # back to the commit message — which is how v0.7.0-beta shipped with
+          # its commit message as the release notes. Re-fetch the real tag
+          # object first, and fail loudly rather than publish the wrong text.
+          git fetch --force --tags origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}"
+          if [ "$(git cat-file -t "${{ github.ref_name }}")" != "tag" ]; then
+            echo "::error::${{ github.ref_name }} is not an annotated tag — release notes would be the commit message. Re-tag with 'git tag -a'."
+            exit 1
+          fi
           {
             echo 'RELEASE_BODY<<RELEASE_EOF'
             git tag -l --format='%(contents)' "${{ github.ref_name }}"
