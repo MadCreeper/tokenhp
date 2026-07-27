@@ -65,20 +65,23 @@ const CALIB_BOOST: f64 = 4.0;
 
 // ---- window descriptors -----------------------------------------------------
 
-/// Seconds spanned by a window title: "5-Hour"/"N-Hour" → N·3600, "Weekly" → 7d,
-/// "Monthly" → 30d; default 5h. Used to align local cost to the server window and
-/// as the recency half-life (one cycle).
+/// Seconds spanned by a window title: "5-Hour"/"N-Hour" → N·3600, "Weekly…"
+/// (incl. per-model caps like "Weekly (Fable)") → 7d, "Monthly" → 30d; default
+/// 5h. Used to align local cost to the server window and as the recency
+/// half-life (one cycle).
 pub fn window_secs_for_title(title: &str) -> i64 {
     if let Some(h) = title.strip_suffix("-Hour") {
         if let Ok(n) = h.trim().parse::<i64>() {
             return (n.max(1)) * 3600;
         }
     }
-    match title {
-        "Weekly" => 7 * 86_400,
-        "Monthly" => 30 * 86_400,
-        _ => 5 * 3600,
+    if title.starts_with("Weekly") {
+        return 7 * 86_400;
     }
+    if title.starts_with("Monthly") {
+        return 30 * 86_400;
+    }
+    5 * 3600
 }
 
 // ---- the estimator (pure, unit-tested) --------------------------------------
@@ -280,6 +283,11 @@ pub fn record(app: &AppHandle, provider: &str, report: &UsageReport) {
         if w.trailing.as_deref() == Some("Off") || w.resets_at.is_none() {
             continue;
         }
+        // Per-model windows can't be fitted: the local-cost series is
+        // account-wide, so their implied-budget ratio would be inflated.
+        if crate::usage::is_model_scoped_title(&w.title) {
+            continue;
+        }
         let cost = local_cost_in_window(provider, w.resets_at.as_deref(), &w.title);
         let v = hist.entry(key(provider, &w.title)).or_default();
         v.push(ShareSample {
@@ -299,7 +307,7 @@ pub fn annotate(app: &AppHandle, provider: &str, report: &mut UsageReport) {
     let hist = load_history(app);
     let now = now_unix();
     for w in &mut report.windows {
-        if w.trailing.as_deref() == Some("Off") {
+        if w.trailing.as_deref() == Some("Off") || crate::usage::is_model_scoped_title(&w.title) {
             continue;
         }
         let series = hist
@@ -360,6 +368,7 @@ mod tests {
         assert_eq!(window_secs_for_title("5-Hour"), 18_000);
         assert_eq!(window_secs_for_title("2-Hour"), 7_200);
         assert_eq!(window_secs_for_title("Weekly"), 604_800);
+        assert_eq!(window_secs_for_title("Weekly (Fable)"), 604_800);
         assert_eq!(window_secs_for_title("Monthly"), 2_592_000);
         assert_eq!(window_secs_for_title("Limit"), 18_000); // fallback
     }
