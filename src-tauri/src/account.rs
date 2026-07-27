@@ -1,8 +1,12 @@
 //! Best-effort account identity for the footer: which login this machine is
-//! using and what plan it's on. Two local sources, both shared by Claude Code:
-//!   - email: `~/.claude.json` → `oauthAccount.emailAddress`
-//!   - plan:  the OAuth credential's `subscriptionType` + `rateLimitTier`
-//!            (file on Linux/Windows, Keychain on macOS — see `credentials`).
+//! using and what plan it's on. Local sources, all shared with Claude Code:
+//!   - email + plan: `~/.claude.json` → `oauthAccount` — Claude Code's cached
+//!     copy of the live profile, rewritten roughly every time CC launches. The
+//!     freshest source that needs no auth at all (plain file read).
+//!   - plan fallback: the OAuth credential's `subscriptionType` + `rateLimitTier`
+//!     (file on Linux/Windows, Keychain on macOS — see `credentials`). Stamped
+//!     at token issuance, so it can lag a plan change indefinitely — used only
+//!     when the profile block is missing.
 //!
 //! Everything is optional; we render whatever we can read and stay silent on
 //! the rest rather than erroring.
@@ -19,15 +23,24 @@ pub struct AccountInfo {
 }
 
 pub fn fetch(creds: &CredentialCache) -> AccountInfo {
-    let plan = creds
-        .get()
-        .ok()
-        .and_then(|c| plan_label(c.subscription_type.as_deref(), c.rate_limit_tier.as_deref()));
+    let acct = read_oauth_account();
+    let email = acct
+        .as_ref()
+        .and_then(|a| a.get("emailAddress"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let plan = acct
+        .as_ref()
+        .and_then(plan_from_oauth_account)
+        .or_else(|| {
+            // Never touches storage while the cached token is healthy, so this
+            // stays safe to call on every poll.
+            creds.get().ok().and_then(|c| {
+                plan_label(c.subscription_type.as_deref(), c.rate_limit_tier.as_deref())
+            })
+        });
 
-    AccountInfo {
-        email: read_email(),
-        plan,
-    }
+    AccountInfo { email, plan }
 }
 
 /// Codex (ChatGPT) identity from `~/.codex/auth.json`'s `id_token` JWT claims.
@@ -83,16 +96,44 @@ fn decode_b64url(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Pull the login email out of `~/.claude.json` (or `$CLAUDE_CONFIG_DIR`'s copy
+/// The `oauthAccount` block of `~/.claude.json` (or `$CLAUDE_CONFIG_DIR`'s copy
 /// — see [`crate::credentials::claude_json_path`]). Same shape on every OS.
-pub fn read_email() -> Option<String> {
+fn read_oauth_account() -> Option<serde_json::Value> {
     let path = crate::credentials::claude_json_path()?;
     let raw = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("oauthAccount")?
+    v.get("oauthAccount").cloned()
+}
+
+/// Pull the login email out of `~/.claude.json`.
+pub fn read_email() -> Option<String> {
+    read_oauth_account()?
         .get("emailAddress")?
         .as_str()
         .map(str::to_string)
+}
+
+/// Plan from the cached profile block: `organizationType` names the plan,
+/// `userRateLimitTier` (per-seat, when set) or `organizationRateLimitTier`
+/// carries the multiplier. `None` when the block doesn't name a plan — the
+/// caller then falls back to the credential's stashed fields.
+fn plan_from_oauth_account(acct: &serde_json::Value) -> Option<String> {
+    let org_type = acct.get("organizationType")?.as_str()?;
+    let base = match org_type {
+        "claude_max" => "Max".to_string(),
+        "claude_pro" => "Pro".to_string(),
+        "claude_free" => "Free".to_string(),
+        "claude_team" => "Team".to_string(),
+        "claude_enterprise" => "Enterprise".to_string(),
+        other => capitalize(other.strip_prefix("claude_").unwrap_or(other)),
+    };
+    let tier = ["userRateLimitTier", "organizationRateLimitTier"]
+        .iter()
+        .find_map(|k| acct.get(*k).and_then(|v| v.as_str()));
+    match tier.and_then(parse_multiplier) {
+        Some(mult) => Some(format!("{base} {mult}×")),
+        None => Some(base),
+    }
 }
 
 /// "max" + "default_claude_max_20x" → "Max 20×"; "pro" → "Pro".
@@ -124,5 +165,62 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn plan_reads_org_type_and_tier() {
+        let acct = json!({
+            "organizationType": "claude_max",
+            "organizationRateLimitTier": "default_claude_max_20x",
+            "userRateLimitTier": null,
+        });
+        assert_eq!(plan_from_oauth_account(&acct).as_deref(), Some("Max 20×"));
+    }
+
+    #[test]
+    fn user_tier_beats_org_tier() {
+        // Team/Enterprise seats can carry a per-user tier; it's more specific.
+        let acct = json!({
+            "organizationType": "claude_team",
+            "organizationRateLimitTier": "default_claude_max_5x",
+            "userRateLimitTier": "default_claude_max_20x",
+        });
+        assert_eq!(plan_from_oauth_account(&acct).as_deref(), Some("Team 20×"));
+    }
+
+    #[test]
+    fn plan_without_tier_is_just_the_base() {
+        let acct = json!({ "organizationType": "claude_pro" });
+        assert_eq!(plan_from_oauth_account(&acct).as_deref(), Some("Pro"));
+    }
+
+    #[test]
+    fn missing_org_type_defers_to_credential_fallback() {
+        assert_eq!(plan_from_oauth_account(&json!({})), None);
+    }
+
+    #[test]
+    fn unknown_org_type_degrades_gracefully() {
+        let acct = json!({ "organizationType": "claude_something_new" });
+        assert_eq!(
+            plan_from_oauth_account(&acct).as_deref(),
+            Some("Something_new")
+        );
+    }
+
+    #[test]
+    fn credential_fallback_labels() {
+        assert_eq!(
+            plan_label(Some("max"), Some("default_claude_max_20x")).as_deref(),
+            Some("Max 20×")
+        );
+        assert_eq!(plan_label(Some("pro"), None).as_deref(), Some("Pro"));
+        assert_eq!(plan_label(None, Some("default_claude_max_20x")), None);
     }
 }

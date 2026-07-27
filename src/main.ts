@@ -315,15 +315,17 @@ async function refresh(): Promise<void> {
   state.loading = true;
   render();
   const codex = state.provider === "codex";
-  // Account identity rarely changes; fetch it once per provider and reuse.
-  if (!state.account) {
-    invoke<Account>(codex ? "fetch_codex_account" : "fetch_account")
-      .then((a) => {
+  // Refetch identity on every poll: it's a cheap local-file read, and the plan
+  // label must track plan changes (the ~/.claude.json profile refreshes every
+  // time Claude Code runs). Re-render only when it actually changed.
+  invoke<Account>(codex ? "fetch_codex_account" : "fetch_account")
+    .then((a) => {
+      if (a.email !== state.account?.email || a.plan !== state.account?.plan) {
         state.account = a;
         render();
-      })
-      .catch(() => {});
-  }
+      }
+    })
+    .catch(() => {});
   try {
     if (state.source === "live") {
       // Subscription axis: the selected provider's quota.
