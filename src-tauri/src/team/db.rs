@@ -21,8 +21,16 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio_postgres::{Client, NoTls};
 
-/// A member is "stale" once their last activity is older than this.
-const STALE_SECS: i64 = 2 * 3600;
+/// A member is "stale" (row fades) once their last activity is older than this
+/// — scaled to the viewed range: 2h reads right for Today, but over 7d/30d the
+/// question is "still contributing to this window", not "at the keyboard now".
+fn stale_secs(range: &str) -> i64 {
+    match range {
+        "week" => 12 * 3600,
+        "month" => 48 * 3600,
+        _ => 2 * 3600, // "day"
+    }
+}
 /// Arbitrary key so concurrent migrators serialize via `pg_advisory_xact_lock`.
 const MIGRATE_LOCK: i64 = 0x4850_4241_52; // "HPBAR"
 
@@ -564,7 +572,7 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
                 cost,
                 current_project: row.get("current_project"),
                 last_seen_secs,
-                is_stale: updated_ts == 0 || last_seen_secs > STALE_SECS,
+                is_stale: updated_ts == 0 || last_seen_secs > stale_secs(range),
                 by_model,
                 by_project,
             }

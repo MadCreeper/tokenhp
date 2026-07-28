@@ -330,9 +330,12 @@ async function refresh(): Promise<void> {
     if (state.source === "live") {
       // Subscription axis: the selected provider's quota.
       state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
-      // Celebrate any window that reset to full since we last saw it, and flash
-      // any window that dropped (animations are painted by the final render below).
-      armCelebration(detectRefills(state.live));
+      // Queue a celebration for any window that reset since we last saw it, and
+      // flash any window that dropped (painted by the final render below). The
+      // celebration itself only plays while the popover is visible — this poll
+      // also runs in the hidden webview, where an animation would play unseen.
+      detectRefills(state.live).forEach((k) => pendingCelebration.add(k));
+      savePendingCelebration();
       armDamage(detectDamage(state.live));
     } else if (state.source === "team") {
       // Pull the shared roster; opportunistically push our own snapshot too so
@@ -359,6 +362,7 @@ async function refresh(): Promise<void> {
     inFlight = false;
     render();
   }
+  void maybePlayCelebrations();
 }
 
 // The model set + tool kind for the current API-axis selection: the pooled
@@ -602,56 +606,117 @@ function liveHTML(): string {
 }
 
 // --- Refill celebration -----------------------------------------------------
-// When a window you'd actually used (≥ REFILL_MIN_PRIOR utilization) resets back
-// to full (≤ REFILL_FULL_UTIL used), play a ~7s per-theme "refill" animation,
-// once per reset. The last-seen utilization is persisted per window, so a reset
-// that happened while the popover was closed still celebrates on the next open.
+// When a window you'd actually used (≥ REFILL_MIN_PRIOR utilization) resets,
+// play a ~7s per-theme "refill" animation, once per reset. The last-seen
+// utilization + reset clock are persisted per window, so a reset that happened
+// while the popover was closed (or while the app wasn't running) still
+// celebrates — and because the hidden webview keeps polling, detected refills
+// wait in `pendingCelebration` until the popover is actually on screen.
 const CELEBRATE_MS = 7_300; // a hair past the 7s CSS animation, then settle
 const REFILL_MIN_PRIOR = 0.5; // must have used ≥ half to "earn" the cheer
-const REFILL_FULL_UTIL = 0.2; // ...and now be back to ≥ 80% remaining (a real reset)
-const REFILL_KEY = "hpbar-refill";
+const REFILL_FULL_UTIL = 0.2; // fallback signal: back to ≥ 80% remaining
+const REFILL_KEY = "hpbar-refill-v2";
+const REFILL_KEY_V1 = "hpbar-refill"; // pre-0.8.1: bare utilization numbers
+const REFILL_PENDING_KEY = "hpbar-refill-pending";
+
+// Per-window baseline: utilization and reset clock at the last poll.
+type RefillSeen = Record<string, { u: number; r: string | null }>;
 
 const celebrating = new Set<string>(); // window keys currently animating
+const pendingCelebration = new Set<string>(); // detected, waiting to be visible
 let celebrateTimer: ReturnType<typeof setTimeout> | undefined;
 
 const winKey = (w: UsageWindow): string => `${state.provider}/${w.title}`;
 
-function loadRefillState(): Record<string, number> {
+function loadRefillState(): RefillSeen {
   try {
-    const v = JSON.parse(localStorage.getItem(REFILL_KEY) ?? "{}");
-    return v && typeof v === "object" ? (v as Record<string, number>) : {};
+    const v2 = JSON.parse(localStorage.getItem(REFILL_KEY) ?? "null");
+    if (v2 && typeof v2 === "object") return v2 as RefillSeen;
+    const v1 = JSON.parse(localStorage.getItem(REFILL_KEY_V1) ?? "null");
+    if (v1 && typeof v1 === "object") {
+      return Object.fromEntries(
+        Object.entries(v1 as Record<string, number>).map(([k, u]) => [k, { u: Number(u), r: null }]),
+      );
+    }
   } catch {
-    return {};
+    /* fall through */
   }
+  return {};
 }
-function saveRefillState(s: Record<string, number>): void {
+function saveRefillState(s: RefillSeen): void {
   try {
     localStorage.setItem(REFILL_KEY, JSON.stringify(s));
   } catch {
     /* best-effort */
   }
 }
+function savePendingCelebration(): void {
+  try {
+    localStorage.setItem(REFILL_PENDING_KEY, JSON.stringify([...pendingCelebration]));
+  } catch {
+    /* best-effort */
+  }
+}
+function loadPendingCelebration(): void {
+  try {
+    const v = JSON.parse(localStorage.getItem(REFILL_PENDING_KEY) ?? "[]");
+    if (Array.isArray(v)) v.forEach((k) => typeof k === "string" && pendingCelebration.add(k));
+  } catch {
+    /* best-effort */
+  }
+}
 
-// Compare live windows against the last-seen utilization; return the keys that
-// just refilled, and update the persisted baseline.
+// Compare live windows against the persisted baseline; return the keys whose
+// window reset since we last looked, and update the baseline. The primary
+// signal is the reset clock moving to a new instant (or the old one passing) —
+// robust even when the poll lands late enough that the fresh window is already
+// partly spent. The utilization-drop check remains as a fallback for windows
+// whose clock we never saw.
 function detectRefills(report: UsageReport): string[] {
   const seen = loadRefillState();
   const refilled: string[] = [];
   for (const w of report.windows) {
-    if (!w.resets_at || w.trailing === "Off") continue; // only resettable windows
+    if (w.trailing === "Off") continue;
     const key = winKey(w);
-    const prior = seen[key];
-    if (prior != null && prior >= REFILL_MIN_PRIOR && w.utilization <= REFILL_FULL_UTIL) {
-      refilled.push(key);
+    const prev = seen[key];
+    if (prev != null && prev.u >= REFILL_MIN_PRIOR) {
+      const clockMoved =
+        prev.r != null &&
+        (w.resets_at != null
+          ? w.resets_at !== prev.r
+          : (Date.parse(prev.r) || Infinity) <= Date.now());
+      if (clockMoved || w.utilization <= REFILL_FULL_UTIL) refilled.push(key);
     }
-    seen[key] = w.utilization;
+    seen[key] = { u: w.utilization, r: w.resets_at ?? null };
   }
   saveRefillState(seen);
   return refilled;
 }
 
+// Play the queued celebrations — but only when the popover is actually on
+// screen. The webview stays alive (and polling) while hidden, and an animation
+// played to a hidden window is one the user never sees; pending keys survive
+// until a poll or popover-open finds the window visible.
+async function maybePlayCelebrations(): Promise<void> {
+  if (!pendingCelebration.size || celebrating.size) return;
+  // Only the Live view renders the bars; keep the queue until it's on screen.
+  if (state.view === "settings" || state.source !== "live") return;
+  let visible = true;
+  try {
+    visible = await getCurrentWindow().isVisible();
+  } catch {
+    /* browser/mock mode: treat as visible */
+  }
+  if (!visible) return;
+  const keys = [...pendingCelebration];
+  pendingCelebration.clear();
+  savePendingCelebration();
+  armCelebration(keys);
+  render();
+}
+
 // Mark windows as celebrating + schedule the clear. Does not render (the caller
-// renders) — `refresh` arms it and lets its own final render paint the animation.
+// renders) — callers arm it and let their own render paint the animation.
 function armCelebration(keys: string[]): void {
   if (!keys.length) return;
   keys.forEach((k) => celebrating.add(k));
@@ -1456,6 +1521,7 @@ function syncTrayTheme(): void {
 
 installStoneTexture();
 applyTheme();
+loadPendingCelebration(); // refills detected but never shown before last quit
 render();
 void refresh();
 void loadTeamConfig();
@@ -1476,6 +1542,11 @@ if (params.get("view") === "settings") {
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).
 if (!MOCK) {
-  listen("refresh", () => void refresh());
+  listen("refresh", () => {
+    // Popover just became visible: play any refill detected while hidden, even
+    // if the refresh itself short-circuits (poll already in flight, etc.).
+    void refresh();
+    void maybePlayCelebrations();
+  });
   setInterval(() => void refresh(), POLL_MS);
 }

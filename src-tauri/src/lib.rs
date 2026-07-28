@@ -87,6 +87,10 @@ async fn fetch_usage(
     ambient::annotate(&app, &mut report);
     // Add the this-machine vs other-devices split from the recorded series.
     share::annotate(&app, "claude", &mut report);
+    // Bring the tray heart along: the ambient poll can lag minutes behind this
+    // fetch, and a popover showing full bars next to a tray still flagging "12%"
+    // reads as a bug.
+    ambient::apply(&app, &report);
     Ok(report)
 }
 

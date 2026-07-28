@@ -319,6 +319,11 @@ pub fn spawn(app: AppHandle) {
         // re-arms only after the window resets back to healthy). In-memory: a
         // duplicate alert after an app restart is the acceptable worst case.
         let mut last: HashMap<String, u8> = HashMap::new();
+        // Freshest report we've managed to fetch. Kept so a failed poll (expired
+        // token overnight, network down) doesn't freeze the tray: a window whose
+        // reset time has passed is full again by definition, and the low-HP
+        // annunciator must clear even when we can't reach the endpoint.
+        let mut last_good: Option<UsageReport> = None;
         loop {
             if let Ok(report) = fetch(&app).await {
                 record_history(&app, &report); // feed the burn-rate projection
@@ -331,9 +336,13 @@ pub fn spawn(app: AppHandle) {
                     })
                     .await;
                 }
-                apply(&app, &report);
+                last_good = Some(report);
+            }
+            if let Some(report) = &last_good {
+                let effective = roll_forward(report);
+                apply(&app, &effective);
                 let alerts_on = load_settings(&app).alerts_enabled;
-                notify_crossings(&app, &report, &mut last, alerts_on);
+                notify_crossings(&app, &effective, &mut last, alerts_on);
             }
             // Codex device-share series — independent of Claude (a local read), so
             // it runs even when not signed into Claude. Records only; the tray
@@ -357,9 +366,34 @@ async fn fetch(app: &AppHandle) -> Result<UsageReport, ()> {
     usage::fetch(cache.inner()).await.map_err(|_| ())
 }
 
+/// A copy of `report` with every window whose reset time has passed rolled
+/// forward to full. Between polls — or across a stretch of failed fetches — the
+/// data goes stale, but a reset clock is a fact: once it passes, that window
+/// refilled, and painting the old low value (or keeping the "NN%" annunciator
+/// up) is wrong. The next real fetch replaces the estimate with truth.
+fn roll_forward(report: &UsageReport) -> UsageReport {
+    let mut r = report.clone();
+    for w in &mut r.windows {
+        let passed = w
+            .resets_at
+            .as_deref()
+            .and_then(secs_until)
+            .is_some_and(|s| s <= 0);
+        if passed {
+            w.utilization = 0.0;
+            w.remaining = 1.0;
+            w.resets_at = None; // next reset unknown until a real fetch
+            w.eta_secs = None;
+        }
+    }
+    r
+}
+
 /// Redraw the tray icon + tooltip from the report, and stash the HP + tooltip so
-/// a later theme switch can repaint instantly.
-fn apply(app: &AppHandle, report: &UsageReport) {
+/// a later theme switch can repaint instantly. Also called by the popover's
+/// `fetch_usage` so a manual refresh brings the tray along — the background poll
+/// alone can lag `POLL_SECS` behind what the popover just showed.
+pub fn apply(app: &AppHandle, report: &UsageReport) {
     if let Some(remaining) = min_remaining(report) {
         let tip = tooltip(report);
         if let Some(st) = app.try_state::<TrayState>() {
@@ -539,6 +573,31 @@ mod tests {
         // Crossing into a worse bucket is an alert, never a refill.
         assert_eq!(crossing(0, 0.10), Alert);
         assert_eq!(crossing(1, 0.03), Alert);
+    }
+
+    #[test]
+    fn roll_forward_refills_only_past_reset_windows() {
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339();
+        let future = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        let mut r = report(vec![
+            win("5-Hour", 0.12, false),  // reset passed → refills
+            win("Weekly", 0.40, false),  // reset ahead → untouched
+            win("Extra usage", 0.30, false), // no clock → untouched
+        ]);
+        r.windows[0].resets_at = Some(past);
+        r.windows[0].eta_secs = Some(600);
+        r.windows[1].resets_at = Some(future.clone());
+
+        let rolled = roll_forward(&r);
+        assert_eq!(rolled.windows[0].remaining, 1.0);
+        assert_eq!(rolled.windows[0].utilization, 0.0);
+        assert_eq!(rolled.windows[0].resets_at, None);
+        assert_eq!(rolled.windows[0].eta_secs, None);
+        assert_eq!(rolled.windows[1].remaining, 0.40);
+        assert_eq!(rolled.windows[1].resets_at.as_deref(), Some(future.as_str()));
+        assert_eq!(rolled.windows[2].remaining, 0.30);
+        // The stale "12%" tray annunciator clears: min is no longer ≤ LOW.
+        assert_eq!(min_remaining(&rolled), Some(0.30));
     }
 
     #[test]
