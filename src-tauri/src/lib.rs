@@ -84,7 +84,11 @@ async fn fetch_usage(
 ) -> Result<usage::UsageReport, String> {
     let mut report = usage::fetch(cache.inner()).await.map_err(|e| e.to_string())?;
     // Add the "you'll run out before reset" projection from recorded history.
-    ambient::annotate(&app, &mut report);
+    let account_key = account::claude_identity()
+        .map(|i| i.account_key)
+        .unwrap_or_else(|| "unknown".into());
+    ambient::annotate(&app, "claude", &account_key, &mut report);
+    ambient::record_history(&app, "claude", &account_key, &report);
     // Add the this-machine vs other-devices split from the recorded series.
     share::annotate(&app, "claude", &mut report);
     // Bring the tray heart along: the ambient poll can lag minutes behind this
@@ -106,12 +110,14 @@ fn recheck_credentials(cache: tauri::State<'_, CredentialCache>) {
 /// can be read from local Claude Code state, with empty fields otherwise.
 #[tauri::command]
 fn fetch_account(cache: tauri::State<'_, CredentialCache>) -> account::AccountInfo {
+    account::observe_current_accounts();
     account::fetch(cache.inner())
 }
 
 /// Codex (ChatGPT) login identity for the footer, from `~/.codex/auth.json`.
 #[tauri::command]
 fn fetch_codex_account() -> account::AccountInfo {
+    account::observe_current_accounts();
     account::fetch_codex()
 }
 
@@ -132,6 +138,11 @@ async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, 
     let mut report = tokio::task::spawn_blocking(codexstats::fetch_quota)
         .await
         .map_err(|e| e.to_string())??;
+    let account_key = account::codex_identity()
+        .map(|i| i.account_key)
+        .unwrap_or_else(|| "unknown".into());
+    ambient::annotate(&app, "codex", &account_key, &mut report);
+    ambient::record_history(&app, "codex", &account_key, &report);
     // Record this machine's Codex share sample (scans logs → blocking thread),
     // then annotate the report with the this-machine vs others split.
     let app2 = app.clone();
@@ -268,6 +279,18 @@ fn spawn_team_uploader() {
     });
 }
 
+/// Keep account epochs fresh even while the popover is closed. A 30-second
+/// cadence is cheap (two small local JSON reads) and bounds the ambiguous gap
+/// around an account switch without touching credential secrets.
+fn spawn_account_observer() {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            account::observe_current_accounts();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -352,6 +375,8 @@ pub fn run() {
             if let Ok(dir) = app.path().app_config_dir() {
                 app.state::<CredentialCache>().set_audit_dir(dir);
             }
+            account::start_observer_run();
+            spawn_account_observer();
             spawn_team_uploader();
             // Ambient HP: keep the menu-bar heart + tooltip live, and alert on
             // low/critical quota. Runs for the app's lifetime; no-op when signed out.

@@ -2,9 +2,9 @@
 
 # ♥ HPBar
 
-**Your Claude subscription usage, as a health bar in the menu bar / system tray.**
+**Your Claude and Codex usage, as a health bar in the menu bar / system tray.**
 
-**把你的 Claude 订阅用量，做成菜单栏 / 系统托盘里的一条血条。**
+**把你的 Claude 与 Codex 用量，做成菜单栏 / 系统托盘里的一条血条。**
 
 Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 
@@ -42,11 +42,12 @@ Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 
 - **Lives in the menu bar / tray.** A ♥ icon; click for the popover, right-click for the menu. No window, no Dock icon.
 - **A living menu-bar heart** — the tray ♥ *is* the gauge: it drains with your most-depleted live window, **in whichever theme you've picked** (Minecraft red · Classic's green→amber→red HP ramp · Arknights 理智 azure), so you read your HP at a glance without clicking. When you're low it also shows the exact `%` beside it (macOS), which stays legible on any wallpaper.
-- **Live quota** — your 5-hour, weekly, per-model weekly (e.g. the Fable cap), and extra-usage windows, with reset countdowns. Extra usage hides itself while the feature is disabled.
+- **Live quota** — every window the provider currently reports (5-hour where present, weekly, per-model weekly, extra usage), with reset countdowns. Codex also shows local credit / spend-control details when its log contains them; HPBar does not invent a removed window.
 - **Burn-rate warning** — when your recent pace would exhaust a window *before* it resets, the bar flags **⚠ hits limit in ~35m**, so a surprise rate-limit doesn't catch you mid-task.
 - **This machine vs other devices** — your subscription is account-wide, but the Live bars *estimate* how much of each window **this** machine is using vs everything else (another laptop, claude.ai, the mobile app), shown as a dimmed "ghost" split on the bar plus a `This machine ~28% · Others ~12%` line. It fits the relationship between account-wide utilization and this machine's local cost (both Claude and Codex meter by model-weighted cost); an optional **Only Device Here** tray toggle calibrates it. Hidden until the fit is confident. How it works + how fast it converges: [docs/usage-fitting.md](docs/usage-fitting.md).
 - **Quota alerts** — an opt-out native notification the first time a window goes low / critical (toggle in the tray menu).
-- **Local activity** — per-model token + cost breakdown from your local Claude Code session logs (`~/.claude/projects`), over 24h / 7d / 30d, plus a **top-projects** breakdown (which repo ate your tokens) in the pooled "All" view.
+- **Local activity** — per-model token + cost breakdown from local Claude Code, Codex, and OpenClaw session logs over 24h / 7d / 30d, plus a **top-projects** breakdown (which repo ate your tokens) in the pooled "All" view.
+- **Opt-in Team billing view** — share aggregate usage through your own SSH-accessible Postgres. Each installation remains a distinct member even when people share a login; the **犯罪记录 / Crime records** drill-down shows member → account → model usage and bill-split percentages. Account labels can be masked, fully shown, or hidden.
 - **Three switchable themes**, remembered across launches:
   | Theme | Live quota | Local activity |
   |-------|-----------|----------------|
@@ -143,8 +144,8 @@ npm run dev    # vite only, then open in a browser:
 ```
 
 - Gallery of all themes × tabs: <http://localhost:1420/showcase.html>
-- A single panel: `http://localhost:1420/?mock=1&theme=arknights&source=local`
-  (`theme` = `minecraft` \| `classic` \| `arknights`, `source` = `live` \| `local`)
+- A single panel: `http://localhost:1420/?mock=1&theme=arknights&source=team&crime=1`
+  (`theme` = `minecraft` \| `classic` \| `arknights`, `source` = `live` \| `local` \| `team`, `provider` = `claude` \| `codex`)
 
 These screenshots were captured this way.
 
@@ -166,6 +167,9 @@ src-tauri/src/
   credentials.rs        read Claude Code token (Keychain / file)
   usage.rs              GET /api/oauth/usage
   localstats.rs         scan ~/.claude/projects + pricing.rs
+  codexstats.rs         scan ~/.codex/sessions for usage + quota
+  account.rs            local account epochs for honest historical attribution
+  team/                  opt-in Postgres sync + member/account/model reports
   heart_icon.rs         rasterise the live-HP tray heart (RGBA, no deps)
   burn.rs               burn-rate → "hits limit before reset?" (pure math)
   share.rs              device-share fit (this machine vs other devices) + persistence
@@ -203,11 +207,12 @@ Three themes complete and verified on macOS; Linux/Windows bundles build in CI. 
 
 - **常驻菜单栏 / 托盘**：一个 ♥ 图标，左键点开弹窗，右键打开菜单；没有窗口，也没有 Dock 图标。
 - **会动的菜单栏血条**：托盘上的 ♥ 本身就是血条——它会随你「最吃紧」的实时额度逐格扣血，并**按你选择的主题着色**（我的世界红 · 经典 绿→黄→红 血条 · 明日方舟 理智蓝），不点开也能一眼看出血量；额度偏低时还会在旁边显示精确的 `%`（macOS），任何壁纸下都清晰可读。
-- **实时额度（Live quota）**：5 小时、每周、按模型的每周上限（如 Fable 周额度）、额外用量等窗口，并显示重置倒计时；额外用量未开启时自动隐藏。
+- **实时额度（Live quota）**：动态显示服务商当前实际提供的额度窗口（存在时显示 5 小时、每周、按模型周额度、额外用量等）及重置倒计时；Codex 日志若含 credits / spend-control 信息也会展示，不会凭空补一个已经取消的 5 小时窗口。
 - **耗尽预警（Burn-rate）**：当按你最近的用量速度、某个窗口会在重置**之前**就被用光时，血条会标出 **⚠ 约 35m 后触顶**，免得任务进行到一半被突然限流。
 - **本机 vs 其他设备**：订阅是全账号共享的，但「实时额度」会*估算*每个窗口里有多少是**本机**用掉的，相对其他来源（另一台电脑、claude.ai、手机 App），在血条上以暗色「虚影」分段显示，并附一行 `本机 ~28% · 其他 ~12%`。原理是拟合「全账号用量」与「本机花费」的关系（Claude 与 Codex 都按模型加权的 token 成本计量）；托盘里可选的 **仅此设备** 开关用于校准。拟合不够确定时自动隐藏。
 - **额度提醒（Quota alerts）**：窗口首次进入「偏低 / 临界」时弹一条系统通知（默认开启，托盘菜单可关）。
-- **本地活动（Local activity）**：从本地 Claude Code 会话日志（`~/.claude/projects`）统计每个模型的 token 用量与花费，支持 24 小时 / 7 天 / 30 天；在汇总的「All」视图下还会按**项目排名**（「哪个仓库吃了我的 token」）。
+- **本地活动（Local activity）**：从本地 Claude Code、Codex 与 OpenClaw 会话日志统计每个模型的 token 用量与估算花费，支持 24 小时 / 7 天 / 30 天；在汇总的「All」视图下还会按**项目排名**（「哪个仓库吃了我的 token」）。
+- **可选 Team 分账**：通过你自己的 SSH + Postgres 同步汇总数据。即便多人共用登录，每个安装仍是独立成员；「**犯罪记录**」下钻展示成员 → 账号 → 模型明细与分摊比例，账号标签可选掩码、完整或隐藏。
 - **三种可切换主题**（自动记住上次选择）：
   | 主题 | 实时额度 | 本地活动 |
   |------|---------|---------|
@@ -292,7 +297,7 @@ npm run tauri build    # 打包各平台安装包
 
 若 `cargo` 下载报 HTTP/2 framing 错误，加前缀：`CARGO_HTTP_MULTIPLEXING=false npm run tauri dev`。
 
-**主题预览 / mock 模式** —— 用预置假数据预览所有主题，无需钥匙串、网络或 Tauri：执行 `npm run dev`（仅 vite），然后在浏览器打开 <http://localhost:1420/showcase.html>（所有主题画廊），或 `http://localhost:1420/?mock=1&theme=arknights&source=local` 查看单个面板。本文档的截图即由此生成。
+**主题预览 / mock 模式** —— 用预置假数据预览所有主题，无需钥匙串、网络或 Tauri：执行 `npm run dev`（仅 vite），然后在浏览器打开 <http://localhost:1420/showcase.html>（所有主题画廊），或 `http://localhost:1420/?mock=1&theme=arknights&source=team&crime=1` 查看 Team「犯罪记录」面板。本文档的截图即由此生成。
 
 ## 📝 状态
 

@@ -25,14 +25,60 @@ pub const MIN_SPAN_SECS: i64 = 25 * 60;
 /// window and projecting is meaningless.
 pub const MIN_DELTA: f64 = 0.03;
 
+#[derive(Clone, Copy)]
+struct Policy {
+    lookback_secs: i64,
+    min_span_secs: i64,
+    min_delta: f64,
+}
+
+fn policy(window_minutes: Option<i64>) -> Policy {
+    match window_minutes {
+        // Session-sized limits: react within the current work block.
+        Some(m) if m <= 360 => Policy {
+            lookback_secs: LOOKBACK_SECS,
+            min_span_secs: MIN_SPAN_SECS,
+            min_delta: MIN_DELTA,
+        },
+        // Weekly limits need a multi-day baseline; a 90-minute burst is not a
+        // useful forecast for the rest of the week.
+        Some(m) if m <= 10_080 => Policy {
+            lookback_secs: 48 * 3600,
+            min_span_secs: 4 * 3600,
+            min_delta: 0.02,
+        },
+        // Monthly/longer windows: retain a week and demand half a day of signal.
+        Some(_) => Policy {
+            lookback_secs: 7 * 86_400,
+            min_span_secs: 12 * 3600,
+            min_delta: 0.02,
+        },
+        None => Policy {
+            lookback_secs: LOOKBACK_SECS,
+            min_span_secs: MIN_SPAN_SECS,
+            min_delta: MIN_DELTA,
+        },
+    }
+}
+
 /// Seconds until `used` reaches 1.0 at the burn rate measured from the oldest
 /// in-window baseline to now, or `None` when there isn't enough sustained burn to
 /// say. `now_used` is the latest consumed fraction; `samples` is the prior
 /// history (any order), each strictly before `now_ts`.
 pub fn eta_to_empty(samples: &[Sample], now_ts: i64, now_used: f64) -> Option<i64> {
+    eta_to_empty_for_window(samples, now_ts, now_used, None)
+}
+
+pub fn eta_to_empty_for_window(
+    samples: &[Sample],
+    now_ts: i64,
+    now_used: f64,
+    window_minutes: Option<i64>,
+) -> Option<i64> {
     if now_used >= 1.0 {
         return Some(0);
     }
+    let policy = policy(window_minutes);
     // Baseline = the OLDEST sample within the lookback window that isn't already
     // past `now_used` (a higher earlier reading means the window reset in between,
     // so it can't anchor a forward rate).
@@ -40,13 +86,13 @@ pub fn eta_to_empty(samples: &[Sample], now_ts: i64, now_used: f64) -> Option<i6
         .iter()
         .filter(|s| {
             let age = now_ts - s.ts;
-            age > 0 && age <= LOOKBACK_SECS && s.used <= now_used
+            age > 0 && age <= policy.lookback_secs && s.used <= now_used
         })
         .min_by_key(|s| s.ts)?;
 
     let span = now_ts - baseline.ts;
     let delta = now_used - baseline.used;
-    if span < MIN_SPAN_SECS || delta < MIN_DELTA {
+    if span < policy.min_span_secs || delta < policy.min_delta {
         return None;
     }
 
@@ -121,5 +167,13 @@ mod tests {
     #[test]
     fn already_empty_is_zero() {
         assert_eq!(eta_to_empty(&[], 100_000, 1.0), Some(0));
+    }
+
+    #[test]
+    fn weekly_uses_a_longer_baseline() {
+        let now = 1_000_000;
+        let hist = [s(now - 24 * 3600, 0.20)];
+        assert!(eta_to_empty(&hist, now, 0.30).is_none());
+        assert!(eta_to_empty_for_window(&hist, now, 0.30, Some(10_080)).is_some());
     }
 }

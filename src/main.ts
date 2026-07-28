@@ -30,7 +30,7 @@ import { installStoneTexture } from "./texture";
 import { applyTheme, cycleTheme, getTheme, isTheme, setThemeOverride, themeLabel } from "./theme";
 import { classicNeutralBar, classicQuotaBar, classicRefillBar } from "./classicbar";
 import { akBar, akResource, akRefillBar } from "./arknights";
-import { mockLive, MOCK_LOCAL } from "./mock";
+import { mockCodexLive, mockLive, MOCK_LOCAL, MOCK_TEAM, MOCK_TEAM_CONFIG } from "./mock";
 import "./styles.css";
 
 // Showcase / test mode: `?mock=1` feeds the UI canned data (no Keychain, no
@@ -173,6 +173,8 @@ interface State {
   teamRange: WindowKey;
   teamModel: string; // "all" or a model id, for the per-model leaderboard
   teamDropdownOpen: boolean;
+  teamCrimeMode: boolean;
+  teamAccountKey: string; // "all" or a stable account key for bill splitting
   teamExpanded: Set<string>; // member ids whose top-projects are expanded
   teamDraft: TeamConfig | null; // edit buffer for the settings form
   settingsTab: SettingsTab; // which sub-tab of the Team form is showing
@@ -214,6 +216,8 @@ const state: State = {
   teamRange: isWindowKey(savedView.teamRange) ? savedView.teamRange : "day",
   teamModel: "all",
   teamDropdownOpen: false,
+  teamCrimeMode: params.get("crime") === "1",
+  teamAccountKey: "all",
   teamExpanded: new Set(),
   teamDraft: null,
   settingsTab: "ssh",
@@ -243,7 +247,10 @@ const app = document.getElementById("app")!;
 const themeParam = params.get("theme");
 if (isTheme(themeParam)) setThemeOverride(themeParam);
 const sourceParam = params.get("source");
-if (sourceParam === "live" || sourceParam === "local") state.source = sourceParam;
+if (sourceParam === "live" || sourceParam === "local" || sourceParam === "team")
+  state.source = sourceParam;
+const providerParam = params.get("provider");
+if (providerParam === "claude" || providerParam === "codex") state.provider = providerParam;
 if (params.get("detail") === "1") state.showDetail = true; // showcase: pre-expand detail
 if (params.get("expand") === "1") state.projectsExpanded = true; // showcase: full project list
 const PACE_SHOWCASE = params.get("pace") === "1"; // showcase: force an over-pace 5-Hour
@@ -252,7 +259,10 @@ const HURT_SHOWCASE = params.get("hurt") === "1"; // showcase: loop the HP-drop 
 
 // ---------------------------------------------------------------- data
 
-let inFlight = false;
+// A refresh captures the selected source/provider. If the user switches while
+// an earlier request is still running, only the newest generation may update
+// the UI; the older result is deliberately discarded.
+let refreshGeneration = 0;
 
 // Manual/auto team uploads are rate-limited so repeated refreshes (or range
 // switches) can't spam SSH tunnels / the DB: at most one in flight, and no more
@@ -276,7 +286,7 @@ function maybeUploadTeam(): void {
 
 async function refresh(): Promise<void> {
   if (MOCK) {
-    state.live = mockLive();
+    state.live = state.provider === "codex" ? mockCodexLive() : mockLive();
     if (PACE_SHOWCASE) {
       // Force the 5-Hour window over an even spend-down so the pace cue shows:
       // ~65% used at ~45% of the window elapsed → "20% over pace". eta is nulled
@@ -298,7 +308,12 @@ async function refresh(): Promise<void> {
       });
     }
     state.local = MOCK_LOCAL;
-    state.account = { email: "you@example.com", plan: "Max 20×" };
+    state.teamConfig = MOCK_TEAM_CONFIG;
+    state.team = MOCK_TEAM;
+    state.account =
+      state.provider === "codex"
+        ? { email: "codex-team@example.com", plan: "Pro Lite" }
+        : { email: "you@example.com", plan: "Max 20×" };
     state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.combined[0].id;
     state.error = "";
     state.updatedAt = nowTime();
@@ -306,30 +321,39 @@ async function refresh(): Promise<void> {
     render();
     return;
   }
-  if (inFlight) return;
   // Don't interrupt a refill celebration with a background poll / re-open — the
   // data won't meaningfully change in those ~7s, and a re-render would restart
   // the animation. The next poll after it ends picks up fresh data.
   if (celebrating.size) return;
-  inFlight = true;
+  const generation = ++refreshGeneration;
+  const provider = state.provider;
+  const source = state.source;
+  const teamRange = state.teamRange;
+  const windowSecs = WINDOW_SECS[state.window];
   state.loading = true;
   render();
-  const codex = state.provider === "codex";
+  const codex = provider === "codex";
   // Refetch identity on every poll: it's a cheap local-file read, and the plan
   // label must track plan changes (the ~/.claude.json profile refreshes every
   // time Claude Code runs). Re-render only when it actually changed.
   invoke<Account>(codex ? "fetch_codex_account" : "fetch_account")
     .then((a) => {
-      if (a.email !== state.account?.email || a.plan !== state.account?.plan) {
+      if (
+        generation === refreshGeneration &&
+        provider === state.provider &&
+        (a.email !== state.account?.email || a.plan !== state.account?.plan)
+      ) {
         state.account = a;
         render();
       }
     })
     .catch(() => {});
   try {
-    if (state.source === "live") {
+    if (source === "live") {
       // Subscription axis: the selected provider's quota.
-      state.live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
+      const live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
+      if (generation !== refreshGeneration) return;
+      state.live = live;
       // Queue a celebration for any window that reset since we last saw it, and
       // flash any window that dropped (painted by the final render below). The
       // celebration itself only plays while the popover is visible — this poll
@@ -337,32 +361,41 @@ async function refresh(): Promise<void> {
       detectRefills(state.live).forEach((k) => pendingCelebration.add(k));
       savePendingCelebration();
       armDamage(detectDamage(state.live));
-    } else if (state.source === "team") {
+    } else if (source === "team") {
       // Pull the shared roster; opportunistically push our own snapshot too so
       // teammates see us (fire-and-forget — the git push can be slow).
-      state.team = await invoke<TeamReport>("fetch_team", { range: state.teamRange });
+      const team = await invoke<TeamReport>("fetch_team", { range: teamRange });
+      if (generation !== refreshGeneration) return;
+      state.team = team;
       // Keep the model selection valid as the range/data changes.
       if (state.teamModel !== "all" && !state.team.models.some((m) => m.id === state.teamModel)) {
         state.teamModel = "all";
       }
+      if (
+        state.teamAccountKey !== "all" &&
+        !state.team.accounts.some((a) => a.account_key === state.teamAccountKey)
+      ) {
+        state.teamAccountKey = "all";
+      }
       maybeUploadTeam();
     } else {
       // API axis: every local tool at once (not provider-scoped).
-      state.local = await invoke<LocalReport>("fetch_local", {
-        windowSecs: WINDOW_SECS[state.window],
-      });
+      const local = await invoke<LocalReport>("fetch_local", { windowSecs });
+      if (generation !== refreshGeneration) return;
+      state.local = local;
       snapSelectedModel();
     }
     state.error = "";
     state.updatedAt = nowTime();
   } catch (err) {
-    state.error = String(err);
+    if (generation === refreshGeneration) state.error = String(err);
   } finally {
-    state.loading = false;
-    inFlight = false;
-    render();
+    if (generation === refreshGeneration) {
+      state.loading = false;
+      render();
+    }
   }
-  void maybePlayCelebrations();
+  if (generation === refreshGeneration) void maybePlayCelebrations();
 }
 
 // The model set + tool kind for the current API-axis selection: the pooled
@@ -452,10 +485,13 @@ function defaultTeamDraft(): TeamConfig {
       db_user: "hpbar",
       team_name: "",
       member_id: "",
+      identity_version: 2,
       display_name: "",
       share_tokens: true,
       share_cost: true,
       share_project: true,
+      share_account: false,
+      account_label_mode: "masked",
       interval_secs: 1800,
       backfill_days: 90,
       top_projects: 5,
@@ -588,6 +624,8 @@ function contentHTML(): string {
       report: state.team,
       model: state.teamModel,
       dropdownOpen: state.teamDropdownOpen,
+      crimeMode: state.teamCrimeMode,
+      accountKey: state.teamAccountKey,
       selfName: state.teamConfig?.display_name ?? "",
       expanded: state.teamExpanded,
       topProjects: state.teamConfig?.top_projects ?? 5,
@@ -600,9 +638,23 @@ function contentHTML(): string {
 // --- Live (hearts) ---
 
 function liveHTML(): string {
-  if (state.live) return state.live.windows.map(liveBarHTML).join("");
+  if (state.live)
+    return state.live.windows.map(liveBarHTML).join("") + usageDetailsHTML(state.live);
   if (state.error) return `<div class="msg">${escapeHTML(state.error)}</div>`;
   return `<div class="msg">Loading…</div>`;
+}
+
+function usageDetailsHTML(report: UsageReport): string {
+  if (report.details.length === 0) return "";
+  const rows = report.details
+    .map(
+      (d) =>
+        `<div class="quota-detail"><span>${escapeHTML(d.label)}</span><span>${escapeHTML(
+          d.value,
+        )}</span></div>`,
+    )
+    .join("");
+  return `<div class="quota-details">${rows}</div>`;
 }
 
 // --- Refill celebration -----------------------------------------------------
@@ -949,10 +1001,8 @@ function heartBarHTML(
     </div>`;
 }
 
-// Even-pace check: how far along the window are you in *time* vs in *usage*?
-// Only the 5-Hour window — the one you actively manage; "over pace" on the
-// 7-day window early in the week is normal and not actionable.
-const PACE_WINDOW_SECS: Record<string, number> = { "5-Hour": 5 * 3600 };
+// Even-pace check: use the provider-reported duration, so a weekly-only Codex
+// plan remains useful and a future window shape needs no frontend change.
 const PACE_THRESHOLD = 0.12; // only flag a meaningful lead (12 percentage points)
 
 // "20% over pace" when you've burned notably more than an even spend-down would
@@ -960,7 +1010,7 @@ const PACE_THRESHOLD = 0.12; // only flag a meaningful lead (12 percentage point
 // null when on/under pace, unknown duration, or the eta warning is already shown.
 function paceNote(w: UsageWindow): string | null {
   if (w.eta_secs != null) return null; // the stronger "hits limit" warning wins
-  const dur = PACE_WINDOW_SECS[w.title];
+  const dur = w.window_minutes ? w.window_minutes * 60 : 0;
   if (!dur || !w.resets_at) return null;
   const ts = Date.parse(w.resets_at);
   if (Number.isNaN(ts)) return null;
@@ -1109,6 +1159,7 @@ function xpBarsHTML(m: ModelUsage): string {
       ${bar("Output", frac(m.output), trailing(m.output, m.cost?.output))}
       ${bar("Cache R", frac(m.cache_read), trailing(m.cache_read, m.cost?.cache_read))}
       ${bar("Cache W", frac(m.cache_create), trailing(m.cache_create, m.cost?.cache_create))}
+      ${m.unattributed > 0 ? bar("Other", frac(m.unattributed), formatTokens(m.unattributed)) : ""}
     </div>`;
 }
 
@@ -1168,8 +1219,13 @@ app.addEventListener("click", (e) => {
       // Code's credential storage again even if it appears unchanged — a
       // background poll must never do that (it can raise a Keychain prompt).
       // No-op when the cached token is healthy.
-      if (MOCK) void refresh();
-      else void invoke("recheck_credentials").catch(() => {}).then(() => refresh());
+      if (MOCK || state.source !== "live" || state.provider !== "claude") {
+        void refresh();
+      } else {
+        void invoke("recheck_credentials")
+          .catch(() => {})
+          .then(() => refresh());
+      }
       break;
     case "provider-cycle":
       // Title click on Live: flip Claude⇄Codex (only two providers).
@@ -1257,6 +1313,18 @@ app.addEventListener("click", (e) => {
       state.teamDropdownOpen = !state.teamDropdownOpen;
       render();
       break;
+    case "team-crime-toggle":
+      state.teamCrimeMode = !state.teamCrimeMode;
+      state.teamDropdownOpen = false;
+      render();
+      break;
+    case "team-account-cycle": {
+      const ids = ["all", ...(state.team?.accounts ?? []).map((a) => a.account_key)];
+      const i = ids.indexOf(state.teamAccountKey);
+      state.teamAccountKey = ids[(i + 1) % ids.length] ?? "all";
+      render();
+      break;
+    }
     case "team-select-model":
       if (value) {
         state.teamModel = value; // client-side slice — no refetch

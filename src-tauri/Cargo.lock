@@ -1636,12 +1636,14 @@ dependencies = [
  "security-framework 3.7.0",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-notification",
  "tokio",
  "tokio-postgres",
+ "uuid",
  "window-vibrancy 0.5.3",
 ]
 

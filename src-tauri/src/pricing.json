@@ -40,10 +40,14 @@
   "doubao-seed-code":  { "input": 0.194, "output": 1.67, "cache_read": 0.019,   "cache_create": 0 },
 
   "gpt-5.5":           { "input": 5,     "output": 30,   "cache_read": 0.50,    "cache_create": 0 },
+  "gpt-5.6-sol":       { "input": 5,     "output": 30,   "cache_read": 0.50,    "cache_create": 0 },
+  "gpt-5.6-terra":     { "input": 2.50,  "output": 15,   "cache_read": 0.25,    "cache_create": 0 },
+  "gpt-5.6-luna":      { "input": 1,     "output": 6,    "cache_read": 0.10,    "cache_create": 0 },
   "gpt-5.5-pro":       { "input": 30,    "output": 180,  "cache_read": 30,      "cache_create": 0 },
   "gpt-5.4":           { "input": 2.50,  "output": 15,   "cache_read": 0.25,    "cache_create": 0 },
   "gpt-5.4-pro":       { "input": 30,    "output": 180,  "cache_read": 30,      "cache_create": 0 },
   "gpt-5.4-mini":      { "input": 0.75,  "output": 4.50, "cache_read": 0.075,   "cache_create": 0 },
   "gpt-5.4-nano":      { "input": 0.20,  "output": 1.25, "cache_read": 0.02,    "cache_create": 0 },
-  "gpt-5.3-codex":     { "input": 1.75,  "output": 14,   "cache_read": 0.175,   "cache_create": 0 }
+  "gpt-5.3-codex":     { "input": 1.75,  "output": 14,   "cache_read": 0.175,   "cache_create": 0 },
+  "codex-auto-review": { "input": 1.75,  "output": 14,   "cache_read": 0.175,   "cache_create": 0 }
 }

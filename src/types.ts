@@ -12,6 +12,7 @@ export interface UsageWindow {
   remaining: number;
   resets_at: string | null;
   title: string;
+  window_minutes: number | null;
   trailing: string | null;
   /** Projected seconds until this window hits its limit at the recent burn
    *  rate — present only when that's *before* the reset (a real warning). */
@@ -29,6 +30,7 @@ export interface UsageWindow {
 export interface UsageReport {
   windows: UsageWindow[];
   source_label: string;
+  details: { label: string; value: string }[];
 }
 
 /** Mirrors `localstats::ModelCostDTO`. */
@@ -48,6 +50,7 @@ export interface ModelUsage {
   output: number;
   cache_read: number;
   cache_create: number;
+  unattributed: number;
   total: number;
   max_component: number;
   cost: ModelCost | null;
@@ -102,10 +105,13 @@ export interface TeamConfig {
   // identity + sharing
   team_name: string;
   member_id: string;
+  identity_version: number;
   display_name: string;
   share_tokens: boolean;
   share_cost: boolean;
   share_project: boolean;
+  share_account: boolean;
+  account_label_mode: string;
   interval_secs: number;
   backfill_days: number;
   top_projects: number; // how many top projects to show when a row is expanded
@@ -126,6 +132,18 @@ export interface TeamProjectUsage {
   cost: number;
 }
 
+/** One account bucket within a member's detailed usage ledger. */
+export interface TeamAccountUsage {
+  provider: string;
+  account_key: string;
+  billing_key: string;
+  account_label: string;
+  attribution_status: string;
+  tokens: number;
+  cost: number;
+  by_model: TeamModelUsage[];
+}
+
 /** Mirrors `team::db::MemberView` — one leaderboard row. */
 export interface MemberView {
   member_id: string;
@@ -138,6 +156,7 @@ export interface MemberView {
   is_self: boolean;
   by_model: TeamModelUsage[];
   by_project: TeamProjectUsage[];
+  by_account: TeamAccountUsage[];
 }
 
 /** Mirrors `team::db::ModelOption` — a model for the dropdown. */
@@ -147,12 +166,21 @@ export interface TeamModelOption {
   tokens: number;
 }
 
+export interface TeamAccountOption {
+  provider: string;
+  account_key: string;
+  account_label: string;
+  tokens: number;
+  cost: number;
+}
+
 /** Mirrors `team::db::TeamReport`. */
 export interface TeamReport {
   team_name: string;
   range: string;
   members: MemberView[];
   models: TeamModelOption[];
+  accounts: TeamAccountOption[];
   generated_at: string;
 }
 
