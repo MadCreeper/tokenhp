@@ -1206,9 +1206,9 @@ function footerHTML(): string {
         : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
   // The footer's middle line: account identity on Live (revealed via the footer
-  // "detail" toggle), member count on Team. In live view the line is always
-  // present (a blank &nbsp; placeholder when hidden) so toggling "detail" doesn't
-  // grow/shrink the footer → no window resize.
+  // "detail" toggle), member count on Team. When detail is off, omit the line
+  // entirely and use the compact one-row footer; content-driven window sizing
+  // will grow it again when detail is opened.
   let midLine = "";
   if (state.source === "live") {
     // The per-account subscription (Claude login, or the ChatGPT login behind
@@ -1218,7 +1218,7 @@ function footerHTML(): string {
       state.showDetail && state.account
         ? [state.account.email, state.account.plan].filter(Boolean).join(" · ")
         : "";
-    midLine = `<div class="account">${acctText ? escapeHTML(acctText) : "&nbsp;"}</div>`;
+    if (acctText) midLine = `<div class="account">${escapeHTML(acctText)}</div>`;
   } else if (state.source === "team" && state.team) {
     const n = state.team.members.length;
     midLine = `<div class="account">${n} member${n === 1 ? "" : "s"}</div>`;
@@ -1229,8 +1229,9 @@ function footerHTML(): string {
     state.source === "live"
       ? ` <button class="detail-link ${state.showDetail ? "on" : ""}" data-action="detail" title="Show this-machine share + account">detail</button>`
       : "";
+  const compact = state.source === "live" && !midLine;
   return `
-    <footer class="footer">
+    <footer class="footer ${compact ? "footer-compact" : ""}">
       <div class="src-label">${escapeHTML(label)}${detail}</div>
       ${midLine}
       <div class="updated">${escapeHTML(updated)}</div>

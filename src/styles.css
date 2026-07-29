@@ -1035,6 +1035,16 @@ html.glass.blurred body.theme-classic .header {
   padding-top: 6px;
   text-align: center;
 }
+.footer.footer-compact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+}
+.footer.footer-compact .updated {
+  flex: none;
+}
 .theme-classic .footer {
   border-top: 1px solid #d4d4da;
 }
