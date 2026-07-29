@@ -134,6 +134,7 @@ pub fn collect_local(window_secs: i64) -> Vec<ModelUsageDTO> {
 pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
     type Key = (String, String, String, String, String, String, String);
     let mut acc: HashMap<Key, (Totals, i64)> = HashMap::new();
+    let attributions = crate::account::attribution_snapshot();
 
     for file in &session_files() {
         let Ok(text) = std::fs::read_to_string(file) else {
@@ -184,7 +185,7 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
                     else {
                         continue;
                     };
-                    let attribution = crate::account::attribution("codex", ts);
+                    let attribution = attributions.attribution("codex", ts);
                     let key = (
                         day,
                         current_project.clone(),

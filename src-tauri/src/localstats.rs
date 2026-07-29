@@ -388,6 +388,7 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
         .map(|d| d.join("projects"))
         .unwrap_or_default();
     let files = session_files(&projects_dir);
+    let attributions = crate::account::attribution_snapshot();
 
     // Keep account in the aggregation key: one person can use several logins in
     // the same project/model/day, and Team billing must not merge them.
@@ -401,7 +402,7 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
         if day.as_str() < start_day || day.as_str() > end_day {
             continue;
         }
-        let attribution = crate::account::attribution("claude", event.ts);
+        let attribution = attributions.attribution("claude", event.ts);
         let e = acc
             .entry((
                 day,
