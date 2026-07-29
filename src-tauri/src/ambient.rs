@@ -372,11 +372,16 @@ pub fn spawn(app: AppHandle) {
             }
             // Codex device-share series — independent of Claude (a local read), so
             // it runs even when not signed into Claude. Records only; the tray
-            // heart stays Claude-driven.
+            // heart stays Claude-driven. Deliberately local-only with a
+            // freshness guard: no background polling of OpenAI's endpoint —
+            // live samples get recorded by `fetch_codex_quota` whenever the
+            // Codex view is open.
             {
                 let app2 = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(codex) = crate::codexstats::fetch_quota() {
+                    if let Ok(codex) =
+                        crate::codexstats::fetch_quota(crate::codexstats::SNAPSHOT_MAX_AGE_SECS)
+                    {
                         let account_key = crate::account::codex_identity()
                             .map(|i| i.account_key)
                             .unwrap_or_else(|| "unknown".into());

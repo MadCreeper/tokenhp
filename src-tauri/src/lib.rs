@@ -7,6 +7,7 @@
 pub mod account;
 pub mod ambient;
 pub mod burn;
+pub mod codexquota;
 pub mod codexstats;
 pub mod credentials;
 pub mod heart_icon;
@@ -131,13 +132,24 @@ async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Codex's latest local rate-limit snapshot, shaped like the live-quota bars,
-/// with the device-share split recorded + annotated.
+/// Codex's live rate-limit quota (backend usage endpoint, read-only auth —
+/// see `codexquota`), with the device-share split recorded + annotated. Falls
+/// back to a *recent* local rollout snapshot when the live fetch fails (old
+/// CLI versions / offline); a failed fallback surfaces the live error, which
+/// is the actionable one.
 #[tauri::command]
 async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, String> {
-    let mut report = tokio::task::spawn_blocking(codexstats::fetch_quota)
-        .await
-        .map_err(|e| e.to_string())??;
+    let mut report = match codexquota::fetch().await {
+        Ok(r) => r,
+        Err(live_err) => {
+            tokio::task::spawn_blocking(|| {
+                codexstats::fetch_quota(codexstats::SNAPSHOT_MAX_AGE_SECS)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|_| live_err)?
+        }
+    };
     let account_key = account::codex_identity()
         .map(|i| i.account_key)
         .unwrap_or_else(|| "unknown".into());

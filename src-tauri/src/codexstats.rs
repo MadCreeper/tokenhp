@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 
 const TOKEN_COUNT_MARKER: &str = "\"type\":\"token_count\"";
 
+/// How stale a local rollout snapshot may be before [`fetch_quota`] rejects it.
+pub const SNAPSHOT_MAX_AGE_SECS: i64 = 24 * 3600;
+
 /// Per-model Codex token usage over the last `window_secs`. Returns an empty
 /// vec when there's nothing (the `tools` layer decides what "empty" means);
 /// this is the Codex [`crate::tools::ToolAdapter`] implementation's data source.
@@ -240,10 +243,14 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
 }
 
 /// The freshest Codex quota snapshot, shaped like the live-quota hearts bars.
-/// Rollout filenames embed an ISO timestamp, so we scan newest-first and stop at
-/// the first session carrying a `rate_limits` snapshot rather than reading every
-/// file.
-pub fn fetch_quota() -> Result<UsageReport, String> {
+/// We scan newest-first and stop at the first session carrying a `rate_limits`
+/// snapshot rather than reading every file.
+///
+/// Offline fallback only — Codex writes these snapshots just when a real turn
+/// completes (see `codexquota` for the live source), so a snapshot older than
+/// `max_age_secs` is rejected rather than shown as if it were current (an idle
+/// machine once surfaced a six-week-old snapshot as live data).
+pub fn fetch_quota(max_age_secs: i64) -> Result<UsageReport, String> {
     let mut files = session_files();
     if files.is_empty() {
         return Err("No local Codex sessions found under ~/.codex/sessions.".into());
@@ -281,7 +288,12 @@ pub fn fetch_quota() -> Result<UsageReport, String> {
                 best = Some((ts, limits));
             }
         }
-        if let Some((_, limits)) = best {
+        if let Some((ts, limits)) = best {
+            // Files are scanned newest-first, so anything past this one is
+            // older still — bail rather than keep digging.
+            if Utc::now().timestamp() - ts > max_age_secs {
+                return Err("Codex hasn't written a local rate-limit snapshot recently.".into());
+            }
             return build_quota(limits);
         }
     }
@@ -482,7 +494,7 @@ fn window_title(minutes: Option<i64>) -> String {
     }
 }
 
-fn epoch_to_rfc3339(secs: i64) -> Option<String> {
+pub(crate) fn epoch_to_rfc3339(secs: i64) -> Option<String> {
     DateTime::<Utc>::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
 }
 
