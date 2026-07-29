@@ -34,6 +34,24 @@ export function teamContentHTML(args: {
     return `<div class="msg">No members yet. Share your usage to seed the team.</div>`;
   }
 
+  const legacyCount = report.members.filter((m) => m.is_legacy).length;
+  const hiddenCount = report.members.filter((m) =>
+    m.by_account.some((a) => a.attribution_status === "hidden" || a.account_key === "hidden"),
+  ).length;
+  const notices = [
+    legacyCount > 0
+      ? `${legacyCount} member${legacyCount === 1 ? "" : "s"} still use${
+          legacyCount === 1 ? "s" : ""
+        } the legacy identity. Totals remain visible; account-level splitting starts after their upgrade.`
+      : "",
+    args.crimeMode && hiddenCount > 0
+      ? `${hiddenCount} member${hiddenCount === 1 ? " has" : "s have"} not shared account identity. Their model totals remain visible.`
+      : "",
+  ]
+    .filter(Boolean)
+    .map((text) => `<div class="team-notice">${escapeHTML(text)}</div>`)
+    .join("");
+
   const modeToggle = `<button class="mc-btn crime-toggle ${args.crimeMode ? "selected" : ""}"
     data-action="team-crime-toggle" title="Show member → account → model usage details">犯罪记录</button>`;
   const selector = args.crimeMode
@@ -95,7 +113,7 @@ export function teamContentHTML(args: {
       ),
     )
     .join("");
-  return `<div class="team-view-tools">${selector}${modeToggle}</div><div class="team-list">${rows}</div>`;
+  return `${notices}<div class="team-view-tools">${selector}${modeToggle}</div><div class="team-list">${rows}</div>`;
 }
 
 function accountCycleHTML(report: TeamReport, accountKey: string): string {
@@ -162,7 +180,11 @@ function memberRow(
   const display = m.is_self && selfName ? selfName : m.display_name;
   // A chevron signals the row is expandable to its top projects.
   const chevron = crime.enabled ? "▾" : expand.open ? "▾" : "▸";
-  const name = `${chevron} ${rank}. ${escapeHTML(display)}${m.is_self ? " (you)" : ""}`;
+  // Theme bar builders escape their title; pass plain text to avoid turning an
+  // apostrophe into a visible `&#39;` after double escaping.
+  const name = `${chevron} ${rank}. ${display}${m.is_self ? " (you)" : ""}${
+    m.is_legacy ? " [legacy]" : ""
+  }`;
   const sub = [m.current_project ? `⛏ ${m.current_project}` : null, seenLabel(m)]
     .filter(Boolean)
     .join(" · ");
@@ -197,10 +219,19 @@ function accountDetailsHTML(m: MemberView, accountKey: string): string {
           )}</span></div>`;
         })
         .join("");
-      const unknown = account.attribution_status === "unknown" ? " crime-unknown" : "";
-      return `<div class="crime-account${unknown}">
+      const hidden = account.attribution_status === "hidden" || account.account_key === "hidden";
+      const unknown = account.attribution_status === "unknown" || account.account_key === "unknown";
+      const accountName = m.is_legacy
+        ? "Legacy client · account unavailable"
+        : hidden
+          ? "Account not shared"
+          : unknown
+            ? "Unknown account · before tracking"
+            : `${providerLabel(account.provider)} · ${account.account_label}`;
+      const uncertain = m.is_legacy || hidden || unknown ? " crime-unknown" : "";
+      return `<div class="crime-account${uncertain}">
         <div class="crime-account-head">
-          <span>${escapeHTML(providerLabel(account.provider))} · ${escapeHTML(account.account_label)}</span>
+          <span>${escapeHTML(accountName)}</span>
           <span>${escapeHTML(value)}</span>
         </div>
         ${models}

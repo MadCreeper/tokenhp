@@ -242,6 +242,12 @@ if (!MOCK && state.pinned) {
 }
 
 const app = document.getElementById("app")!;
+if (!MOCK && typeof ResizeObserver !== "undefined") {
+  // Provider switches, async fonts and expanded Team rows can all change the
+  // natural panel height outside the exact render frame. Keep the native
+  // popover coupled to the content instead of leaving a fixed empty tail.
+  new ResizeObserver(() => scheduleWindowSize()).observe(app);
+}
 
 // Apply showcase URL overrides.
 const themeParam = params.get("theme");
@@ -267,21 +273,28 @@ let refreshGeneration = 0;
 // Manual/auto team uploads are rate-limited so repeated refreshes (or range
 // switches) can't spam SSH tunnels / the DB: at most one in flight, and no more
 // than once per minute. The 30-min background uploader is separate/unaffected.
-let teamUploadInFlight = false;
+let teamUploadInFlight: Promise<string | null> | null = null;
 let lastTeamUploadAt = 0;
 const TEAM_UPLOAD_MIN_MS = 60_000;
 
-function maybeUploadTeam(): void {
-  if (MOCK || !state.teamConfig?.enabled) return;
+/** Upload before reading Team so a freshly-migrated v2 member never sees an
+ * empty roster while waiting for the background loop. Concurrent refreshes
+ * share one promise; callers that only want a best-effort push can ignore the
+ * returned error string. */
+function maybeUploadTeam(force = false): Promise<string | null> {
+  if (MOCK || !state.teamConfig?.enabled) return Promise.resolve(null);
+  if (teamUploadInFlight) return teamUploadInFlight;
   const now = Date.now();
-  if (teamUploadInFlight || now - lastTeamUploadAt < TEAM_UPLOAD_MIN_MS) return;
-  teamUploadInFlight = true;
+  if (!force && now - lastTeamUploadAt < TEAM_UPLOAD_MIN_MS) return Promise.resolve(null);
   lastTeamUploadAt = now;
-  void invoke("upload_team_snapshot")
-    .catch(() => {})
+  const upload = invoke("upload_team_snapshot")
+    .then(() => null)
+    .catch((err) => String(err))
     .finally(() => {
-      teamUploadInFlight = false;
+      if (teamUploadInFlight === upload) teamUploadInFlight = null;
     });
+  teamUploadInFlight = upload;
+  return upload;
 }
 
 async function refresh(): Promise<void> {
@@ -362,8 +375,9 @@ async function refresh(): Promise<void> {
       savePendingCelebration();
       armDamage(detectDamage(state.live));
     } else if (source === "team") {
-      // Pull the shared roster; opportunistically push our own snapshot too so
-      // teammates see us (fire-and-forget — the git push can be slow).
+      // Push first, then read. This makes a v1→v2 migration visible on the very
+      // first Team open instead of showing an empty roster until the next poll.
+      await maybeUploadTeam();
       const team = await invoke<TeamReport>("fetch_team", { range: teamRange });
       if (generation !== refreshGeneration) return;
       state.team = team;
@@ -377,7 +391,6 @@ async function refresh(): Promise<void> {
       ) {
         state.teamAccountKey = "all";
       }
-      maybeUploadTeam();
     } else {
       // API axis: every local tool at once (not provider-scoped).
       const local = await invoke<LocalReport>("fetch_local", { windowSecs });
@@ -419,6 +432,8 @@ function snapSelectedModel(): void {
 // ---------------------------------------------------------------- render
 
 const PANEL_WIDTH = 360;
+let windowSizeGeneration = 0;
+let lastRequestedHeight = 0;
 
 function render(): void {
   app.innerHTML =
@@ -431,9 +446,7 @@ function render(): void {
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
     </main>`;
-  // Resize the window to the content height (top-anchored → grows downward),
-  // mirroring the AppKit panel's self-sizing.
-  requestAnimationFrame(syncWindowSize);
+  scheduleWindowSize();
 }
 
 // The slim "filter line" under the source tabs holds each view's secondary
@@ -486,6 +499,7 @@ function defaultTeamDraft(): TeamConfig {
       team_name: "",
       member_id: "",
       identity_version: 2,
+      legacy_member_id: "",
       display_name: "",
       share_tokens: true,
       share_cost: true,
@@ -499,13 +513,33 @@ function defaultTeamDraft(): TeamConfig {
   );
 }
 
-function syncWindowSize(): void {
-  if (MOCK) return; // no Tauri window in browser/showcase mode
+/** Measure after two layout frames: the first commits the new provider view,
+ * the second catches font/bar geometry. A generation guard prevents an older
+ * Claude measurement from winning after the user switches to shorter Codex. */
+function scheduleWindowSize(): void {
+  if (MOCK) return;
+  const generation = ++windowSizeGeneration;
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      void syncWindowSize(generation);
+    }),
+  );
+}
+
+async function syncWindowSize(generation: number): Promise<void> {
+  if (generation !== windowSizeGeneration) return;
   const panel = app.querySelector(".panel") as HTMLElement | null;
   if (!panel) return;
   const h = Math.ceil(panel.getBoundingClientRect().height);
   if (h <= 1) return;
-  getCurrentWindow().setSize(new LogicalSize(PANEL_WIDTH, h)).catch(() => {});
+  if (h === lastRequestedHeight) return;
+  lastRequestedHeight = h;
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(PANEL_WIDTH, h));
+  } catch {
+    // A later render/ResizeObserver notification gets another chance.
+    if (generation === windowSizeGeneration) lastRequestedHeight = 0;
+  }
 }
 
 function headerHTML(): string {
@@ -1214,7 +1248,6 @@ app.addEventListener("click", (e) => {
 
   switch (action) {
     case "refresh":
-      maybeUploadTeam(); // also push our latest usage up (rate-limited)
       // An explicit click is the one moment we're allowed to look at Claude
       // Code's credential storage again even if it appears unchanged — a
       // background poll must never do that (it can raise a Keychain prompt).
@@ -1533,6 +1566,7 @@ async function testTeam(): Promise<void> {
   render();
   try {
     const h = await invoke<TeamHandshake>("test_team_connection", { config: state.teamDraft });
+    lastTeamUploadAt = Date.now();
     state.teamStatusOk = true;
     const n = h.member_count;
     state.teamStatus = `Connected ✓ · ${h.team_name} · ${n} member${n === 1 ? "" : "s"}`;
@@ -1548,8 +1582,25 @@ async function testTeam(): Promise<void> {
 async function saveTeam(): Promise<void> {
   if (!state.teamDraft) return;
   try {
+    const previous = state.teamConfig;
     await invoke("set_team_config", { config: state.teamDraft });
     state.teamConfig = await invoke<TeamConfig>("get_team_config");
+    const sharingChanged =
+      !previous ||
+      previous.share_tokens !== state.teamConfig.share_tokens ||
+      previous.share_cost !== state.teamConfig.share_cost ||
+      previous.share_project !== state.teamConfig.share_project ||
+      previous.share_account !== state.teamConfig.share_account ||
+      previous.account_label_mode !== state.teamConfig.account_label_mode;
+    if (state.teamConfig.enabled && sharingChanged) {
+      const uploadError = await maybeUploadTeam(true);
+      if (uploadError) {
+        state.teamStatusOk = false;
+        state.teamStatus = `Saved locally, but the new sharing settings have not reached the Team DB: ${uploadError}`;
+        render();
+        return;
+      }
+    }
     // If sharing was turned off while the Team tab was open, fall back to Live.
     if (!state.teamConfig.enabled && state.source === "team") state.source = "live";
     state.view = "main";
@@ -1572,6 +1623,10 @@ async function loadTeamConfig(): Promise<void> {
     if (state.source === "team" && !state.teamConfig.enabled) {
       state.source = "live";
       saveView();
+      void refresh();
+    } else if (state.source === "team") {
+      // The initial refresh can run before this async config load, in which
+      // case it cannot prime the v2 member. Repeat once with the config present.
       void refresh();
     }
     render();

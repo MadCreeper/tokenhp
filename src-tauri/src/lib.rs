@@ -330,28 +330,33 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Cross-platform debug aid: show and pin the otherwise tray-only
+            // popover at launch so its content-driven geometry can be inspected.
+            let debug_show = std::env::var_os("HPBAR_DEBUG_SHOW").is_some();
+            if debug_show {
+                PINNED.store(true, Ordering::Relaxed);
+            }
             build_popover(app.handle())?;
             build_tray(app.handle())?;
-            // Debug aid: HPBAR_DEBUG_SHOW=1 shows the popover pinned at launch
-            // (no tray interaction needed) and, with HPBAR_DEBUG_CYCLE=1,
-            // deactivates the app after 8s — lets the focused/unfocused glass
-            // states be screenshotted non-interactively.
-            #[cfg(target_os = "macos")]
-            if std::env::var_os("HPBAR_DEBUG_SHOW").is_some() {
-                PINNED.store(true, Ordering::Relaxed);
+            if debug_show {
                 if let Some(win) = app.get_webview_window("popover") {
                     position_top_right(&win);
                     let _ = win.show();
                     let _ = win.set_focus();
-                    // set_focus alone can't activate an Accessory app launched
-                    // from a background shell — force it.
-                    unsafe {
-                        use objc2::msg_send;
-                        use objc2::runtime::{AnyObject, Bool};
-                        let napp: *mut AnyObject =
-                            msg_send![objc2::class!(NSApplication), sharedApplication];
-                        let _: () = msg_send![napp, activateIgnoringOtherApps: Bool::new(true)];
-                    }
+                }
+            }
+            // macOS additionally needs app activation; DEBUG_CYCLE then
+            // deactivates after 8s for focused/unfocused glass screenshots.
+            #[cfg(target_os = "macos")]
+            if debug_show {
+                // set_focus alone can't activate an Accessory app launched
+                // from a background shell — force it.
+                unsafe {
+                    use objc2::msg_send;
+                    use objc2::runtime::{AnyObject, Bool};
+                    let napp: *mut AnyObject =
+                        msg_send![objc2::class!(NSApplication), sharedApplication];
+                    let _: () = msg_send![napp, activateIgnoringOtherApps: Bool::new(true)];
                 }
                 if std::env::var_os("HPBAR_DEBUG_CYCLE").is_some() {
                     let handle = app.handle().clone();
@@ -391,7 +396,25 @@ pub fn run() {
 /// tray click. We `hide()` rather than close it so its webview (and JS poll
 /// loop) stays alive between opens.
 fn build_popover(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let builder = WebviewWindowBuilder::new(app, "popover", WebviewUrl::App("index.html".into()))
+    let mut debug_query = Vec::new();
+    if let Ok(source @ ("live" | "local" | "team")) = std::env::var("HPBAR_DEBUG_SOURCE").as_deref()
+    {
+        debug_query.push(format!("source={source}"));
+    }
+    if let Ok(provider @ ("claude" | "codex")) =
+        std::env::var("HPBAR_DEBUG_PROVIDER").as_deref()
+    {
+        debug_query.push(format!("provider={provider}"));
+    }
+    if std::env::var_os("HPBAR_DEBUG_CRIME").is_some() {
+        debug_query.push("crime=1".to_string());
+    }
+    let page = if debug_query.is_empty() {
+        "index.html".to_string()
+    } else {
+        format!("index.html?{}", debug_query.join("&"))
+    };
+    let builder = WebviewWindowBuilder::new(app, "popover", WebviewUrl::App(page.into()))
         .title("HPBar")
         .inner_size(360.0, 300.0)
         .resizable(false)

@@ -1085,6 +1085,19 @@ html.glass.blurred body.theme-classic .header {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.team-notice {
+  margin-top: 7px;
+  padding: 6px 8px;
+  border-left: 2px solid #c78500;
+  background: rgba(199, 133, 0, 0.08);
+  color: var(--panel-text-dim);
+  font-size: 8.5px;
+  line-height: 1.35;
+}
+.theme-classic .team-notice,
+.theme-arknights .team-notice {
+  font-size: 10px;
+}
 .team-list {
   display: flex;
   flex-direction: column;

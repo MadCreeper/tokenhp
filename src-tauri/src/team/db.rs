@@ -36,7 +36,7 @@ const MIGRATE_LOCK: i64 = 0x0048_5042_4152; // "HPBAR"
 
 /// Ordered schema migrations. To evolve the schema later, append a new
 /// `(version, sql)` entry — it runs once on the next connect.
-const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2)];
+const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)];
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS members (
@@ -80,6 +80,124 @@ CREATE INDEX IF NOT EXISTS usage_daily_account_idx
   ON usage_daily(provider, account_key, day);
 ";
 
+const MIGRATION_V3: &str = "
+ALTER TABLE members ADD COLUMN IF NOT EXISTS legacy_member_id text;
+CREATE INDEX IF NOT EXISTS members_legacy_member_idx
+  ON members(legacy_member_id) WHERE legacy_member_id IS NOT NULL;
+
+-- Keep the original table writable by v1 clients. Account-aware v2 rows move
+-- into their own table because the two clients require incompatible conflict
+-- keys: v1 is per project/model, v2 is per provider/account/project/model.
+CREATE TABLE IF NOT EXISTS usage_daily_v2 (
+  member_id text NOT NULL REFERENCES members(member_id) ON DELETE CASCADE,
+  day date NOT NULL,
+  provider text NOT NULL,
+  account_key text NOT NULL,
+  billing_key text NOT NULL,
+  account_label text NOT NULL,
+  attribution_status text NOT NULL,
+  project text NOT NULL,
+  model text NOT NULL,
+  input bigint NOT NULL DEFAULT 0,
+  output bigint NOT NULL DEFAULT 0,
+  cache_read bigint NOT NULL DEFAULT 0,
+  cache_create bigint NOT NULL DEFAULT 0,
+  unattributed bigint NOT NULL DEFAULT 0,
+  tokens bigint NOT NULL DEFAULT 0,
+  cost double precision NOT NULL DEFAULT 0,
+  PRIMARY KEY (member_id, day, provider, account_key, project, model)
+);
+CREATE INDEX IF NOT EXISTS usage_daily_v2_day_idx ON usage_daily_v2(day);
+CREATE INDEX IF NOT EXISTS usage_daily_v2_account_idx
+  ON usage_daily_v2(provider, account_key, day);
+
+INSERT INTO usage_daily_v2(
+  member_id, day, provider, account_key, billing_key, account_label,
+  attribution_status, project, model, input, output, cache_read,
+  cache_create, unattributed, tokens, cost
+)
+SELECT
+  u.member_id, u.day, u.provider, u.account_key, u.billing_key,
+  u.account_label, u.attribution_status, u.project, u.model, u.input,
+  u.output, u.cache_read, u.cache_create, u.unattributed, u.tokens, u.cost
+FROM usage_daily u
+JOIN members m ON m.member_id=u.member_id
+WHERE m.identity_version >= 2
+ON CONFLICT (member_id, day, provider, account_key, project, model)
+DO UPDATE SET
+  billing_key=excluded.billing_key,
+  account_label=excluded.account_label,
+  attribution_status=excluded.attribution_status,
+  input=excluded.input,
+  output=excluded.output,
+  cache_read=excluded.cache_read,
+  cache_create=excluded.cache_create,
+  unattributed=excluded.unattributed,
+  tokens=excluded.tokens,
+  cost=excluded.cost;
+
+DELETE FROM usage_daily u
+USING members m
+WHERE m.member_id=u.member_id AND m.identity_version >= 2;
+ALTER TABLE usage_daily DROP CONSTRAINT IF EXISTS usage_daily_pkey;
+ALTER TABLE usage_daily
+  ADD PRIMARY KEY (member_id, day, project, model);
+
+-- A collapsed compatibility mirror lets an old app continue to see v2 members.
+-- New clients ignore these mirror rows and read the precise v2 table instead.
+INSERT INTO usage_daily(
+  member_id, day, project, model, input, output, cache_read, cache_create,
+  unattributed, tokens, cost
+)
+SELECT
+  member_id, day, project, model, SUM(input), SUM(output), SUM(cache_read),
+  SUM(cache_create), SUM(unattributed), SUM(tokens), SUM(cost)
+FROM usage_daily_v2
+GROUP BY member_id, day, project, model
+ON CONFLICT (member_id, day, project, model)
+DO UPDATE SET
+  input=excluded.input,
+  output=excluded.output,
+  cache_read=excluded.cache_read,
+  cache_create=excluded.cache_create,
+  unattributed=excluded.unattributed,
+  tokens=excluded.tokens,
+  cost=excluded.cost;
+";
+
+const USAGE_CTE: &str = "
+WITH readable_usage AS (
+  SELECT
+    member_id, day, provider, account_key, billing_key, account_label,
+    attribution_status, project, model, input, output, cache_read,
+    cache_create, unattributed, tokens, cost
+  FROM usage_daily_v2
+  UNION ALL
+  SELECT
+    u.member_id, u.day, u.provider, u.account_key, u.billing_key,
+    u.account_label, u.attribution_status, u.project, u.model, u.input,
+    u.output, u.cache_read, u.cache_create, u.unattributed, u.tokens, u.cost
+  FROM usage_daily u
+  JOIN members legacy_member ON legacy_member.member_id=u.member_id
+  WHERE legacy_member.identity_version < 2
+)
+";
+
+/// Keep v1 members visible during a rolling upgrade, except once a v2 row
+/// explicitly identifies that v1 id as its predecessor. This avoids showing a
+/// user's backfilled v2 usage alongside the same legacy history while still
+/// allowing teammates on the old app to remain in the roster.
+const VISIBLE_MEMBER: &str = "
+  NOT (
+    m.identity_version < 2
+    AND EXISTS (
+      SELECT 1 FROM members successor
+      WHERE successor.identity_version >= 2
+        AND successor.legacy_member_id = m.member_id
+    )
+  )
+";
+
 // --- report shapes -----------------------------------------------------------
 
 /// One model's usage for a member over the range (for the per-model leaderboard).
@@ -116,6 +234,8 @@ pub struct AccountUsage {
 #[derive(Serialize, Clone)]
 pub struct MemberView {
     pub member_id: String,
+    pub identity_version: i32,
+    pub is_legacy: bool,
     pub display_name: String,
     pub tokens: i64, // total across all models
     pub cost: f64,
@@ -478,14 +598,55 @@ async fn write_member(
     };
 
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
+    let mut legacy_member_id = cfg.legacy_member_id.clone();
+    let configured_legacy_exists = if legacy_member_id.trim().is_empty() {
+        false
+    } else {
+        tx.query_opt(
+            "SELECT 1 FROM members WHERE member_id=$1 AND identity_version < 2",
+            &[&legacy_member_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some()
+    };
+    if !configured_legacy_exists && !cfg.display_name.trim().is_empty() {
+        // Early account-aware builds replaced the v1 id before preserving it.
+        // Recover only an unambiguous same-name predecessor, and never claim a
+        // legacy row already superseded by another installation.
+        let candidates = tx
+            .query(
+                "SELECT m.member_id
+                 FROM members m
+                 WHERE m.identity_version < 2
+                   AND lower(m.display_name)=lower($1)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM members successor
+                     WHERE successor.identity_version >= 2
+                       AND successor.member_id <> $2
+                       AND successor.legacy_member_id=m.member_id
+                   )
+                 LIMIT 2",
+                &[&cfg.display_name, &cfg.member_id],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if candidates.len() == 1 {
+            legacy_member_id = candidates[0].get("member_id");
+        }
+    }
 
     tx.execute(
-        "INSERT INTO members(member_id, display_name, host, email, app_version, updated_at, current_project, identity_version)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        "INSERT INTO members(
+           member_id, display_name, host, email, app_version, updated_at,
+           current_project, identity_version, legacy_member_id
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (member_id) DO UPDATE SET
            display_name=excluded.display_name, host=excluded.host, email=excluded.email,
            app_version=excluded.app_version, updated_at=excluded.updated_at,
-           current_project=excluded.current_project, identity_version=excluded.identity_version",
+           current_project=excluded.current_project, identity_version=excluded.identity_version,
+           legacy_member_id=excluded.legacy_member_id",
         &[
             &cfg.member_id,
             &cfg.display_name,
@@ -495,12 +656,19 @@ async fn write_member(
             &updated_at,
             &current_project,
             &(cfg.identity_version as i32),
+            &legacy_member_id,
         ],
     )
     .await
     .map_err(|e| format!("upsert member failed: {e}"))?;
 
     // Replace this member's recent window wholesale (idempotent; only our rows).
+    tx.execute(
+        "DELETE FROM usage_daily_v2 WHERE member_id=$1 AND day >= $2",
+        &[&cfg.member_id, &start_date],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute(
         "DELETE FROM usage_daily WHERE member_id=$1 AND day >= $2",
         &[&cfg.member_id, &start_date],
@@ -535,7 +703,7 @@ async fn write_member(
             "hidden"
         };
         tx.execute(
-            "INSERT INTO usage_daily(
+            "INSERT INTO usage_daily_v2(
                member_id, day, provider, account_key, billing_key, account_label,
                attribution_status, project, model, input, output, cache_read,
                cache_create, unattributed, tokens, cost
@@ -544,13 +712,13 @@ async fn write_member(
              ON CONFLICT (member_id, day, provider, account_key, project, model) DO UPDATE SET
                billing_key=excluded.billing_key, account_label=excluded.account_label,
                attribution_status=excluded.attribution_status,
-               input=usage_daily.input + excluded.input,
-               output=usage_daily.output + excluded.output,
-               cache_read=usage_daily.cache_read + excluded.cache_read,
-               cache_create=usage_daily.cache_create + excluded.cache_create,
-               unattributed=usage_daily.unattributed + excluded.unattributed,
-               tokens=usage_daily.tokens + excluded.tokens,
-               cost=usage_daily.cost + excluded.cost",
+               input=usage_daily_v2.input + excluded.input,
+               output=usage_daily_v2.output + excluded.output,
+               cache_read=usage_daily_v2.cache_read + excluded.cache_read,
+               cache_create=usage_daily_v2.cache_create + excluded.cache_create,
+               unattributed=usage_daily_v2.unattributed + excluded.unattributed,
+               tokens=usage_daily_v2.tokens + excluded.tokens,
+               cost=usage_daily_v2.cost + excluded.cost",
             &[
                 &cfg.member_id,
                 &day,
@@ -572,6 +740,39 @@ async fn write_member(
         )
         .await
         .map_err(|e| format!("insert usage failed: {e}"))?;
+
+        // v1-compatible aggregate. Multiple provider/account rows collapse onto
+        // the old key; the precise rows above remain authoritative for v2.
+        tx.execute(
+            "INSERT INTO usage_daily(
+               member_id, day, project, model, input, output, cache_read,
+               cache_create, unattributed, tokens, cost
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (member_id, day, project, model) DO UPDATE SET
+               input=usage_daily.input + excluded.input,
+               output=usage_daily.output + excluded.output,
+               cache_read=usage_daily.cache_read + excluded.cache_read,
+               cache_create=usage_daily.cache_create + excluded.cache_create,
+               unattributed=usage_daily.unattributed + excluded.unattributed,
+               tokens=usage_daily.tokens + excluded.tokens,
+               cost=usage_daily.cost + excluded.cost",
+            &[
+                &cfg.member_id,
+                &day,
+                &project,
+                &r.model,
+                &input,
+                &output,
+                &cache_read,
+                &cache_create,
+                &unattributed,
+                &tokens,
+                &cost,
+            ],
+        )
+        .await
+        .map_err(|e| format!("insert legacy-compatible usage failed: {e}"))?;
     }
 
     tx.execute(
@@ -594,11 +795,12 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
     // Per-(member, model) totals for the range — the frontend slices this by
     // model client-side so the dropdown switches instantly.
     let usage_sql = format!(
-        "SELECT u.member_id, u.model, SUM(u.tokens)::bigint AS tokens,
+        "{USAGE_CTE}
+         SELECT u.member_id, u.model, SUM(u.tokens)::bigint AS tokens,
                 COALESCE(SUM(u.cost), 0)::double precision AS cost
-         FROM usage_daily u
+         FROM readable_usage u
          JOIN members m ON m.member_id=u.member_id
-         WHERE {day_filter} AND m.identity_version >= 2
+         WHERE {day_filter} AND {VISIBLE_MEMBER}
          GROUP BY u.member_id, u.model"
     );
     let usage_rows = client
@@ -625,11 +827,12 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
 
     // Per-(member, project) totals for the range (the expandable "top projects").
     let project_sql = format!(
-        "SELECT u.member_id, u.project, SUM(u.tokens)::bigint AS tokens,
+        "{USAGE_CTE}
+         SELECT u.member_id, u.project, SUM(u.tokens)::bigint AS tokens,
                 COALESCE(SUM(u.cost), 0)::double precision AS cost
-         FROM usage_daily u
+         FROM readable_usage u
          JOIN members m ON m.member_id=u.member_id
-         WHERE {day_filter} AND m.identity_version >= 2
+         WHERE {day_filter} AND {VISIBLE_MEMBER}
          GROUP BY u.member_id, u.project"
     );
     let project_rows = client
@@ -652,13 +855,14 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
 
     // Full member → account → model detail for Crime records and bill splits.
     let account_sql = format!(
-        "SELECT u.member_id, u.provider, u.account_key, u.billing_key,
+        "{USAGE_CTE}
+         SELECT u.member_id, u.provider, u.account_key, u.billing_key,
                 u.account_label, u.attribution_status, u.model,
                 SUM(u.tokens)::bigint AS tokens,
                 COALESCE(SUM(u.cost), 0)::double precision AS cost
-         FROM usage_daily u
+         FROM readable_usage u
          JOIN members m ON m.member_id=u.member_id
-         WHERE {day_filter} AND m.identity_version >= 2
+         WHERE {day_filter} AND {VISIBLE_MEMBER}
          GROUP BY u.member_id, u.provider, u.account_key, u.billing_key,
                   u.account_label, u.attribution_status, u.model"
     );
@@ -693,13 +897,13 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
     }
 
     // Member identity/metadata (everyone, even with no usage in the range).
-    let meta_rows = client
-        .query(
-            "SELECT member_id, display_name, current_project,
+    let meta_sql = format!(
+        "SELECT m.member_id, m.identity_version, m.display_name, m.current_project,
                     EXTRACT(EPOCH FROM updated_at)::bigint AS updated_ts
-             FROM members WHERE identity_version >= 2",
-            &[],
-        )
+             FROM members m WHERE {VISIBLE_MEMBER}"
+    );
+    let meta_rows = client
+        .query(&meta_sql, &[])
         .await
         .map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
@@ -708,6 +912,7 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         .iter()
         .map(|row| {
             let member_id: String = row.get("member_id");
+            let identity_version: i32 = row.get("identity_version");
             let raw_name: String = row.get("display_name");
             let display_name = if raw_name.is_empty() {
                 member_id.clone()
@@ -754,6 +959,8 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
             MemberView {
                 is_self: member_id == cfg.member_id,
                 member_id,
+                identity_version,
+                is_legacy: identity_version < 2,
                 display_name,
                 tokens,
                 cost,
@@ -785,10 +992,13 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
     let mut account_totals: std::collections::HashMap<(String, String), (String, i64, f64)> =
         std::collections::HashMap::new();
     for member in &members {
+        if member.is_legacy {
+            continue;
+        }
         for account in &member.by_account {
             // A fully hidden identity cannot support a meaningful cross-member
             // bill filter, but it still appears inside that member's details.
-            if account.account_key == "hidden" {
+            if matches!(account.account_key.as_str(), "hidden" | "unknown") {
                 continue;
             }
             let total = account_totals
@@ -882,22 +1092,68 @@ mod integration_tests {
     }
 
     /// Run explicitly against a disposable Postgres:
-    /// `HPBAR_DB_DIRECT=127.0.0.1:55432 cargo test postgres_v2_round_trip -- --ignored`
+    /// `HPBAR_DB_DIRECT=127.0.0.1:55432 cargo test postgres_v3_rolling_upgrade_round_trip -- --ignored`
     #[tokio::test]
     #[ignore = "requires a disposable Postgres via HPBAR_DB_DIRECT"]
-    async fn postgres_v2_round_trip() {
+    async fn postgres_v3_rolling_upgrade_round_trip() {
         let day = Utc::now().format("%Y-%m-%d").to_string();
         let cfg = TeamConfig {
             enabled: true,
             team_name: "Integration Team".into(),
+            db_name: "postgres".into(),
             db_user: "postgres".into(),
             member_id: "integration-member".into(),
             identity_version: 2,
+            legacy_member_id: "integration-member-v1".into(),
             display_name: "Integration Member".into(),
             share_account: true,
             account_label_mode: "full".into(),
             ..TeamConfig::default()
         };
+
+        // Reproduce the state an actual 0.8.1-beta Team DB is in before this
+        // update: schema v2 already applied, with both legacy and account-aware
+        // rows present. The first v3 upload below must split it safely.
+        let seed = connect(&cfg).await.unwrap();
+        seed.client
+            .batch_execute(
+                "DROP TABLE IF EXISTS usage_daily_v2, usage_daily, members, team_meta, schema_migrations CASCADE;
+                 CREATE TABLE schema_migrations (
+                   version int PRIMARY KEY,
+                   applied_at timestamptz DEFAULT now()
+                 );",
+            )
+            .await
+            .unwrap();
+        seed.client.batch_execute(MIGRATION_V1).await.unwrap();
+        seed.client.batch_execute(MIGRATION_V2).await.unwrap();
+        seed.client
+            .batch_execute(
+                "INSERT INTO schema_migrations(version) VALUES(1),(2);
+                 INSERT INTO members(
+                   member_id, display_name, updated_at, identity_version
+                 ) VALUES
+                   ('legacy-teammate','Legacy Teammate',now(),1),
+                   ('integration-member-v1','Integration Member',now(),1),
+                   ('lost-legacy-id','Recovered Member',now(),1),
+                   ('preexisting-v2','Preexisting v2',now(),2);
+                 INSERT INTO usage_daily(
+                   member_id, day, provider, account_key, billing_key,
+                   account_label, attribution_status, project, model, tokens, cost
+                 ) VALUES
+                   ('legacy-teammate',current_date,'claude','unknown','unknown',
+                    'Unknown account','unknown','legacy-project','claude-fable-5',50,5),
+                   ('integration-member-v1',current_date,'claude','unknown','unknown',
+                    'Unknown account','unknown','legacy-project','claude-fable-5',300,30),
+                   ('lost-legacy-id',current_date,'claude','unknown','unknown',
+                    'Unknown account','unknown','legacy-project','claude-fable-5',10,1),
+                   ('preexisting-v2',current_date,'claude','migrated-account','migrated-billing',
+                    'migrated@example.com','exact','existing-project','claude-fable-5',40,4);",
+            )
+            .await
+            .unwrap();
+        drop(seed);
+
         upload(
             &cfg,
             None,
@@ -925,10 +1181,37 @@ mod integration_tests {
         .await
         .unwrap();
 
+        // Simulate an installation already migrated by the early v2 build,
+        // which lost its exact v1 id. A unique display-name match recovers the
+        // predecessor; a non-unique match would deliberately remain visible.
+        let recovered_cfg = TeamConfig {
+            member_id: "recovered-v2".into(),
+            legacy_member_id: "wrong-derived-id".into(),
+            display_name: "Recovered Member".into(),
+            share_account: false,
+            ..cfg.clone()
+        };
+        upload(
+            &recovered_cfg,
+            None,
+            vec![row(
+                &day,
+                "claude",
+                "recovered-account",
+                "recovered-project",
+                "claude-fable-5",
+                10,
+                1.0,
+            )],
+        )
+        .await
+        .unwrap();
+
         // Project privacy collapses two source projects into one DB key. The
         // upsert must add both rows, not let the second overwrite the first.
         let hidden_cfg = TeamConfig {
             member_id: "integration-hidden".into(),
+            legacy_member_id: "integration-hidden-v1".into(),
             display_name: "Hidden Projects".into(),
             share_project: false,
             share_account: false,
@@ -961,6 +1244,37 @@ mod integration_tests {
         .await
         .unwrap();
 
+        // Simulate the still-running old client uploading after v3. Its original
+        // ON CONFLICT target must work against the restored legacy primary key.
+        let mut conn = connect(&cfg).await.unwrap();
+        migrate(&mut conn.client).await.unwrap();
+        conn.client
+            .execute(
+                "INSERT INTO usage_daily(
+                   member_id, day, project, model, tokens, cost
+                 ) VALUES('legacy-teammate',$1,'legacy-project','claude-fable-5',80,8)
+                 ON CONFLICT (member_id, day, project, model)
+                 DO UPDATE SET tokens=excluded.tokens, cost=excluded.cost",
+                &[&NaiveDate::parse_from_str(&day, "%Y-%m-%d").unwrap()],
+            )
+            .await
+            .unwrap();
+        let compatibility_tokens: i64 = conn
+            .client
+            .query_one(
+                "SELECT COALESCE(SUM(tokens), 0)::bigint AS tokens
+                 FROM usage_daily WHERE member_id=$1",
+                &[&cfg.member_id],
+            )
+            .await
+            .unwrap()
+            .get("tokens");
+        assert_eq!(
+            compatibility_tokens, 300,
+            "the v1 compatibility mirror must collapse v2 account rows"
+        );
+        drop(conn);
+
         let report = fetch(&cfg, "day").await.unwrap();
         let member = report
             .members
@@ -968,8 +1282,33 @@ mod integration_tests {
             .find(|m| m.member_id == cfg.member_id)
             .unwrap();
         assert_eq!(member.tokens, 300);
+        assert!(!member.is_legacy);
         assert_eq!(member.by_account.len(), 2);
-        assert_eq!(report.accounts.len(), 2);
+        assert_eq!(report.accounts.len(), 3);
+        assert!(report
+            .members
+            .iter()
+            .any(|m| m.member_id == "legacy-teammate" && m.is_legacy && m.tokens == 80));
+        assert!(report.members.iter().any(|m| {
+            m.member_id == "preexisting-v2"
+                && !m.is_legacy
+                && m.tokens == 40
+                && m.by_account
+                    .iter()
+                    .any(|a| a.account_key == "migrated-account")
+        }));
+        assert!(!report
+            .members
+            .iter()
+            .any(|m| m.member_id == "integration-member-v1"));
+        assert!(report
+            .members
+            .iter()
+            .any(|m| m.member_id == recovered_cfg.member_id && !m.is_legacy));
+        assert!(!report
+            .members
+            .iter()
+            .any(|m| m.member_id == "lost-legacy-id"));
 
         let hidden = report
             .members

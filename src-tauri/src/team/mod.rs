@@ -83,6 +83,11 @@ pub struct TeamConfig {
     /// sharing one subscription account remain distinct team members.
     #[serde(default)]
     pub identity_version: u32,
+    /// The email/hostname-derived id used by v1. Stored only to suppress this
+    /// installation's superseded legacy row without hiding teammates who are
+    /// still uploading from an older client.
+    #[serde(default)]
+    pub legacy_member_id: String,
     #[serde(default)]
     pub display_name: String,
     #[serde(default = "default_true")]
@@ -122,6 +127,7 @@ impl Default for TeamConfig {
             team_name: String::new(),
             member_id: new_member_id(),
             identity_version: current_identity_version(),
+            legacy_member_id: String::new(),
             display_name: String::new(),
             share_tokens: true,
             share_cost: true,
@@ -142,6 +148,10 @@ impl TeamConfig {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         if config.identity_version < current_identity_version() {
+            // Preserve the v1 identity before replacing it. The DB uses this
+            // alias to hide only the row this installation superseded; other
+            // v1 teammates remain visible during a rolling upgrade.
+            config.legacy_member_id = config.member_id.clone();
             config.member_id = new_member_id();
             config.identity_version = current_identity_version();
             let _ = config.save();
@@ -189,6 +199,9 @@ impl TeamConfig {
         if self.member_id.trim().is_empty() {
             self.member_id = new_member_id();
         }
+        if self.legacy_member_id.trim().is_empty() {
+            self.legacy_member_id = derive_legacy_member_id(email);
+        }
         self.identity_version = current_identity_version();
         if self.display_name.trim().is_empty() {
             self.display_name = email
@@ -228,6 +241,29 @@ fn restrict_file_permissions(_path: &std::path::Path) {}
 
 fn new_member_id() -> String {
     format!("member-{}", uuid::Uuid::new_v4())
+}
+
+/// Reproduce the v1 identity exactly so a v2 installation can mark its own
+/// legacy row as superseded. This is not used as the current member id.
+fn derive_legacy_member_id(email: Option<&str>) -> String {
+    let base = email.map(str::to_string).unwrap_or_else(hostname);
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in base.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = out.trim_matches('-');
+    if slug.is_empty() {
+        "member".to_string()
+    } else {
+        slug.to_string()
+    }
 }
 
 pub fn shared_account_label(cfg: &TeamConfig, label: &str) -> String {
@@ -343,6 +379,14 @@ mod tests {
         assert_eq!(a.identity_version, 2);
         assert!(a.member_id.starts_with("member-"));
         assert_ne!(a.member_id, b.member_id);
+    }
+
+    #[test]
+    fn legacy_identity_matches_v1_slug() {
+        assert_eq!(
+            derive_legacy_member_id(Some("Jane.Doe+Team@Corp.com")),
+            "jane-doe-team-corp-com"
+        );
     }
 
     #[test]

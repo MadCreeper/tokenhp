@@ -47,7 +47,7 @@ Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 - **This machine vs other devices** — your subscription is account-wide, but the Live bars *estimate* how much of each window **this** machine is using vs everything else (another laptop, claude.ai, the mobile app), shown as a dimmed "ghost" split on the bar plus a `This machine ~28% · Others ~12%` line. It fits the relationship between account-wide utilization and this machine's local cost (both Claude and Codex meter by model-weighted cost); an optional **Only Device Here** tray toggle calibrates it. Hidden until the fit is confident. How it works + how fast it converges: [docs/usage-fitting.md](docs/usage-fitting.md).
 - **Quota alerts** — an opt-out native notification the first time a window goes low / critical (toggle in the tray menu).
 - **Local activity** — per-model token + cost breakdown from local Claude Code, Codex, and OpenClaw session logs over 24h / 7d / 30d, plus a **top-projects** breakdown (which repo ate your tokens) in the pooled "All" view.
-- **Opt-in Team billing view** — share aggregate usage through your own SSH-accessible Postgres. Each installation remains a distinct member even when people share a login; the **犯罪记录 / Crime records** drill-down shows member → account → model usage and bill-split percentages. Account labels can be masked, fully shown, or hidden.
+- **Opt-in Team billing view** — share aggregate usage through your own SSH-accessible Postgres. Each installation remains a distinct member even when people share a login; the **犯罪记录 / Crime records** drill-down shows member → account → model usage and bill-split percentages. Account labels can be masked, fully shown, or hidden. Rolling upgrades keep legacy members visible (clearly marked, without pretending their old logs have account attribution) until they upgrade.
 - **Three switchable themes**, remembered across launches:
   | Theme | Live quota | Local activity |
   |-------|-----------|----------------|
@@ -212,7 +212,7 @@ Three themes complete and verified on macOS; Linux/Windows bundles build in CI. 
 - **本机 vs 其他设备**：订阅是全账号共享的，但「实时额度」会*估算*每个窗口里有多少是**本机**用掉的，相对其他来源（另一台电脑、claude.ai、手机 App），在血条上以暗色「虚影」分段显示，并附一行 `本机 ~28% · 其他 ~12%`。原理是拟合「全账号用量」与「本机花费」的关系（Claude 与 Codex 都按模型加权的 token 成本计量）；托盘里可选的 **仅此设备** 开关用于校准。拟合不够确定时自动隐藏。
 - **额度提醒（Quota alerts）**：窗口首次进入「偏低 / 临界」时弹一条系统通知（默认开启，托盘菜单可关）。
 - **本地活动（Local activity）**：从本地 Claude Code、Codex 与 OpenClaw 会话日志统计每个模型的 token 用量与估算花费，支持 24 小时 / 7 天 / 30 天；在汇总的「All」视图下还会按**项目排名**（「哪个仓库吃了我的 token」）。
-- **可选 Team 分账**：通过你自己的 SSH + Postgres 同步汇总数据。即便多人共用登录，每个安装仍是独立成员；「**犯罪记录**」下钻展示成员 → 账号 → 模型明细与分摊比例，账号标签可选掩码、完整或隐藏。
+- **可选 Team 分账**：通过你自己的 SSH + Postgres 同步汇总数据。即便多人共用登录，每个安装仍是独立成员；「**犯罪记录**」下钻展示成员 → 账号 → 模型明细与分摊比例，账号标签可选掩码、完整或隐藏。滚动升级期间仍显示旧版成员并明确标记，但不会假装旧日志具有不存在的账号归属。
 - **三种可切换主题**（自动记住上次选择）：
   | 主题 | 实时额度 | 本地活动 |
   |------|---------|---------|

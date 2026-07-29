@@ -115,7 +115,17 @@ is generated per installation and is not derived from the shared login, so two
 people using one account remain separate members. Account labels default to a
 masked email when account sharing is enabled; settings can choose full, masked,
 or hidden. Account sharing itself defaults off. Turning it off suppresses both
-labels and stable account/billing hashes.
+labels and stable account/billing hashes. Saving a changed sharing scope pushes
+a replacement snapshot immediately, so an earlier privacy choice does not leave
+stale `Hidden account` rows in the UI.
+
+During a rolling upgrade, v1 members remain visible with a legacy marker and
+continue using the original aggregate table. Their model totals are available,
+but account-level splitting is deliberately unavailable because v1 never
+recorded account attribution. v2 keeps account-aware rows separately and writes
+a collapsed compatibility mirror for old clients. Once a v2 installation names
+its v1 predecessor, the new UI suppresses that predecessor row to avoid counting
+the same backfilled history twice.
 
 ---
 

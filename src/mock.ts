@@ -87,6 +87,7 @@ export const MOCK_TEAM_CONFIG: TeamConfig = {
   team_name: "Rhodes Island",
   member_id: "member-eyja",
   identity_version: 2,
+  legacy_member_id: "eyja-example-com",
   display_name: "Eyja",
   share_tokens: true,
   share_cost: true,
@@ -103,7 +104,7 @@ export const MOCK_TEAM: TeamReport = {
   range: "week",
   generated_at: new Date().toISOString(),
   models: [
-    { id: "claude-fable-5", display_name: "Fable 5", tokens: 680_000_000 },
+    { id: "claude-fable-5", display_name: "Fable 5", tokens: 760_000_000 },
     { id: "gpt-5.6-terra", display_name: "GPT-5.6 Terra", tokens: 120_000_000 },
   ],
   accounts: [
@@ -132,6 +133,8 @@ export const MOCK_TEAM: TeamReport = {
   members: [
     {
       member_id: "member-eyja",
+      identity_version: 2,
+      is_legacy: false,
       display_name: "Eyja",
       tokens: 500_000_000,
       cost: 83,
@@ -185,6 +188,8 @@ export const MOCK_TEAM: TeamReport = {
     },
     {
       member_id: "member-amiya",
+      identity_version: 2,
+      is_legacy: false,
       display_name: "Amiya",
       tokens: 300_000_000,
       cost: 32,
@@ -220,6 +225,36 @@ export const MOCK_TEAM: TeamReport = {
           cost: 1,
           by_model: [
             { model: "gpt-5.6-terra", display_name: "GPT-5.6 Terra", tokens: 20_000_000, cost: 1 },
+          ],
+        },
+      ],
+    },
+    {
+      member_id: "kal-tsit-example-com",
+      identity_version: 1,
+      is_legacy: true,
+      display_name: "Kal'tsit",
+      tokens: 80_000_000,
+      cost: 12,
+      current_project: "legacy-client",
+      last_seen_secs: 180,
+      is_stale: false,
+      is_self: false,
+      by_model: [
+        { model: "claude-fable-5", display_name: "Fable 5", tokens: 80_000_000, cost: 12 },
+      ],
+      by_project: [{ project: "legacy-client", tokens: 80_000_000, cost: 12 }],
+      by_account: [
+        {
+          provider: "claude",
+          account_key: "unknown",
+          billing_key: "unknown",
+          account_label: "Unknown account",
+          attribution_status: "unknown",
+          tokens: 80_000_000,
+          cost: 12,
+          by_model: [
+            { model: "claude-fable-5", display_name: "Fable 5", tokens: 80_000_000, cost: 12 },
           ],
         },
       ],

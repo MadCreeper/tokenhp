@@ -106,6 +106,7 @@ export interface TeamConfig {
   team_name: string;
   member_id: string;
   identity_version: number;
+  legacy_member_id: string;
   display_name: string;
   share_tokens: boolean;
   share_cost: boolean;
@@ -147,6 +148,8 @@ export interface TeamAccountUsage {
 /** Mirrors `team::db::MemberView` — one leaderboard row. */
 export interface MemberView {
   member_id: string;
+  identity_version: number;
+  is_legacy: boolean;
   display_name: string;
   tokens: number; // total across all models
   cost: number;
