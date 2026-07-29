@@ -73,6 +73,15 @@ struct AccountHistory {
     epochs: Vec<AccountEpoch>,
 }
 
+/// Immutable account-history view used while scanning a batch of local usage.
+///
+/// Loading the JSON history once per scan avoids re-locking, re-reading and
+/// re-parsing it for every token event in a Team backfill.
+#[derive(Clone, Debug, Default)]
+pub struct AttributionSnapshot {
+    epochs: Vec<AccountEpoch>,
+}
+
 impl Default for AccountHistory {
     fn default() -> Self {
         AccountHistory {
@@ -210,28 +219,35 @@ pub fn observe_current_accounts() {
     });
 }
 
-pub fn attribution(provider: &str, timestamp: i64) -> UsageAttribution {
+/// Load a stable account-history view for one local-usage scan.
+pub fn attribution_snapshot() -> AttributionSnapshot {
     let _guard = HISTORY_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let history = load_history();
-    history
-        .epochs
-        .iter()
-        .rev()
-        .find(|e| {
-            e.provider == provider
-                && timestamp >= e.starts_at
-                && e.ends_at.map_or(true, |end| timestamp <= end)
-        })
-        .map(|e| UsageAttribution {
-            account_key: e.account_key.clone(),
-            billing_key: e.billing_key.clone(),
-            account_label: e.label.clone(),
-            status: "exact".into(),
-        })
-        .unwrap_or_else(UsageAttribution::unknown)
+    AttributionSnapshot {
+        epochs: load_history().epochs,
+    }
+}
+
+impl AttributionSnapshot {
+    pub fn attribution(&self, provider: &str, timestamp: i64) -> UsageAttribution {
+        self.epochs
+            .iter()
+            .rev()
+            .find(|e| {
+                e.provider == provider
+                    && timestamp >= e.starts_at
+                    && e.ends_at.map_or(true, |end| timestamp <= end)
+            })
+            .map(|e| UsageAttribution {
+                account_key: e.account_key.clone(),
+                billing_key: e.billing_key.clone(),
+                account_label: e.label.clone(),
+                status: "exact".into(),
+            })
+            .unwrap_or_else(UsageAttribution::unknown)
+    }
 }
 
 fn observe_identity(
@@ -531,5 +547,43 @@ mod tests {
         assert_eq!(history.epochs.len(), 2);
         assert_eq!(history.epochs[0].ends_at, Some(130));
         assert_eq!(history.epochs[1].starts_at, 160);
+    }
+
+    #[test]
+    fn attribution_snapshot_preserves_epoch_boundaries_and_provider_scope() {
+        let snapshot = AttributionSnapshot {
+            epochs: vec![
+                AccountEpoch {
+                    provider: "claude".into(),
+                    account_key: "claude-a".into(),
+                    billing_key: "billing-a".into(),
+                    label: "a@example.com".into(),
+                    starts_at: 100,
+                    last_seen_at: 130,
+                    ends_at: Some(130),
+                },
+                AccountEpoch {
+                    provider: "codex".into(),
+                    account_key: "codex-b".into(),
+                    billing_key: "billing-b".into(),
+                    label: "b@example.com".into(),
+                    starts_at: 120,
+                    last_seen_at: 180,
+                    ends_at: None,
+                },
+            ],
+        };
+
+        let claude = snapshot.attribution("claude", 130);
+        assert_eq!(claude.account_key, "claude-a");
+        assert_eq!(claude.status, "exact");
+
+        let gap = snapshot.attribution("claude", 131);
+        assert_eq!(gap.account_key, "unknown");
+        assert_eq!(gap.status, "unknown");
+
+        let codex = snapshot.attribution("codex", 180);
+        assert_eq!(codex.account_key, "codex-b");
+        assert_eq!(codex.account_label, "b@example.com");
     }
 }
