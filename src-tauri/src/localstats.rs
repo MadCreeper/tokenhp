@@ -30,6 +30,10 @@ pub struct ModelUsageDTO {
     pub output: i64,
     pub cache_read: i64,
     pub cache_create: i64,
+    /// Tokens reported by a tool without a component breakdown. Normally zero,
+    /// but keeping the bucket prevents a provider's authoritative total from
+    /// disappearing merely because an older client omitted the split.
+    pub unattributed: i64,
     pub total: i64,
     /// Largest single bucket; breakdown bars fill proportionally to this.
     pub max_component: i64,
@@ -49,36 +53,15 @@ pub fn collect(window_secs: i64) -> Vec<ModelUsageDTO> {
     let now = Utc::now().timestamp();
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
-    for file in files {
-        let Ok(text) = std::fs::read_to_string(&file) else {
+    for event in collect_events(&files) {
+        let age = now - event.ts;
+        if age < 0 || age >= window_secs {
             continue;
-        };
-        for line in text.lines() {
-            // Cheap substring check skips the ~half of lines that aren't
-            // assistant messages before we pay for JSON parsing.
-            if !line.contains(ASSISTANT_MARKER) {
-                continue;
-            }
-            let Ok(row) = serde_json::from_str::<Row>(line) else {
-                continue;
-            };
-            if row.r#type.as_deref() != Some("assistant") {
-                continue;
-            }
-            let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
-                continue;
-            };
-            let age = now - ts;
-            if age < 0 || age >= window_secs {
-                continue;
-            }
-            let Some(msg) = row.message else { continue };
-            let Some(model) = msg.model else { continue };
-            if model.starts_with('<') {
-                continue; // skip placeholder ids like "<synthetic>"
-            }
-            totals.entry(model).or_default().add(msg.usage.as_ref());
         }
+        totals
+            .entry(event.model)
+            .or_default()
+            .add_totals(event.usage);
     }
 
     let pricing = Pricing::loaded();
@@ -111,6 +94,7 @@ pub fn collect(window_secs: i64) -> Vec<ModelUsageDTO> {
                 output: t.output,
                 cache_read: t.cache_read,
                 cache_create,
+                unattributed: 0,
                 total,
                 max_component,
                 cost,
@@ -143,44 +127,16 @@ pub fn collect_by_project(window_secs: i64) -> Vec<ProjectUsageDTO> {
     // project -> (model -> token totals) so each model prices at its own rate.
     let mut acc: HashMap<String, HashMap<String, Totals>> = HashMap::new();
 
-    for file in files {
-        let fallback = encoded_dir_name(&file);
-        let Ok(text) = std::fs::read_to_string(&file) else {
+    for event in collect_events(&files) {
+        let age = now - event.ts;
+        if age < 0 || age >= window_secs {
             continue;
-        };
-        for line in text.lines() {
-            if !line.contains(ASSISTANT_MARKER) {
-                continue;
-            }
-            let Ok(row) = serde_json::from_str::<Row>(line) else {
-                continue;
-            };
-            if row.r#type.as_deref() != Some("assistant") {
-                continue;
-            }
-            let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
-                continue;
-            };
-            let age = now - ts;
-            if age < 0 || age >= window_secs {
-                continue;
-            }
-            let project = row
-                .cwd
-                .as_deref()
-                .map(project_name)
-                .unwrap_or_else(|| fallback.clone());
-            let Some(msg) = row.message else { continue };
-            let Some(model) = msg.model else { continue };
-            if model.starts_with('<') {
-                continue;
-            }
-            acc.entry(project)
-                .or_default()
-                .entry(model)
-                .or_default()
-                .add(msg.usage.as_ref());
         }
+        acc.entry(event.project)
+            .or_default()
+            .entry(event.model)
+            .or_default()
+            .add_totals(event.usage);
     }
 
     let pricing = Pricing::loaded();
@@ -214,7 +170,7 @@ pub fn collect_by_project(window_secs: i64) -> Vec<ProjectUsageDTO> {
     out
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Totals {
     input: i64,
     output: i64,
@@ -249,6 +205,14 @@ impl Totals {
             self.cache_create_1h += cc1;
         }
     }
+
+    fn add_totals(&mut self, other: Totals) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_create_5m += other.cache_create_5m;
+        self.cache_create_1h += other.cache_create_1h;
+    }
 }
 
 #[derive(Deserialize)]
@@ -258,11 +222,14 @@ struct Row {
     /// Working directory the session ran in, e.g. "/Users/me/projects/app".
     /// Present on assistant rows; its final component is the project name.
     cwd: Option<String>,
+    /// Fallback event key for rare rows whose nested API message lacks an id.
+    uuid: Option<String>,
     message: Option<Message>,
 }
 
 #[derive(Deserialize)]
 struct Message {
+    id: Option<String>,
     model: Option<String>,
     usage: Option<Usage>,
 }
@@ -280,6 +247,74 @@ struct Usage {
 struct CacheCreation {
     ephemeral_5m_input_tokens: Option<i64>,
     ephemeral_1h_input_tokens: Option<i64>,
+}
+
+#[derive(Clone)]
+struct ClaudeEvent {
+    ts: i64,
+    project: String,
+    model: String,
+    usage: Totals,
+}
+
+/// Claude Code writes multiple assistant rows for one API message while the
+/// response is progressing. Every row repeats (and occasionally updates) the
+/// same cumulative `message.usage`; summing the rows double-counts it. Keep the
+/// final row per message id within each transcript.
+fn collect_events(files: &[PathBuf]) -> Vec<ClaudeEvent> {
+    let mut out = Vec::new();
+    for file in files {
+        let fallback = encoded_dir_name(file);
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        out.extend(parse_events(&text, &fallback));
+    }
+    out
+}
+
+fn parse_events(text: &str, fallback_project: &str) -> Vec<ClaudeEvent> {
+    let mut final_by_message: HashMap<String, ClaudeEvent> = HashMap::new();
+    for (line_no, line) in text.lines().enumerate() {
+        if !line.contains(ASSISTANT_MARKER) {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<Row>(line) else {
+            continue;
+        };
+        if row.r#type.as_deref() != Some("assistant") {
+            continue;
+        }
+        let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
+            continue;
+        };
+        let project = row
+            .cwd
+            .as_deref()
+            .map(project_name)
+            .unwrap_or_else(|| fallback_project.to_string());
+        let Some(msg) = row.message else { continue };
+        let Some(model) = msg.model else { continue };
+        if model.starts_with('<') || msg.usage.is_none() {
+            continue;
+        }
+        let key = msg
+            .id
+            .or(row.uuid)
+            .unwrap_or_else(|| format!("anonymous-{line_no}"));
+        let mut usage = Totals::default();
+        usage.add(msg.usage.as_ref());
+        final_by_message.insert(
+            key,
+            ClaudeEvent {
+                ts,
+                project,
+                model,
+                usage,
+            },
+        );
+    }
+    final_by_message.into_values().collect()
 }
 
 /// Recursively collect every `*.jsonl` under `dir`.
@@ -304,7 +339,9 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn parse_ts(s: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
 }
 
 // ----------------------------------------------------------------- per-day
@@ -317,12 +354,18 @@ fn parse_ts(s: &str) -> Option<i64> {
 #[derive(Clone)]
 pub struct UsageRow {
     pub day: String, // YYYY-MM-DD (UTC)
+    pub provider: String,
+    pub account_key: String,
+    pub billing_key: String,
+    pub account_label: String,
+    pub attribution_status: String,
     pub project: String,
     pub model: String,
     pub input: i64,
     pub output: i64,
     pub cache_read: i64,
     pub cache_create: i64,
+    pub unattributed: i64,
     pub tokens: i64,
     pub cost: f64,
     /// Unix seconds of the latest activity in this (day, project) — drives
@@ -346,52 +389,41 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
         .unwrap_or_default();
     let files = session_files(&projects_dir);
 
-    // (day, project) -> per-model token buckets + latest activity.
-    let mut acc: HashMap<(String, String), ProjAcc> = HashMap::new();
+    // Keep account in the aggregation key: one person can use several logins in
+    // the same project/model/day, and Team billing must not merge them.
+    let mut acc: HashMap<(String, String, String, String, String, String), ProjAcc> =
+        HashMap::new();
 
-    for file in files {
-        let fallback = encoded_dir_name(&file);
-        let Ok(text) = std::fs::read_to_string(&file) else {
+    for event in collect_events(&files) {
+        let Some(day) = day_string(event.ts) else {
             continue;
         };
-        for line in text.lines() {
-            if !line.contains(ASSISTANT_MARKER) {
-                continue;
-            }
-            let Ok(row) = serde_json::from_str::<Row>(line) else {
-                continue;
-            };
-            if row.r#type.as_deref() != Some("assistant") {
-                continue;
-            }
-            let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
-                continue;
-            };
-            let Some(day) = day_string(ts) else { continue };
-            if day.as_str() < start_day || day.as_str() > end_day {
-                continue;
-            }
-            let project = row
-                .cwd
-                .as_deref()
-                .map(project_name)
-                .unwrap_or_else(|| fallback.clone());
-            let Some(msg) = row.message else { continue };
-            let Some(model) = msg.model else { continue };
-            if model.starts_with('<') {
-                continue;
-            }
-            let e = acc.entry((day, project)).or_default();
-            e.models.entry(model).or_default().add(msg.usage.as_ref());
-            if ts > e.last_active {
-                e.last_active = ts;
-            }
+        if day.as_str() < start_day || day.as_str() > end_day {
+            continue;
+        }
+        let attribution = crate::account::attribution("claude", event.ts);
+        let e = acc
+            .entry((
+                day,
+                event.project,
+                attribution.account_key,
+                attribution.billing_key,
+                attribution.account_label,
+                attribution.status,
+            ))
+            .or_default();
+        e.models
+            .entry(event.model)
+            .or_default()
+            .add_totals(event.usage);
+        if event.ts > e.last_active {
+            e.last_active = event.ts;
         }
     }
 
     let pricing = Pricing::loaded();
     let mut rows: Vec<UsageRow> = Vec::new();
-    for ((day, project), pa) in acc {
+    for ((day, project, account_key, billing_key, account_label, attribution_status), pa) in acc {
         let last_active = pa.last_active;
         for (model, t) in pa.models {
             let cache_create = t.cache_create_5m + t.cache_create_1h;
@@ -409,12 +441,18 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
                 .unwrap_or(0.0);
             rows.push(UsageRow {
                 day: day.clone(),
+                provider: "claude".into(),
+                account_key: account_key.clone(),
+                billing_key: billing_key.clone(),
+                account_label: account_label.clone(),
+                attribution_status: attribution_status.clone(),
                 project: project.clone(),
                 model,
                 input: t.input,
                 output: t.output,
                 cache_read: t.cache_read,
                 cache_create,
+                unattributed: 0,
                 tokens,
                 cost,
                 last_active,
@@ -449,7 +487,13 @@ fn encoded_dir_name(file: &Path) -> String {
     file.parent()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
-        .map(|s| s.trim_start_matches('-').rsplit('-').next().unwrap_or(s).to_string())
+        .map(|s| {
+            s.trim_start_matches('-')
+                .rsplit('-')
+                .next()
+                .unwrap_or(s)
+                .to_string()
+        })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -523,5 +567,25 @@ mod tests {
         assert_eq!(project_name("solo"), "solo");
         assert_eq!(project_name("/"), "unknown");
         assert_eq!(project_name(""), "unknown");
+    }
+
+    #[test]
+    fn repeated_assistant_rows_keep_final_usage_only() {
+        let text = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-28T00:00:00Z\",\"cwd\":\"/tmp/app\",",
+            "\"message\":{\"id\":\"msg_1\",\"model\":\"claude-fable-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-28T00:00:01Z\",\"cwd\":\"/tmp/app\",",
+            "\"message\":{\"id\":\"msg_1\",\"model\":\"claude-fable-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":7}}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-28T00:00:02Z\",\"cwd\":\"/tmp/app\",",
+            "\"message\":{\"id\":\"msg_2\",\"model\":\"claude-fable-5\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n",
+        );
+        let events = parse_events(text, "fallback");
+        assert_eq!(events.len(), 2);
+        let totals = events.iter().fold(Totals::default(), |mut acc, e| {
+            acc.add_totals(e.usage);
+            acc
+        });
+        assert_eq!(totals.input, 13);
+        assert_eq!(totals.output, 8);
     }
 }

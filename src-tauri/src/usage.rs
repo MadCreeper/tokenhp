@@ -30,6 +30,9 @@ pub struct UsageWindow {
     /// RFC3339 reset timestamp, if known.
     pub resets_at: Option<String>,
     pub title: String,
+    /// Provider-reported window length. The burn estimator uses this to choose
+    /// an appropriate lookback instead of assuming every limit is five hours.
+    pub window_minutes: Option<i64>,
     /// Optional trailing badge (e.g. "Off" for disabled extra usage).
     pub trailing: Option<String>,
     /// Projected seconds until this window hits its limit at the recent burn
@@ -51,9 +54,16 @@ pub struct UsageWindow {
 }
 
 #[derive(Serialize, Clone, Debug)]
+pub struct UsageDetail {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct UsageReport {
     pub windows: Vec<UsageWindow>,
     pub source_label: String,
+    pub details: Vec<UsageDetail>,
 }
 
 #[derive(Debug)]
@@ -70,10 +80,9 @@ pub enum FetchError {
 impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FetchError::TokenExpired | FetchError::Unauthorized => write!(
-                f,
-                "Login expired. Open Claude Code to refresh, then retry."
-            ),
+            FetchError::TokenExpired | FetchError::Unauthorized => {
+                write!(f, "Login expired. Open Claude Code to refresh, then retry.")
+            }
             FetchError::RateLimited => write!(f, "Rate limited by Anthropic. Try again shortly."),
             FetchError::Server(code) => write!(f, "Usage endpoint returned HTTP {code}."),
             FetchError::Network(e) => write!(f, "Network error: {e}"),
@@ -101,7 +110,10 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
         .map_err(|e| FetchError::Network(e.to_string()))?;
     let resp = client
         .get(USAGE_URL)
-        .header("Authorization", format!("Bearer {}", credentials.access_token))
+        .header(
+            "Authorization",
+            format!("Bearer {}", credentials.access_token),
+        )
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("User-Agent", format!("claude-code/{CLAUDE_CODE_VERSION}"))
         .header("Content-Type", "application/json")
@@ -128,6 +140,7 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
     Ok(UsageReport {
         windows: payload.into_windows(),
         source_label: "Live quota".into(),
+        details: Vec::new(),
     })
 }
 
@@ -186,6 +199,7 @@ impl Payload {
                 remaining: clamp01(1.0 - util),
                 resets_at: l.resets_at,
                 title: scoped_weekly_title(&name),
+                window_minutes: Some(10_080),
                 trailing: None,
                 eta_secs: None,
                 machine_share: None,
@@ -235,6 +249,11 @@ impl Window {
             remaining: clamp01(1.0 - util),
             resets_at: self.resets_at,
             title: title.into(),
+            window_minutes: match title {
+                "5-Hour" => Some(300),
+                "Weekly" => Some(10_080),
+                _ => None,
+            },
             trailing: None,
             eta_secs: None,
             machine_share: None,
@@ -265,6 +284,7 @@ impl Extra {
             remaining: clamp01(1.0 - util),
             resets_at: None,
             title: title.into(),
+            window_minutes: None,
             trailing: None,
             eta_secs: None,
             machine_share: None,
@@ -276,7 +296,7 @@ impl Extra {
 }
 
 fn clamp01(v: f64) -> f64 {
-    v.max(0.0).min(1.0)
+    v.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -312,7 +332,10 @@ mod tests {
         let fable = &windows[2];
         assert!((fable.utilization - 0.03).abs() < 1e-9);
         assert!((fable.remaining - 0.97).abs() < 1e-9);
-        assert_eq!(fable.resets_at.as_deref(), Some("2026-07-29T14:59:59+00:00"));
+        assert_eq!(
+            fable.resets_at.as_deref(),
+            Some("2026-07-29T14:59:59+00:00")
+        );
         assert!(is_model_scoped_title(&fable.title));
         assert!(!is_model_scoped_title("Weekly"));
     }

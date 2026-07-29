@@ -184,6 +184,7 @@ fn merge_into(pool: &mut HashMap<String, ModelUsageDTO>, m: &ModelUsageDTO) {
         output: 0,
         cache_read: 0,
         cache_create: 0,
+        unattributed: 0,
         total: 0,
         max_component: 0,
         cost: None,
@@ -192,8 +193,14 @@ fn merge_into(pool: &mut HashMap<String, ModelUsageDTO>, m: &ModelUsageDTO) {
     e.output += m.output;
     e.cache_read += m.cache_read;
     e.cache_create += m.cache_create;
-    e.total = e.input + e.output + e.cache_read + e.cache_create;
-    e.max_component = e.input.max(e.output).max(e.cache_read).max(e.cache_create);
+    e.unattributed += m.unattributed;
+    e.total = e.input + e.output + e.cache_read + e.cache_create + e.unattributed;
+    e.max_component = e
+        .input
+        .max(e.output)
+        .max(e.cache_read)
+        .max(e.cache_create)
+        .max(e.unattributed);
     if let Some(c) = &m.cost {
         let acc = e.cost.get_or_insert(ModelCostDTO {
             input: 0.0,

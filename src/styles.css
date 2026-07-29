@@ -1035,6 +1035,16 @@ html.glass.blurred body.theme-classic .header {
   padding-top: 6px;
   text-align: center;
 }
+.footer.footer-compact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+}
+.footer.footer-compact .updated {
+  flex: none;
+}
 .theme-classic .footer {
   border-top: 1px solid #d4d4da;
 }
@@ -1062,6 +1072,42 @@ html.glass.blurred body.theme-classic .header {
 .team-models {
   margin: 8px 0 2px;
 }
+.team-view-tools {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0 2px;
+}
+.team-view-tools .team-models {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+.crime-toggle {
+  flex: none;
+  white-space: nowrap;
+}
+.account-cycle {
+  min-width: 0;
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-notice {
+  margin-top: 7px;
+  padding: 6px 8px;
+  border-left: 2px solid #c78500;
+  background: rgba(199, 133, 0, 0.08);
+  color: var(--panel-text-dim);
+  font-size: 8.5px;
+  line-height: 1.35;
+}
+.theme-classic .team-notice,
+.theme-arknights .team-notice {
+  font-size: 10px;
+}
 .team-list {
   display: flex;
   flex-direction: column;
@@ -1073,6 +1119,86 @@ html.glass.blurred body.theme-classic .header {
 }
 .team-row.team-stale {
   opacity: 0.5;
+}
+/* --- Optional member → account → model "犯罪记录" ledger --- */
+.crime-records {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 7px 0 2px 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--bevel-shadow);
+}
+.theme-classic .crime-records,
+.theme-arknights .crime-records {
+  border-left-color: #c4c4c4;
+}
+.crime-account {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.crime-account-head,
+.crime-model {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.crime-account-head {
+  font-size: 9px;
+  color: var(--panel-text);
+}
+.crime-model {
+  padding-left: 9px;
+  font-size: 8px;
+  color: var(--panel-text-dim);
+}
+.theme-classic .crime-account-head,
+.theme-arknights .crime-account-head {
+  font-size: 11px;
+}
+.theme-classic .crime-model,
+.theme-arknights .crime-model {
+  font-size: 10px;
+}
+.crime-account-head span:first-child,
+.crime-model span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crime-account-head span:last-child,
+.crime-model span:last-child {
+  flex: none;
+}
+.crime-unknown {
+  opacity: 0.62;
+}
+.quota-details {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 9px;
+  padding: 7px 9px;
+  border: 1px solid var(--bevel-shadow);
+  color: var(--panel-text-dim);
+}
+.quota-detail {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.theme-classic .quota-details,
+.theme-arknights .quota-details {
+  border-color: #c4c4c4;
+}
+.theme-classic .quota-detail,
+.theme-arknights .quota-detail {
+  font-size: 11px;
 }
 /* --- Expanded top-projects list --- */
 .team-projects {

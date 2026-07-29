@@ -32,11 +32,11 @@ fn stale_secs(range: &str) -> i64 {
     }
 }
 /// Arbitrary key so concurrent migrators serialize via `pg_advisory_xact_lock`.
-const MIGRATE_LOCK: i64 = 0x4850_4241_52; // "HPBAR"
+const MIGRATE_LOCK: i64 = 0x0048_5042_4152; // "HPBAR"
 
 /// Ordered schema migrations. To evolve the schema later, append a new
 /// `(version, sql)` entry — it runs once on the next connect.
-const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_V1)];
+const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)];
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS members (
@@ -65,7 +65,140 @@ CREATE INDEX IF NOT EXISTS usage_daily_day_idx ON usage_daily(day);
 CREATE TABLE IF NOT EXISTS team_meta (key text PRIMARY KEY, value text);
 ";
 
-// --- report shapes (to the frontend; unchanged from the git version) --------
+const MIGRATION_V2: &str = "
+ALTER TABLE members ADD COLUMN IF NOT EXISTS identity_version int NOT NULL DEFAULT 1;
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT 'claude';
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS account_key text NOT NULL DEFAULT 'unknown';
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS billing_key text NOT NULL DEFAULT 'unknown';
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS account_label text NOT NULL DEFAULT 'Unknown account';
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS attribution_status text NOT NULL DEFAULT 'unknown';
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS unattributed bigint NOT NULL DEFAULT 0;
+ALTER TABLE usage_daily DROP CONSTRAINT IF EXISTS usage_daily_pkey;
+ALTER TABLE usage_daily
+  ADD PRIMARY KEY (member_id, day, provider, account_key, project, model);
+CREATE INDEX IF NOT EXISTS usage_daily_account_idx
+  ON usage_daily(provider, account_key, day);
+";
+
+const MIGRATION_V3: &str = "
+ALTER TABLE members ADD COLUMN IF NOT EXISTS legacy_member_id text;
+CREATE INDEX IF NOT EXISTS members_legacy_member_idx
+  ON members(legacy_member_id) WHERE legacy_member_id IS NOT NULL;
+
+-- Keep the original table writable by v1 clients. Account-aware v2 rows move
+-- into their own table because the two clients require incompatible conflict
+-- keys: v1 is per project/model, v2 is per provider/account/project/model.
+CREATE TABLE IF NOT EXISTS usage_daily_v2 (
+  member_id text NOT NULL REFERENCES members(member_id) ON DELETE CASCADE,
+  day date NOT NULL,
+  provider text NOT NULL,
+  account_key text NOT NULL,
+  billing_key text NOT NULL,
+  account_label text NOT NULL,
+  attribution_status text NOT NULL,
+  project text NOT NULL,
+  model text NOT NULL,
+  input bigint NOT NULL DEFAULT 0,
+  output bigint NOT NULL DEFAULT 0,
+  cache_read bigint NOT NULL DEFAULT 0,
+  cache_create bigint NOT NULL DEFAULT 0,
+  unattributed bigint NOT NULL DEFAULT 0,
+  tokens bigint NOT NULL DEFAULT 0,
+  cost double precision NOT NULL DEFAULT 0,
+  PRIMARY KEY (member_id, day, provider, account_key, project, model)
+);
+CREATE INDEX IF NOT EXISTS usage_daily_v2_day_idx ON usage_daily_v2(day);
+CREATE INDEX IF NOT EXISTS usage_daily_v2_account_idx
+  ON usage_daily_v2(provider, account_key, day);
+
+INSERT INTO usage_daily_v2(
+  member_id, day, provider, account_key, billing_key, account_label,
+  attribution_status, project, model, input, output, cache_read,
+  cache_create, unattributed, tokens, cost
+)
+SELECT
+  u.member_id, u.day, u.provider, u.account_key, u.billing_key,
+  u.account_label, u.attribution_status, u.project, u.model, u.input,
+  u.output, u.cache_read, u.cache_create, u.unattributed, u.tokens, u.cost
+FROM usage_daily u
+JOIN members m ON m.member_id=u.member_id
+WHERE m.identity_version >= 2
+ON CONFLICT (member_id, day, provider, account_key, project, model)
+DO UPDATE SET
+  billing_key=excluded.billing_key,
+  account_label=excluded.account_label,
+  attribution_status=excluded.attribution_status,
+  input=excluded.input,
+  output=excluded.output,
+  cache_read=excluded.cache_read,
+  cache_create=excluded.cache_create,
+  unattributed=excluded.unattributed,
+  tokens=excluded.tokens,
+  cost=excluded.cost;
+
+DELETE FROM usage_daily u
+USING members m
+WHERE m.member_id=u.member_id AND m.identity_version >= 2;
+ALTER TABLE usage_daily DROP CONSTRAINT IF EXISTS usage_daily_pkey;
+ALTER TABLE usage_daily
+  ADD PRIMARY KEY (member_id, day, project, model);
+
+-- A collapsed compatibility mirror lets an old app continue to see v2 members.
+-- New clients ignore these mirror rows and read the precise v2 table instead.
+INSERT INTO usage_daily(
+  member_id, day, project, model, input, output, cache_read, cache_create,
+  unattributed, tokens, cost
+)
+SELECT
+  member_id, day, project, model, SUM(input), SUM(output), SUM(cache_read),
+  SUM(cache_create), SUM(unattributed), SUM(tokens), SUM(cost)
+FROM usage_daily_v2
+GROUP BY member_id, day, project, model
+ON CONFLICT (member_id, day, project, model)
+DO UPDATE SET
+  input=excluded.input,
+  output=excluded.output,
+  cache_read=excluded.cache_read,
+  cache_create=excluded.cache_create,
+  unattributed=excluded.unattributed,
+  tokens=excluded.tokens,
+  cost=excluded.cost;
+";
+
+const USAGE_CTE: &str = "
+WITH readable_usage AS (
+  SELECT
+    member_id, day, provider, account_key, billing_key, account_label,
+    attribution_status, project, model, input, output, cache_read,
+    cache_create, unattributed, tokens, cost
+  FROM usage_daily_v2
+  UNION ALL
+  SELECT
+    u.member_id, u.day, u.provider, u.account_key, u.billing_key,
+    u.account_label, u.attribution_status, u.project, u.model, u.input,
+    u.output, u.cache_read, u.cache_create, u.unattributed, u.tokens, u.cost
+  FROM usage_daily u
+  JOIN members legacy_member ON legacy_member.member_id=u.member_id
+  WHERE legacy_member.identity_version < 2
+)
+";
+
+/// Keep v1 members visible during a rolling upgrade, except once a v2 row
+/// explicitly identifies that v1 id as its predecessor. This avoids showing a
+/// user's backfilled v2 usage alongside the same legacy history while still
+/// allowing teammates on the old app to remain in the roster.
+const VISIBLE_MEMBER: &str = "
+  NOT (
+    m.identity_version < 2
+    AND EXISTS (
+      SELECT 1 FROM members successor
+      WHERE successor.identity_version >= 2
+        AND successor.legacy_member_id = m.member_id
+    )
+  )
+";
+
+// --- report shapes -----------------------------------------------------------
 
 /// One model's usage for a member over the range (for the per-model leaderboard).
 #[derive(Serialize, Clone)]
@@ -84,9 +217,25 @@ pub struct ProjectUsage {
     pub cost: f64,
 }
 
+/// One login account's usage inside a member row. This is the data behind the
+/// optional "Crime records" drill-down and bill split.
+#[derive(Serialize, Clone)]
+pub struct AccountUsage {
+    pub provider: String,
+    pub account_key: String,
+    pub billing_key: String,
+    pub account_label: String,
+    pub attribution_status: String,
+    pub tokens: i64,
+    pub cost: f64,
+    pub by_model: Vec<ModelUsage>,
+}
+
 #[derive(Serialize, Clone)]
 pub struct MemberView {
     pub member_id: String,
+    pub identity_version: i32,
+    pub is_legacy: bool,
     pub display_name: String,
     pub tokens: i64, // total across all models
     pub cost: f64,
@@ -98,6 +247,8 @@ pub struct MemberView {
     pub by_model: Vec<ModelUsage>,
     /// Per-project breakdown (desc by tokens) for the expandable "top projects".
     pub by_project: Vec<ProjectUsage>,
+    /// Per-account → per-model billing detail.
+    pub by_account: Vec<AccountUsage>,
 }
 
 /// A model present in the range, for the dropdown (sorted by team-wide usage).
@@ -109,11 +260,21 @@ pub struct ModelOption {
 }
 
 #[derive(Serialize, Clone)]
+pub struct AccountOption {
+    pub provider: String,
+    pub account_key: String,
+    pub account_label: String,
+    pub tokens: i64,
+    pub cost: f64,
+}
+
+#[derive(Serialize, Clone)]
 pub struct TeamReport {
     pub team_name: String,
     pub range: String,
     pub members: Vec<MemberView>,
     pub models: Vec<ModelOption>,
+    pub accounts: Vec<AccountOption>,
     pub generated_at: String,
 }
 
@@ -128,7 +289,11 @@ pub struct TeamHandshake {
 // --- public operations -------------------------------------------------------
 
 /// Upsert this member's identity and replace their recent usage window.
-pub async fn upload(cfg: &TeamConfig, email: Option<&str>, rows: Vec<UsageRow>) -> Result<(), String> {
+pub async fn upload(
+    cfg: &TeamConfig,
+    email: Option<&str>,
+    rows: Vec<UsageRow>,
+) -> Result<(), String> {
     let mut conn = connect(cfg).await?;
     migrate(&mut conn.client).await?;
     write_member(&mut conn.client, cfg, email, &rows).await
@@ -151,7 +316,11 @@ pub async fn handshake(
     migrate(&mut conn.client).await?;
     write_member(&mut conn.client, cfg, email, &rows).await?;
     let report = read_team(&conn.client, cfg, "day").await?;
-    let members = report.members.iter().map(|m| m.display_name.clone()).collect();
+    let members = report
+        .members
+        .iter()
+        .map(|m| m.display_name.clone())
+        .collect();
     Ok(TeamHandshake {
         ok: true,
         team_name: report.team_name,
@@ -173,7 +342,9 @@ async fn connect(cfg: &TeamConfig) -> Result<Conn, String> {
     // `HPBAR_DB_DIRECT=host:port` skips the tunnel (for local testing).
     let (host, port, tunnel) = match std::env::var("HPBAR_DB_DIRECT").ok() {
         Some(hp) => {
-            let (h, p) = hp.split_once(':').ok_or("HPBAR_DB_DIRECT must be host:port")?;
+            let (h, p) = hp
+                .split_once(':')
+                .ok_or("HPBAR_DB_DIRECT must be host:port")?;
             let port: u16 = p.parse().map_err(|_| "bad HPBAR_DB_DIRECT port")?;
             (h.to_string(), port, None)
         }
@@ -252,13 +423,18 @@ async fn open_tunnel(cfg: &TeamConfig) -> Result<Tunnel, String> {
         Ok(c) => c,
         Err(e) => {
             cleanup_askpass(&askpass);
-            return Err(format!("could not run ssh ({e}); is it installed and on PATH?"));
+            return Err(format!(
+                "could not run ssh ({e}); is it installed and on PATH?"
+            ));
         }
     };
 
     // Wait (≤10s) for the forwarded port to accept connections.
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return Ok(Tunnel {
                 child,
                 port,
@@ -325,7 +501,8 @@ fn write_askpass_helper() -> Result<PathBuf, String> {
     let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     f.write_all(b"#!/bin/sh\nprintf '%s\\n' \"$HPBAR_TUNNEL_PW\"\n")
         .map_err(|e| e.to_string())?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -356,16 +533,16 @@ async fn migrate(client: &mut Client) -> Result<(), String> {
         .await
         .map_err(|e| format!("migrate (init) failed: {e}"))?;
 
-    let tx = client
-        .transaction()
-        .await
-        .map_err(|e| e.to_string())?;
+    let tx = client.transaction().await.map_err(|e| e.to_string())?;
     // Serialize concurrent migrators; auto-released at commit.
     tx.execute("SELECT pg_advisory_xact_lock($1)", &[&MIGRATE_LOCK])
         .await
         .map_err(|e| e.to_string())?;
     let current: i32 = tx
-        .query_one("SELECT COALESCE(MAX(version), 0)::int FROM schema_migrations", &[])
+        .query_one(
+            "SELECT COALESCE(MAX(version), 0)::int FROM schema_migrations",
+            &[],
+        )
         .await
         .map_err(|e| e.to_string())?
         .get(0);
@@ -374,9 +551,12 @@ async fn migrate(client: &mut Client) -> Result<(), String> {
             tx.batch_execute(sql)
                 .await
                 .map_err(|e| format!("migration {version} failed: {e}"))?;
-            tx.execute("INSERT INTO schema_migrations(version) VALUES($1)", &[version])
-                .await
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version) VALUES($1)",
+                &[version],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         }
     }
     tx.commit().await.map_err(|e| e.to_string())
@@ -408,19 +588,65 @@ async fn write_member(
     } else {
         cfg.team_name.clone()
     };
-    let start_date =
-        (Utc::now() - chrono::Duration::days(cfg.backfill_days.max(0))).date_naive();
-    let email_owned = email.map(str::to_string);
+    let start_date = (Utc::now() - chrono::Duration::days(cfg.backfill_days.max(0))).date_naive();
+    // Member identity no longer depends on an email. Keep the legacy metadata
+    // column populated only when the user explicitly chose full account labels.
+    let email_owned = if cfg.share_account && cfg.account_label_mode == "full" {
+        email.map(str::to_string)
+    } else {
+        None
+    };
 
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
+    let mut legacy_member_id = cfg.legacy_member_id.clone();
+    let configured_legacy_exists = if legacy_member_id.trim().is_empty() {
+        false
+    } else {
+        tx.query_opt(
+            "SELECT 1 FROM members WHERE member_id=$1 AND identity_version < 2",
+            &[&legacy_member_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some()
+    };
+    if !configured_legacy_exists && !cfg.display_name.trim().is_empty() {
+        // Early account-aware builds replaced the v1 id before preserving it.
+        // Recover only an unambiguous same-name predecessor, and never claim a
+        // legacy row already superseded by another installation.
+        let candidates = tx
+            .query(
+                "SELECT m.member_id
+                 FROM members m
+                 WHERE m.identity_version < 2
+                   AND lower(m.display_name)=lower($1)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM members successor
+                     WHERE successor.identity_version >= 2
+                       AND successor.member_id <> $2
+                       AND successor.legacy_member_id=m.member_id
+                   )
+                 LIMIT 2",
+                &[&cfg.display_name, &cfg.member_id],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if candidates.len() == 1 {
+            legacy_member_id = candidates[0].get("member_id");
+        }
+    }
 
     tx.execute(
-        "INSERT INTO members(member_id, display_name, host, email, app_version, updated_at, current_project)
-         VALUES($1,$2,$3,$4,$5,$6,$7)
+        "INSERT INTO members(
+           member_id, display_name, host, email, app_version, updated_at,
+           current_project, identity_version, legacy_member_id
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (member_id) DO UPDATE SET
            display_name=excluded.display_name, host=excluded.host, email=excluded.email,
            app_version=excluded.app_version, updated_at=excluded.updated_at,
-           current_project=excluded.current_project",
+           current_project=excluded.current_project, identity_version=excluded.identity_version,
+           legacy_member_id=excluded.legacy_member_id",
         &[
             &cfg.member_id,
             &cfg.display_name,
@@ -429,12 +655,20 @@ async fn write_member(
             &app_version,
             &updated_at,
             &current_project,
+            &(cfg.identity_version as i32),
+            &legacy_member_id,
         ],
     )
     .await
     .map_err(|e| format!("upsert member failed: {e}"))?;
 
     // Replace this member's recent window wholesale (idempotent; only our rows).
+    tx.execute(
+        "DELETE FROM usage_daily_v2 WHERE member_id=$1 AND day >= $2",
+        &[&cfg.member_id, &start_date],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute(
         "DELETE FROM usage_daily WHERE member_id=$1 AND day >= $2",
         &[&cfg.member_id, &start_date],
@@ -447,25 +681,98 @@ async fn write_member(
             continue;
         };
         let project = project_label(&r.project, cfg);
-        let (input, output, cache_read, cache_create, tokens) = if cfg.share_tokens {
-            (r.input, r.output, r.cache_read, r.cache_create, r.tokens)
+        let (input, output, cache_read, cache_create, unattributed, tokens) = if cfg.share_tokens {
+            (
+                r.input,
+                r.output,
+                r.cache_read,
+                r.cache_create,
+                r.unattributed,
+                r.tokens,
+            )
         } else {
-            (0, 0, 0, 0, 0)
+            (0, 0, 0, 0, 0, 0)
         };
         let cost = if cfg.share_cost { r.cost } else { 0.0 };
+        let account_label = super::shared_account_label(cfg, &r.account_label);
+        let (account_key, billing_key) =
+            super::shared_account_keys(cfg, &r.account_key, &r.billing_key);
+        let attribution_status = if cfg.share_account {
+            r.attribution_status.as_str()
+        } else {
+            "hidden"
+        };
         tx.execute(
-            "INSERT INTO usage_daily(member_id, day, project, model, input, output, cache_read, cache_create, tokens, cost)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-             ON CONFLICT (member_id, day, project, model) DO UPDATE SET
-               input=excluded.input, output=excluded.output, cache_read=excluded.cache_read,
-               cache_create=excluded.cache_create, tokens=excluded.tokens, cost=excluded.cost",
+            "INSERT INTO usage_daily_v2(
+               member_id, day, provider, account_key, billing_key, account_label,
+               attribution_status, project, model, input, output, cache_read,
+               cache_create, unattributed, tokens, cost
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             ON CONFLICT (member_id, day, provider, account_key, project, model) DO UPDATE SET
+               billing_key=excluded.billing_key, account_label=excluded.account_label,
+               attribution_status=excluded.attribution_status,
+               input=usage_daily_v2.input + excluded.input,
+               output=usage_daily_v2.output + excluded.output,
+               cache_read=usage_daily_v2.cache_read + excluded.cache_read,
+               cache_create=usage_daily_v2.cache_create + excluded.cache_create,
+               unattributed=usage_daily_v2.unattributed + excluded.unattributed,
+               tokens=usage_daily_v2.tokens + excluded.tokens,
+               cost=usage_daily_v2.cost + excluded.cost",
             &[
-                &cfg.member_id, &day, &project, &r.model,
-                &input, &output, &cache_read, &cache_create, &tokens, &cost,
+                &cfg.member_id,
+                &day,
+                &r.provider,
+                &account_key,
+                &billing_key,
+                &account_label,
+                &attribution_status,
+                &project,
+                &r.model,
+                &input,
+                &output,
+                &cache_read,
+                &cache_create,
+                &unattributed,
+                &tokens,
+                &cost,
             ],
         )
         .await
         .map_err(|e| format!("insert usage failed: {e}"))?;
+
+        // v1-compatible aggregate. Multiple provider/account rows collapse onto
+        // the old key; the precise rows above remain authoritative for v2.
+        tx.execute(
+            "INSERT INTO usage_daily(
+               member_id, day, project, model, input, output, cache_read,
+               cache_create, unattributed, tokens, cost
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (member_id, day, project, model) DO UPDATE SET
+               input=usage_daily.input + excluded.input,
+               output=usage_daily.output + excluded.output,
+               cache_read=usage_daily.cache_read + excluded.cache_read,
+               cache_create=usage_daily.cache_create + excluded.cache_create,
+               unattributed=usage_daily.unattributed + excluded.unattributed,
+               tokens=usage_daily.tokens + excluded.tokens,
+               cost=usage_daily.cost + excluded.cost",
+            &[
+                &cfg.member_id,
+                &day,
+                &project,
+                &r.model,
+                &input,
+                &output,
+                &cache_read,
+                &cache_create,
+                &unattributed,
+                &tokens,
+                &cost,
+            ],
+        )
+        .await
+        .map_err(|e| format!("insert legacy-compatible usage failed: {e}"))?;
     }
 
     tx.execute(
@@ -480,19 +787,26 @@ async fn write_member(
 
 async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<TeamReport, String> {
     let day_filter = match range {
-        "week" => "day >= current_date - 6",
-        "month" => "day >= date_trunc('month', current_date)::date",
-        _ => "day = current_date",
+        "week" => "u.day >= current_date - 6",
+        "month" => "u.day >= current_date - 29",
+        _ => "u.day = current_date",
     };
 
     // Per-(member, model) totals for the range — the frontend slices this by
     // model client-side so the dropdown switches instantly.
     let usage_sql = format!(
-        "SELECT member_id, model, SUM(tokens)::bigint AS tokens,
-                COALESCE(SUM(cost), 0)::double precision AS cost
-         FROM usage_daily WHERE {day_filter} GROUP BY member_id, model"
+        "{USAGE_CTE}
+         SELECT u.member_id, u.model, SUM(u.tokens)::bigint AS tokens,
+                COALESCE(SUM(u.cost), 0)::double precision AS cost
+         FROM readable_usage u
+         JOIN members m ON m.member_id=u.member_id
+         WHERE {day_filter} AND {VISIBLE_MEMBER}
+         GROUP BY u.member_id, u.model"
     );
-    let usage_rows = client.query(&usage_sql, &[]).await.map_err(|e| e.to_string())?;
+    let usage_rows = client
+        .query(&usage_sql, &[])
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut by_member: std::collections::HashMap<String, Vec<ModelUsage>> =
         std::collections::HashMap::new();
@@ -513,30 +827,83 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
 
     // Per-(member, project) totals for the range (the expandable "top projects").
     let project_sql = format!(
-        "SELECT member_id, project, SUM(tokens)::bigint AS tokens,
-                COALESCE(SUM(cost), 0)::double precision AS cost
-         FROM usage_daily WHERE {day_filter} GROUP BY member_id, project"
+        "{USAGE_CTE}
+         SELECT u.member_id, u.project, SUM(u.tokens)::bigint AS tokens,
+                COALESCE(SUM(u.cost), 0)::double precision AS cost
+         FROM readable_usage u
+         JOIN members m ON m.member_id=u.member_id
+         WHERE {day_filter} AND {VISIBLE_MEMBER}
+         GROUP BY u.member_id, u.project"
     );
-    let project_rows = client.query(&project_sql, &[]).await.map_err(|e| e.to_string())?;
+    let project_rows = client
+        .query(&project_sql, &[])
+        .await
+        .map_err(|e| e.to_string())?;
     let mut projects_by_member: std::collections::HashMap<String, Vec<ProjectUsage>> =
         std::collections::HashMap::new();
     for row in &project_rows {
         let member_id: String = row.get("member_id");
-        projects_by_member.entry(member_id).or_default().push(ProjectUsage {
-            project: row.get("project"),
-            tokens: row.get("tokens"),
-            cost: row.get("cost"),
-        });
+        projects_by_member
+            .entry(member_id)
+            .or_default()
+            .push(ProjectUsage {
+                project: row.get("project"),
+                tokens: row.get("tokens"),
+                cost: row.get("cost"),
+            });
+    }
+
+    // Full member → account → model detail for Crime records and bill splits.
+    let account_sql = format!(
+        "{USAGE_CTE}
+         SELECT u.member_id, u.provider, u.account_key, u.billing_key,
+                u.account_label, u.attribution_status, u.model,
+                SUM(u.tokens)::bigint AS tokens,
+                COALESCE(SUM(u.cost), 0)::double precision AS cost
+         FROM readable_usage u
+         JOIN members m ON m.member_id=u.member_id
+         WHERE {day_filter} AND {VISIBLE_MEMBER}
+         GROUP BY u.member_id, u.provider, u.account_key, u.billing_key,
+                  u.account_label, u.attribution_status, u.model"
+    );
+    let account_rows = client
+        .query(&account_sql, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    type AccountMap =
+        std::collections::HashMap<(String, String, String, String, String), Vec<ModelUsage>>;
+    let mut accounts_by_member: std::collections::HashMap<String, AccountMap> =
+        std::collections::HashMap::new();
+    for row in &account_rows {
+        let member_id: String = row.get("member_id");
+        let model: String = row.get("model");
+        accounts_by_member
+            .entry(member_id)
+            .or_default()
+            .entry((
+                row.get("provider"),
+                row.get("account_key"),
+                row.get("billing_key"),
+                row.get("account_label"),
+                row.get("attribution_status"),
+            ))
+            .or_default()
+            .push(ModelUsage {
+                display_name: crate::localstats::display_name(&model),
+                model,
+                tokens: row.get("tokens"),
+                cost: row.get("cost"),
+            });
     }
 
     // Member identity/metadata (everyone, even with no usage in the range).
-    let meta_rows = client
-        .query(
-            "SELECT member_id, display_name, current_project,
+    let meta_sql = format!(
+        "SELECT m.member_id, m.identity_version, m.display_name, m.current_project,
                     EXTRACT(EPOCH FROM updated_at)::bigint AS updated_ts
-             FROM members",
-            &[],
-        )
+             FROM members m WHERE {VISIBLE_MEMBER}"
+    );
+    let meta_rows = client
+        .query(&meta_sql, &[])
         .await
         .map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
@@ -545,6 +912,7 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         .iter()
         .map(|row| {
             let member_id: String = row.get("member_id");
+            let identity_version: i32 = row.get("identity_version");
             let raw_name: String = row.get("display_name");
             let display_name = if raw_name.is_empty() {
                 member_id.clone()
@@ -562,11 +930,37 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
             by_model.sort_by(|a, b| b.tokens.cmp(&a.tokens));
             let mut by_project = projects_by_member.remove(&member_id).unwrap_or_default();
             by_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+            let mut by_account: Vec<AccountUsage> = accounts_by_member
+                .remove(&member_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(
+                    |(
+                        (provider, account_key, billing_key, account_label, attribution_status),
+                        mut by_model,
+                    )| {
+                        by_model.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+                        AccountUsage {
+                            provider,
+                            account_key,
+                            billing_key,
+                            account_label,
+                            attribution_status,
+                            tokens: by_model.iter().map(|m| m.tokens).sum(),
+                            cost: by_model.iter().map(|m| m.cost).sum(),
+                            by_model,
+                        }
+                    },
+                )
+                .collect();
+            by_account.sort_by(|a, b| b.tokens.cmp(&a.tokens));
             let tokens = by_model.iter().map(|m| m.tokens).sum();
             let cost = by_model.iter().map(|m| m.cost).sum();
             MemberView {
                 is_self: member_id == cfg.member_id,
                 member_id,
+                identity_version,
+                is_legacy: identity_version < 2,
                 display_name,
                 tokens,
                 cost,
@@ -575,10 +969,15 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
                 is_stale: updated_ts == 0 || last_seen_secs > stale_secs(range),
                 by_model,
                 by_project,
+                by_account,
             }
         })
         .collect();
-    members.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.display_name.cmp(&b.display_name)));
+    members.sort_by(|a, b| {
+        b.tokens
+            .cmp(&a.tokens)
+            .then(a.display_name.cmp(&b.display_name))
+    });
 
     let mut models: Vec<ModelOption> = model_totals
         .into_iter()
@@ -589,6 +988,42 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         })
         .collect();
     models.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.id.cmp(&b.id)));
+
+    let mut account_totals: std::collections::HashMap<(String, String), (String, i64, f64)> =
+        std::collections::HashMap::new();
+    for member in &members {
+        if member.is_legacy {
+            continue;
+        }
+        for account in &member.by_account {
+            // A fully hidden identity cannot support a meaningful cross-member
+            // bill filter, but it still appears inside that member's details.
+            if matches!(account.account_key.as_str(), "hidden" | "unknown") {
+                continue;
+            }
+            let total = account_totals
+                .entry((account.provider.clone(), account.account_key.clone()))
+                .or_insert_with(|| (account.account_label.clone(), 0, 0.0));
+            if total.0 != account.account_label {
+                total.0 = "Shared account".into();
+            }
+            total.1 += account.tokens;
+            total.2 += account.cost;
+        }
+    }
+    let mut accounts: Vec<AccountOption> = account_totals
+        .into_iter()
+        .map(
+            |((provider, account_key), (account_label, tokens, cost))| AccountOption {
+                provider,
+                account_key,
+                account_label,
+                tokens,
+                cost,
+            },
+        )
+        .collect();
+    accounts.sort_by(|a, b| b.tokens.cmp(&a.tokens));
 
     let team_name = client
         .query_opt("SELECT value FROM team_meta WHERE key = 'team_name'", &[])
@@ -609,6 +1044,7 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         range: range.to_string(),
         members,
         models,
+        accounts,
         generated_at: chrono::Utc::now().to_rfc3339(),
     })
 }
@@ -619,5 +1055,269 @@ fn project_label(project: &str, cfg: &TeamConfig) -> String {
         project.to_string()
     } else {
         "(hidden)".to_string()
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    fn row(
+        day: &str,
+        provider: &str,
+        account_key: &str,
+        project: &str,
+        model: &str,
+        tokens: i64,
+        cost: f64,
+    ) -> UsageRow {
+        UsageRow {
+            day: day.into(),
+            provider: provider.into(),
+            account_key: account_key.into(),
+            billing_key: format!("{provider}-billing"),
+            account_label: format!("{account_key}@example.com"),
+            attribution_status: "exact".into(),
+            project: project.into(),
+            model: model.into(),
+            input: tokens,
+            output: 0,
+            cache_read: 0,
+            cache_create: 0,
+            unattributed: 0,
+            tokens,
+            cost,
+            last_active: Utc::now().timestamp(),
+        }
+    }
+
+    /// Run explicitly against a disposable Postgres:
+    /// `HPBAR_DB_DIRECT=127.0.0.1:55432 cargo test postgres_v3_rolling_upgrade_round_trip -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires a disposable Postgres via HPBAR_DB_DIRECT"]
+    async fn postgres_v3_rolling_upgrade_round_trip() {
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let cfg = TeamConfig {
+            enabled: true,
+            team_name: "Integration Team".into(),
+            db_name: "postgres".into(),
+            db_user: "postgres".into(),
+            member_id: "integration-member".into(),
+            identity_version: 2,
+            legacy_member_id: "integration-member-v1".into(),
+            display_name: "Integration Member".into(),
+            share_account: true,
+            account_label_mode: "full".into(),
+            ..TeamConfig::default()
+        };
+
+        // Reproduce the state an actual 0.8.1-beta Team DB is in before this
+        // update: schema v2 already applied, with both legacy and account-aware
+        // rows present. The first v3 upload below must split it safely.
+        let seed = connect(&cfg).await.unwrap();
+        seed.client
+            .batch_execute(
+                "DROP TABLE IF EXISTS usage_daily_v2, usage_daily, members, team_meta, schema_migrations CASCADE;
+                 CREATE TABLE schema_migrations (
+                   version int PRIMARY KEY,
+                   applied_at timestamptz DEFAULT now()
+                 );",
+            )
+            .await
+            .unwrap();
+        seed.client.batch_execute(MIGRATION_V1).await.unwrap();
+        seed.client.batch_execute(MIGRATION_V2).await.unwrap();
+        seed.client
+            .batch_execute(
+                "INSERT INTO schema_migrations(version) VALUES(1),(2);
+                 INSERT INTO members(
+                   member_id, display_name, updated_at, identity_version
+                 ) VALUES
+                   ('legacy-teammate','Legacy Teammate',now(),1),
+                   ('integration-member-v1','Integration Member',now(),1),
+                   ('lost-legacy-id','Recovered Member',now(),1),
+                   ('preexisting-v2','Preexisting v2',now(),2);
+                 INSERT INTO usage_daily(
+                   member_id, day, provider, account_key, billing_key,
+                   account_label, attribution_status, project, model, tokens, cost
+                 ) VALUES
+                   ('legacy-teammate',current_date,'claude','unknown','unknown',
+                    'Unknown account','unknown','legacy-project','claude-fable-5',50,5),
+                   ('integration-member-v1',current_date,'claude','unknown','unknown',
+                    'Unknown account','unknown','legacy-project','claude-fable-5',300,30),
+                   ('lost-legacy-id',current_date,'claude','unknown','unknown',
+                    'Unknown account','unknown','legacy-project','claude-fable-5',10,1),
+                   ('preexisting-v2',current_date,'claude','migrated-account','migrated-billing',
+                    'migrated@example.com','exact','existing-project','claude-fable-5',40,4);",
+            )
+            .await
+            .unwrap();
+        drop(seed);
+
+        upload(
+            &cfg,
+            None,
+            vec![
+                row(
+                    &day,
+                    "claude",
+                    "shared-claude",
+                    "tokenhp",
+                    "claude-fable-5",
+                    200,
+                    20.0,
+                ),
+                row(
+                    &day,
+                    "codex",
+                    "shared-codex",
+                    "tokenhp",
+                    "gpt-5.6-sol",
+                    100,
+                    10.0,
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Simulate an installation already migrated by the early v2 build,
+        // which lost its exact v1 id. A unique display-name match recovers the
+        // predecessor; a non-unique match would deliberately remain visible.
+        let recovered_cfg = TeamConfig {
+            member_id: "recovered-v2".into(),
+            legacy_member_id: "wrong-derived-id".into(),
+            display_name: "Recovered Member".into(),
+            share_account: false,
+            ..cfg.clone()
+        };
+        upload(
+            &recovered_cfg,
+            None,
+            vec![row(
+                &day,
+                "claude",
+                "recovered-account",
+                "recovered-project",
+                "claude-fable-5",
+                10,
+                1.0,
+            )],
+        )
+        .await
+        .unwrap();
+
+        // Project privacy collapses two source projects into one DB key. The
+        // upsert must add both rows, not let the second overwrite the first.
+        let hidden_cfg = TeamConfig {
+            member_id: "integration-hidden".into(),
+            legacy_member_id: "integration-hidden-v1".into(),
+            display_name: "Hidden Projects".into(),
+            share_project: false,
+            share_account: false,
+            ..cfg.clone()
+        };
+        upload(
+            &hidden_cfg,
+            None,
+            vec![
+                row(
+                    &day,
+                    "claude",
+                    "hidden-account",
+                    "one",
+                    "claude-fable-5",
+                    50,
+                    5.0,
+                ),
+                row(
+                    &day,
+                    "claude",
+                    "hidden-account",
+                    "two",
+                    "claude-fable-5",
+                    70,
+                    7.0,
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Simulate the still-running old client uploading after v3. Its original
+        // ON CONFLICT target must work against the restored legacy primary key.
+        let mut conn = connect(&cfg).await.unwrap();
+        migrate(&mut conn.client).await.unwrap();
+        conn.client
+            .execute(
+                "INSERT INTO usage_daily(
+                   member_id, day, project, model, tokens, cost
+                 ) VALUES('legacy-teammate',$1,'legacy-project','claude-fable-5',80,8)
+                 ON CONFLICT (member_id, day, project, model)
+                 DO UPDATE SET tokens=excluded.tokens, cost=excluded.cost",
+                &[&NaiveDate::parse_from_str(&day, "%Y-%m-%d").unwrap()],
+            )
+            .await
+            .unwrap();
+        let compatibility_tokens: i64 = conn
+            .client
+            .query_one(
+                "SELECT COALESCE(SUM(tokens), 0)::bigint AS tokens
+                 FROM usage_daily WHERE member_id=$1",
+                &[&cfg.member_id],
+            )
+            .await
+            .unwrap()
+            .get("tokens");
+        assert_eq!(
+            compatibility_tokens, 300,
+            "the v1 compatibility mirror must collapse v2 account rows"
+        );
+        drop(conn);
+
+        let report = fetch(&cfg, "day").await.unwrap();
+        let member = report
+            .members
+            .iter()
+            .find(|m| m.member_id == cfg.member_id)
+            .unwrap();
+        assert_eq!(member.tokens, 300);
+        assert!(!member.is_legacy);
+        assert_eq!(member.by_account.len(), 2);
+        assert_eq!(report.accounts.len(), 3);
+        assert!(report
+            .members
+            .iter()
+            .any(|m| m.member_id == "legacy-teammate" && m.is_legacy && m.tokens == 80));
+        assert!(report.members.iter().any(|m| {
+            m.member_id == "preexisting-v2"
+                && !m.is_legacy
+                && m.tokens == 40
+                && m.by_account
+                    .iter()
+                    .any(|a| a.account_key == "migrated-account")
+        }));
+        assert!(!report
+            .members
+            .iter()
+            .any(|m| m.member_id == "integration-member-v1"));
+        assert!(report
+            .members
+            .iter()
+            .any(|m| m.member_id == recovered_cfg.member_id && !m.is_legacy));
+        assert!(!report
+            .members
+            .iter()
+            .any(|m| m.member_id == "lost-legacy-id"));
+
+        let hidden = report
+            .members
+            .iter()
+            .find(|m| m.member_id == hidden_cfg.member_id)
+            .unwrap();
+        assert_eq!(hidden.tokens, 120);
+        assert_eq!(hidden.by_project.len(), 1);
+        assert_eq!(hidden.by_project[0].project, "(hidden)");
+        assert_eq!(hidden.by_project[0].tokens, 120);
     }
 }

@@ -85,6 +85,7 @@ pub fn collect_local(window_secs: i64) -> Vec<ModelUsageDTO> {
                 output: t.output,
                 cache_read: t.cache_read,
                 cache_create: 0,
+                unattributed: 0,
                 total,
                 max_component,
                 cost,
@@ -158,5 +159,7 @@ fn collect_trajectories(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn parse_ts(s: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
 }

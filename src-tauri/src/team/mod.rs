@@ -2,8 +2,9 @@
 //! SSH tunnel (see [`db`]). No web server is involved — a database speaks its
 //! own TCP protocol, and we never expose it publicly; clients reach it through
 //! `ssh -L`, reusing the system ssh client. Config lives under
-//! `{data_dir}/HPBar/team-config.json` and holds **no secrets** — the SSH key is
-//! the auth and Postgres trusts the localhost tunnel.
+//! `{data_dir}/HPBar/team-config.json`. Key-based SSH stores no credential; if
+//! the optional password field is used, that password is stored in this local
+//! config file. Postgres itself is reached only through the tunnel.
 
 pub mod db;
 
@@ -40,6 +41,12 @@ fn default_backfill() -> i64 {
 fn default_top_projects() -> u32 {
     5
 }
+fn default_true_string() -> String {
+    "masked".to_string()
+}
+fn current_identity_version() -> u32 {
+    2
+}
 
 /// Local-only configuration for team sharing. No secrets — auth is the user's
 /// SSH key plus Postgres localhost `trust`.
@@ -72,6 +79,15 @@ pub struct TeamConfig {
     pub team_name: String,
     #[serde(default)]
     pub member_id: String,
+    /// v2 uses an installation UUID rather than a login email, so two people
+    /// sharing one subscription account remain distinct team members.
+    #[serde(default)]
+    pub identity_version: u32,
+    /// The email/hostname-derived id used by v1. Stored only to suppress this
+    /// installation's superseded legacy row without hiding teammates who are
+    /// still uploading from an older client.
+    #[serde(default)]
+    pub legacy_member_id: String,
     #[serde(default)]
     pub display_name: String,
     #[serde(default = "default_true")]
@@ -80,6 +96,13 @@ pub struct TeamConfig {
     pub share_cost: bool,
     #[serde(default = "default_true")]
     pub share_project: bool,
+    /// Sensitive new scope: existing Team users must opt in rather than having
+    /// an upgrade silently begin sharing account identifiers.
+    #[serde(default)]
+    pub share_account: bool,
+    /// "masked" (default), "full", or "hidden".
+    #[serde(default = "default_true_string")]
+    pub account_label_mode: String,
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
     #[serde(default = "default_backfill")]
@@ -102,11 +125,15 @@ impl Default for TeamConfig {
             db_name: default_db_name(),
             db_user: default_db_user(),
             team_name: String::new(),
-            member_id: String::new(),
+            member_id: new_member_id(),
+            identity_version: current_identity_version(),
+            legacy_member_id: String::new(),
             display_name: String::new(),
             share_tokens: true,
             share_cost: true,
             share_project: true,
+            share_account: false,
+            account_label_mode: default_true_string(),
             interval_secs: default_interval(),
             backfill_days: default_backfill(),
             top_projects: default_top_projects(),
@@ -116,17 +143,30 @@ impl Default for TeamConfig {
 
 impl TeamConfig {
     pub fn load() -> TeamConfig {
-        config_path()
+        let mut config: TeamConfig = config_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if config.identity_version < current_identity_version() {
+            // Preserve the v1 identity before replacing it. The DB uses this
+            // alias to hide only the row this installation superseded; other
+            // v1 teammates remain visible during a rolling upgrade.
+            config.legacy_member_id = config.member_id.clone();
+            config.member_id = new_member_id();
+            config.identity_version = current_identity_version();
+            let _ = config.save();
+        }
+        config
     }
 
     pub fn save(&self) -> Result<(), String> {
         let dir = config_dir().ok_or("no application data directory")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join("team-config.json"), body).map_err(|e| e.to_string())
+        let path = dir.join("team-config.json");
+        std::fs::write(&path, body).map_err(|e| e.to_string())?;
+        restrict_file_permissions(&path);
+        Ok(())
     }
 
     /// Fill in derived/defaulted fields so the rest of the code can assume
@@ -157,13 +197,23 @@ impl TeamConfig {
             self.top_projects = default_top_projects();
         }
         if self.member_id.trim().is_empty() {
-            self.member_id = derive_member_id(email);
+            self.member_id = new_member_id();
         }
+        if self.legacy_member_id.trim().is_empty() {
+            self.legacy_member_id = derive_legacy_member_id(email);
+        }
+        self.identity_version = current_identity_version();
         if self.display_name.trim().is_empty() {
             self.display_name = email
                 .map(|e| e.split('@').next().unwrap_or(e).to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(hostname);
+        }
+        if !matches!(
+            self.account_label_mode.as_str(),
+            "masked" | "full" | "hidden"
+        ) {
+            self.account_label_mode = default_true_string();
         }
     }
 
@@ -180,22 +230,26 @@ fn config_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("team-config.json"))
 }
 
-fn derive_member_id(email: Option<&str>) -> String {
-    let base = email.map(str::to_string).unwrap_or_else(hostname);
-    let slug = slugify(&base);
-    if slug.is_empty() {
-        "member".to_string()
-    } else {
-        slug
-    }
+#[cfg(unix)]
+fn restrict_file_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-/// Lowercase, keep alphanumerics, collapse the rest to single dashes.
-/// "jane.doe@corp.com" → "jane-doe-corp-com" (stable, identifier-safe).
-fn slugify(s: &str) -> String {
+#[cfg(not(unix))]
+fn restrict_file_permissions(_path: &std::path::Path) {}
+
+fn new_member_id() -> String {
+    format!("member-{}", uuid::Uuid::new_v4())
+}
+
+/// Reproduce the v1 identity exactly so a v2 installation can mark its own
+/// legacy row as superseded. This is not used as the current member id.
+fn derive_legacy_member_id(email: Option<&str>) -> String {
+    let base = email.map(str::to_string).unwrap_or_else(hostname);
     let mut out = String::new();
     let mut prev_dash = false;
-    for c in s.chars() {
+    for c in base.chars() {
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
             prev_dash = false;
@@ -204,7 +258,45 @@ fn slugify(s: &str) -> String {
             prev_dash = true;
         }
     }
-    out.trim_matches('-').to_string()
+    let slug = out.trim_matches('-');
+    if slug.is_empty() {
+        "member".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+pub fn shared_account_label(cfg: &TeamConfig, label: &str) -> String {
+    if !cfg.share_account || cfg.account_label_mode == "hidden" {
+        return "Hidden account".into();
+    }
+    if cfg.account_label_mode == "full" {
+        return label.to_string();
+    }
+    mask_email(label)
+}
+
+/// Apply the account-sharing privacy toggle to stable identifiers. When account
+/// sharing is off, neither the account hash nor its billing-group hash reaches
+/// the team database.
+pub fn shared_account_keys(
+    cfg: &TeamConfig,
+    account_key: &str,
+    billing_key: &str,
+) -> (String, String) {
+    if cfg.share_account {
+        (account_key.to_string(), billing_key.to_string())
+    } else {
+        ("hidden".into(), "hidden".into())
+    }
+}
+
+fn mask_email(label: &str) -> String {
+    let Some((local, domain)) = label.split_once('@') else {
+        return label.to_string();
+    };
+    let first = local.chars().next().unwrap_or('*');
+    format!("{first}***@{domain}")
 }
 
 /// Machine name for the member's profile. Shells out to `hostname` (present on
@@ -232,9 +324,14 @@ pub(crate) fn day_str_back(n: i64) -> String {
 async fn collect_window(cfg: &TeamConfig) -> Result<Vec<UsageRow>, String> {
     let start = day_str_back(cfg.backfill_days.max(0));
     let today = day_str_back(0);
-    tokio::task::spawn_blocking(move || crate::localstats::collect_rows(&start, &today))
-        .await
-        .map_err(|e| e.to_string())
+    crate::account::observe_current_accounts();
+    tokio::task::spawn_blocking(move || {
+        let mut rows = crate::localstats::collect_rows(&start, &today);
+        rows.extend(crate::codexstats::collect_rows(&start, &today));
+        rows
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Push this member's identity + recent usage window to the team DB.
@@ -248,7 +345,10 @@ pub async fn upload(cfg: &TeamConfig, email: Option<&str>) -> Result<(), String>
 
 /// The "Test Connection" handshake: connect over the tunnel, migrate, write our
 /// member, and read back the roster.
-pub async fn test_connection(cfg: &TeamConfig, email: Option<&str>) -> Result<TeamHandshake, String> {
+pub async fn test_connection(
+    cfg: &TeamConfig,
+    email: Option<&str>,
+) -> Result<TeamHandshake, String> {
     if !cfg.has_endpoint() {
         return Err("Enter the SSH host first.".to_string());
     }
@@ -266,4 +366,52 @@ pub async fn fetch_team(range: &str) -> Result<TeamReport, String> {
         return Err("Team sync is not configured.".to_string());
     }
     db::fetch(&cfg, range).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_identity_is_not_derived_from_shared_email() {
+        let a = TeamConfig::default();
+        let b = TeamConfig::default();
+        assert_eq!(a.identity_version, 2);
+        assert!(a.member_id.starts_with("member-"));
+        assert_ne!(a.member_id, b.member_id);
+    }
+
+    #[test]
+    fn legacy_identity_matches_v1_slug() {
+        assert_eq!(
+            derive_legacy_member_id(Some("Jane.Doe+Team@Corp.com")),
+            "jane-doe-team-corp-com"
+        );
+    }
+
+    #[test]
+    fn account_sharing_is_opt_in_and_labels_default_to_masked() {
+        assert!(!TeamConfig::default().share_account);
+        let cfg = TeamConfig {
+            share_account: true,
+            ..TeamConfig::default()
+        };
+        assert_eq!(cfg.account_label_mode, "masked");
+        assert_eq!(
+            shared_account_label(&cfg, "person@example.com"),
+            "p***@example.com"
+        );
+    }
+
+    #[test]
+    fn disabling_account_share_hides_stable_keys_too() {
+        let cfg = TeamConfig {
+            share_account: false,
+            ..TeamConfig::default()
+        };
+        assert_eq!(
+            shared_account_keys(&cfg, "account-secret", "billing-secret"),
+            ("hidden".to_string(), "hidden".to_string())
+        );
+    }
 }

@@ -2,14 +2,15 @@
 
 How HPBar gathers the numbers it shows, and what happens to that data.
 
-**Short version:** HPBar is a local, read-only viewer. It reads usage data that
-already exists on your machine — written by Claude Code, Codex, OpenClaw, etc. —
-plus your existing Claude login token. It makes **exactly one network request**:
-to Anthropic's own API, to fetch your *Claude* subscription quota. Everything
-else — all per-tool token usage, **and even Codex's quota** — is read from local
-files; **nothing else is sent anywhere**. There is no telemetry, no analytics, no
-third-party server, and no account with HPBar. Your prompts and responses are
-never read or transmitted.
+**Short version:** HPBar is local-first. It reads usage data already written by
+Claude Code, Codex, OpenClaw, etc., plus your existing Claude login token. Codex
+quota and every local-activity number come from local files. HPBar has no
+telemetry, analytics, hosted backend, or HPBar account, and it never extracts,
+stores, or transmits prompt/response content.
+
+Network access is limited to clearly scoped features: Anthropic for Claude
+quota; GitHub when you check/download an update; and, only when you enable Team,
+the SSH/Postgres host you configured. Team is off by default.
 
 ---
 
@@ -22,8 +23,8 @@ The UI has two axes, and this doc follows them:
   **`equivalent`** (a subscription priced at API rates, for comparison — Claude
   Code, Codex) or **`real`** (actual metered API-key spend — OpenClaw).
 
-Across *both* axes, HPBar reads from local files on disk. The **only** network
-call anywhere is fetching Claude's subscription quota.
+Across both axes HPBar primarily reads local files. The exceptions are listed
+under [Network destinations](#network-destinations).
 
 ---
 
@@ -31,7 +32,7 @@ call anywhere is fetching Claude's subscription quota.
 
 ### 1. Subscription quota
 
-**Claude — the one and only network request:**
+**Claude — provider quota request:**
 
 - **Request:** `GET https://api.anthropic.com/api/oauth/usage`
   ([src-tauri/src/usage.rs](src-tauri/src/usage.rs))
@@ -49,7 +50,7 @@ snapshots into its own session logs; HPBar reads the most recent one from
 ([src-tauri/src/codexstats.rs](src-tauri/src/codexstats.rs)). **HPBar never
 contacts an OpenAI endpoint** — there is no network call for Codex at all.
 
-### 2. API token usage — read from disk, never leaves the machine
+### 2. Local token usage — read from disk
 
 The **API** view aggregates per-model token counts from the session logs your
 CLI tools already write locally. Each tool is a small adapter
@@ -65,22 +66,22 @@ From each record HPBar extracts **only**:
 
 - token counts (input, output, cache-read, cache-write),
 - the model identifier (e.g. `claude-opus-4-8`, `gpt-5.5`, `deepseek-v4-pro`),
-- the timestamp (to filter by your selected 24h / 7d / 30d window).
+- the timestamp (to filter by your selected 24h / 7d / 30d window),
+- the working-directory label needed for the optional project breakdown.
 
-> **HPBar does not read, store, log, or transmit any prompt or response
+> **HPBar does not extract, store, log, or transmit any prompt or response
 > content.** The parsers pull out the usage numbers above and discard everything
 > else in the line. These logs are read, aggregated in memory, priced with a
-> bundled rate table, and rendered in the popover — they **never leave your
-> computer**.
+> bundled rate table, and rendered in the popover. Aggregate fields leave the
+> computer only if you explicitly enable Team sharing.
 
 New tools (Hermes, …) plug in as additional local adapters under the same rule:
-local files in, token counts out, nothing transmitted.
+local files in; token-count aggregates out.
 
-### 3. Account identity (footer) — read locally, shown locally
+### 3. Account identity and attribution
 
 On the Subscription view, the footer can show which login a machine uses
-([src-tauri/src/account.rs](src-tauri/src/account.rs)) — read from local files
-and **only displayed on-screen**, never transmitted:
+([src-tauri/src/account.rs](src-tauri/src/account.rs)), read from local files:
 
 - **Claude** — email from `~/.claude.json` (`oauthAccount.emailAddress`); plan
   from the stored credential's `subscriptionType` / `rateLimitTier` (e.g.
@@ -89,8 +90,42 @@ and **only displayed on-screen**, never transmitted:
   HPBar decodes the token's claims **for display only — no signature
   verification, no network**.
 
-It exists to help when several people share one subscription and want to confirm
-whose usage a machine is reporting.
+HPBar also keeps local account observation epochs in
+`…/HPBar/account-history.json`. Each epoch contains a deterministic hashed
+account/billing identifier, the display label, provider, and observation
+timestamps — never an OAuth token. (A deterministic hash groups the same account
+across machines; it should be treated as pseudonymous, not anonymous.) A
+historical event is assigned only when its timestamp falls inside an observed
+epoch. History from before HPBar observed the login, offline gaps, and ambiguous
+switches are shown as **Unknown account**, rather than guessed.
+
+### 4. Optional Team sharing
+
+Team is disabled by default. If enabled, HPBar opens an SSH tunnel to the host
+you configure and writes aggregate rows to your Postgres database:
+
+- installation member UUID and display name;
+- UTC day, provider, model, aggregate token components and optional estimated
+  cost;
+- optional project label;
+- optional hashed account/billing keys and account label.
+
+No prompts, responses, OAuth tokens, or Codex tokens are uploaded. `member_id`
+is generated per installation and is not derived from the shared login, so two
+people using one account remain separate members. Account labels default to a
+masked email when account sharing is enabled; settings can choose full, masked,
+or hidden. Account sharing itself defaults off. Turning it off suppresses both
+labels and stable account/billing hashes. Saving a changed sharing scope pushes
+a replacement snapshot immediately, so an earlier privacy choice does not leave
+stale `Hidden account` rows in the UI.
+
+During a rolling upgrade, v1 members remain visible with a legacy marker and
+continue using the original aggregate table. Their model totals are available,
+but account-level splitting is deliberately unavailable because v1 never
+recorded account attribution. v2 keeps account-aware rows separately and writes
+a collapsed compatibility mirror for old clients. Once a v2 installation names
+its v1 predecessor, the new UI suppresses that predecessor row to avoid counting
+the same backfilled history twice.
 
 ---
 
@@ -111,28 +146,48 @@ HPBar never logs in itself — it reuses the token Claude Code already saved and
 - It is sent **only** as the `Authorization` header to `api.anthropic.com`
   (Subscription #1) and nowhere else.
 
-The Codex `id_token` in `~/.codex/auth.json` is likewise read-only and used only
-to display the ChatGPT login's email/plan locally — it is never sent anywhere.
+The Codex `id_token` in `~/.codex/auth.json` is likewise read-only and is never
+sent anywhere. Only decoded, non-secret identity fields may enter the local
+account history and, subject to Team privacy settings, aggregate Team rows.
+
+---
+
+## Network destinations
+
+- **`api.anthropic.com`** — automatic Claude quota polling, authorized with the
+  existing Claude token.
+- **`api.github.com` and GitHub release asset hosts** — only when you open the
+  Update page to check, or explicitly download an installer.
+- **Your configured SSH/Postgres host** — only when Team is enabled or you press
+  Test Connection. The tunnel encrypts the Postgres connection.
+
+HPBar does not send telemetry or analytics to its maintainers and has no hosted
+HPBar backend.
 
 ---
 
 ## What HPBar does **not** do
 
 - ❌ No telemetry, analytics, crash reporting, or "phone-home."
-- ❌ No HPBar account, server, or cloud — there is no HPBar backend.
-- ❌ No third-party network destinations. The only host contacted is
-  `api.anthropic.com`. (Codex quota and all token usage are read from local files.)
-- ❌ No reading or transmitting of prompt/response content from your sessions.
-- ❌ No writing of your usage data anywhere — it's computed on the fly per view.
+- ❌ No HPBar account or hosted HPBar server.
+- ❌ No extracting, storing, or transmitting prompt/response content from sessions.
+- ❌ No uploading aggregate usage unless Team is explicitly enabled.
 
 ## What HPBar writes to disk
 
-Only two small, local things, both at your request:
+HPBar writes small local state needed for its features:
 
-- **"Open at Login"** toggle — registers/unregisters a normal OS autostart entry
-  (LaunchAgent on macOS, the equivalent on Linux/Windows) when you tick it.
-- **In-memory only:** the credential cache and all aggregated usage are kept in
-  memory and discarded when the app quits.
+- UI preferences in the webview's local storage (theme, selected view/provider,
+  pin state, update channel, and animation baselines);
+- quota/burn-rate and device-share sample histories;
+- `account-history.json`, described above;
+- `team-config.json` when Team settings are saved. SSH-key use stores no secret,
+  but an optional SSH password is stored there in plaintext if you enter one;
+- a downloaded installer when you explicitly choose Download & Install;
+- an OS autostart entry when you enable Open at Login.
+
+Raw session content and OAuth tokens are not copied into these files. Aggregate
+local usage is otherwise computed on demand.
 
 It also *optionally reads* a user-provided pricing override at
 `…/HPBar/pricing.json` if you create one ([src-tauri/src/pricing.rs](src-tauri/src/pricing.rs));
@@ -143,7 +198,7 @@ HPBar reads it but never writes it.
 ## Data-flow at a glance
 
 ```
-  SUBSCRIPTION axis                       API axis  (every source is local)
+  SUBSCRIPTION axis                       LOCAL axis
   ────────────────                        ──────────────────────────────────
   Claude:  Keychain / .credentials.json   ~/.claude/projects/*.jsonl   equivalent
            └─ Bearer token ──┐            ~/.codex/sessions/*.jsonl    equivalent
@@ -151,16 +206,19 @@ HPBar reads it but never writes it.
            (rate_limits)     │                     │ token counts / model / ts only
            └─ read locally   │                     ▼
                   │          │            aggregate → price → render  (on-device)
-   the ONLY network call ────┘
+   provider quota request ───┘
    GET api.anthropic.com/api/oauth/usage
    (Claude quota only — Codex quota is local)
                   ▼
         quota %s + reset times → render
+
+  Optional Team (off by default):
+  aggregate day/member/provider/account/model rows
+                  └─ SSH tunnel ──> your Postgres
 ```
 
-The entire API axis — and Codex's Subscription quota — stay on-device. The only
-thing that crosses into the network is the Claude quota request, carrying just
-your token.
+Codex quota stays on-device. Local aggregates cross the network only through the
+opt-in Team path above. Update checks are separate and carry no usage data.
 
 ---
 
@@ -168,10 +226,10 @@ your token.
 
 HPBar is open source and unsigned by design — you can check every claim here:
 
-- **Network:** the entire `reqwest` usage is in
-  [src-tauri/src/usage.rs](src-tauri/src/usage.rs); there are no other network
-  calls in the codebase. Confirm with a packet inspector (e.g. Little Snitch,
-  `mitmproxy`, `tcpdump`) — you'll see one host: `api.anthropic.com`.
+- **Network:** provider quota HTTP is in
+  [src-tauri/src/usage.rs](src-tauri/src/usage.rs), GitHub update HTTP is in
+  [src-tauri/src/update.rs](src-tauri/src/update.rs), and Team SSH/Postgres code
+  is in [src-tauri/src/team/db.rs](src-tauri/src/team/db.rs).
 - **Local parsing:** the adapters in [src-tauri/src/tools.rs](src-tauri/src/tools.rs)
   (→ `localstats.rs`, `codexstats.rs`, `openclawstats.rs`) show exactly which
   fields are read (token counts, model id, timestamp) and that content fields are
@@ -181,5 +239,5 @@ HPBar is open source and unsigned by design — you can check every claim here:
   `cargo run --example codex_check` does the same for Codex — both with no network
   access, the same numbers the API view shows.
 
-*This document describes HPBar as of v0.2.2. If the behavior and this document
-ever disagree, the code is the source of truth — please open an issue.*
+If behavior and this document ever disagree, the code is the source of truth —
+please open an issue.

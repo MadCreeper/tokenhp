@@ -202,8 +202,10 @@ pub fn save_settings(app: &AppHandle, s: &AmbientSettings) {
 
 use crate::burn::{self, Sample};
 
-/// Keep a little more than the burn lookback so a baseline is always on hand.
-const HISTORY_RETAIN_SECS: i64 = burn::LOOKBACK_SECS + 30 * 60;
+/// Long windows use up to a week of history; keep one extra day for a stable
+/// baseline around sparse background polls.
+const HISTORY_RETAIN_SECS: i64 = 8 * 86_400;
+static HISTORY_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 fn history_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     let dir = app.path().app_config_dir().ok()?;
@@ -220,10 +222,14 @@ fn load_history(app: &AppHandle) -> HashMap<String, Vec<Sample>> {
 
 fn save_history(app: &AppHandle, h: &HashMap<String, Vec<Sample>>) {
     let Some(p) = history_path(app) else { return };
-    let Ok(json) = serde_json::to_string(h) else { return };
+    let Ok(json) = serde_json::to_string(h) else {
+        return;
+    };
     // Write-then-rename so a popover read never sees a half-written file.
     let tmp = p.with_extension("json.tmp");
     if std::fs::write(&tmp, json).is_ok() {
+        #[cfg(target_os = "windows")]
+        let _ = std::fs::remove_file(&p);
         let _ = std::fs::rename(&tmp, &p);
     }
 }
@@ -246,7 +252,15 @@ fn secs_until(iso: &str) -> Option<i64> {
 /// Append the current utilisation of each resettable window to the rolling
 /// history, dropping a window's samples when it resets (a drop in used) and
 /// pruning anything past the retention horizon. Called once per background poll.
-fn record_history(app: &AppHandle, report: &UsageReport) {
+fn history_key(provider: &str, account_key: &str, title: &str) -> String {
+    format!("{provider}|{account_key}|{title}")
+}
+
+pub fn record_history(app: &AppHandle, provider: &str, account_key: &str, report: &UsageReport) {
+    let _guard = HISTORY_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let mut hist = load_history(app);
     let now = now_unix();
     for w in &report.windows {
@@ -254,7 +268,9 @@ fn record_history(app: &AppHandle, report: &UsageReport) {
         if w.trailing.as_deref() == Some("Off") || w.resets_at.is_none() {
             continue;
         }
-        let v = hist.entry(w.title.clone()).or_default();
+        let v = hist
+            .entry(history_key(provider, account_key, &w.title))
+            .or_default();
         if let Some(last) = v.last() {
             if w.utilization + 1e-9 < last.used {
                 v.clear(); // window reset since last sample
@@ -273,15 +289,22 @@ fn record_history(app: &AppHandle, report: &UsageReport) {
 /// projected limit-hit falls *before* the window resets (an actionable "you'll
 /// run out" warning). Used by the `fetch_usage` command so the popover can show
 /// it. No-op for windows with no reset clock or not enough burn.
-pub fn annotate(app: &AppHandle, report: &mut UsageReport) {
+pub fn annotate(app: &AppHandle, provider: &str, account_key: &str, report: &mut UsageReport) {
+    let _guard = HISTORY_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let hist = load_history(app);
     let now = now_unix();
     for w in &mut report.windows {
         if w.trailing.as_deref() == Some("Off") {
             continue;
         }
-        let samples = hist.get(&w.title).map(|v| v.as_slice()).unwrap_or(&[]);
-        let Some(eta) = burn::eta_to_empty(samples, now, w.utilization) else {
+        let key = history_key(provider, account_key, &w.title);
+        let samples = hist.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+        let Some(eta) =
+            burn::eta_to_empty_for_window(samples, now, w.utilization, w.window_minutes)
+        else {
             continue;
         };
         // Surface only if you'd hit the limit before the window resets.
@@ -326,7 +349,10 @@ pub fn spawn(app: AppHandle) {
         let mut last_good: Option<UsageReport> = None;
         loop {
             if let Ok(report) = fetch(&app).await {
-                record_history(&app, &report); // feed the burn-rate projection
+                let account_key = crate::account::claude_identity()
+                    .map(|i| i.account_key)
+                    .unwrap_or_else(|| "unknown".into());
+                record_history(&app, "claude", &account_key, &report);
                 // Record the device-share series (scans local logs → blocking thread).
                 {
                     let app2 = app.clone();
@@ -351,6 +377,10 @@ pub fn spawn(app: AppHandle) {
                 let app2 = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Ok(codex) = crate::codexstats::fetch_quota() {
+                        let account_key = crate::account::codex_identity()
+                            .map(|i| i.account_key)
+                            .unwrap_or_else(|| "unknown".into());
+                        record_history(&app2, "codex", &account_key, &codex);
                         crate::share::record(&app2, "codex", &codex);
                     }
                 })
@@ -502,6 +532,11 @@ mod tests {
             remaining,
             resets_at: None,
             title: title.into(),
+            window_minutes: match title {
+                "5-Hour" => Some(300),
+                "Weekly" => Some(10_080),
+                _ => None,
+            },
             trailing: off.then(|| "Off".into()),
             eta_secs: None,
             machine_share: None,
@@ -514,6 +549,7 @@ mod tests {
         UsageReport {
             windows,
             source_label: "test".into(),
+            details: Vec::new(),
         }
     }
 
@@ -526,7 +562,10 @@ mod tests {
     #[test]
     fn min_remaining_skips_off_windows() {
         // The "Off" extra-usage window (remaining 0.0) must not pin HP to zero.
-        let r = report(vec![win("5-Hour", 0.6, false), win("Extra usage", 0.0, true)]);
+        let r = report(vec![
+            win("5-Hour", 0.6, false),
+            win("Extra usage", 0.0, true),
+        ]);
         assert_eq!(min_remaining(&r), Some(0.6));
     }
 
@@ -580,8 +619,8 @@ mod tests {
         let past = (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339();
         let future = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
         let mut r = report(vec![
-            win("5-Hour", 0.12, false),  // reset passed → refills
-            win("Weekly", 0.40, false),  // reset ahead → untouched
+            win("5-Hour", 0.12, false),      // reset passed → refills
+            win("Weekly", 0.40, false),      // reset ahead → untouched
             win("Extra usage", 0.30, false), // no clock → untouched
         ]);
         r.windows[0].resets_at = Some(past);
@@ -594,7 +633,10 @@ mod tests {
         assert_eq!(rolled.windows[0].resets_at, None);
         assert_eq!(rolled.windows[0].eta_secs, None);
         assert_eq!(rolled.windows[1].remaining, 0.40);
-        assert_eq!(rolled.windows[1].resets_at.as_deref(), Some(future.as_str()));
+        assert_eq!(
+            rolled.windows[1].resets_at.as_deref(),
+            Some(future.as_str())
+        );
         assert_eq!(rolled.windows[2].remaining, 0.30);
         // The stale "12%" tray annunciator clears: min is no longer ≤ LOW.
         assert_eq!(min_remaining(&rolled), Some(0.30));
@@ -602,7 +644,10 @@ mod tests {
 
     #[test]
     fn tooltip_formats_windows() {
-        let r = report(vec![win("5-Hour", 0.47, false), win("Extra usage", 0.0, true)]);
+        let r = report(vec![
+            win("5-Hour", 0.47, false),
+            win("Extra usage", 0.0, true),
+        ]);
         assert_eq!(tooltip(&r), "HPBar · 5-Hour 47% · Extra usage off");
     }
 }

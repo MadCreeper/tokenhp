@@ -15,6 +15,8 @@ export function teamContentHTML(args: {
   report: TeamReport | null;
   model: string; // "all" or a model id
   dropdownOpen: boolean;
+  crimeMode: boolean;
+  accountKey: string; // "all" or a stable account key
   selfName: string; // your locally-set display name (authoritative for your row)
   expanded: Set<string>; // member ids whose top-projects are shown
   topProjects: number; // how many to show when expanded
@@ -32,28 +34,100 @@ export function teamContentHTML(args: {
     return `<div class="msg">No members yet. Share your usage to seed the team.</div>`;
   }
 
-  const dropdown = modelDropdownHTML(report, args.model, args.dropdownOpen);
+  const legacyCount = report.members.filter((m) => m.is_legacy).length;
+  const hiddenCount = report.members.filter((m) =>
+    m.by_account.some((a) => a.attribution_status === "hidden" || a.account_key === "hidden"),
+  ).length;
+  const notices = [
+    legacyCount > 0
+      ? `${legacyCount} member${legacyCount === 1 ? "" : "s"} still use${
+          legacyCount === 1 ? "s" : ""
+        } the legacy identity. Totals remain visible; account-level splitting starts after their upgrade.`
+      : "",
+    args.crimeMode && hiddenCount > 0
+      ? `${hiddenCount} member${hiddenCount === 1 ? " has" : "s have"} not shared account identity. Their model totals remain visible.`
+      : "",
+  ]
+    .filter(Boolean)
+    .map((text) => `<div class="team-notice">${escapeHTML(text)}</div>`)
+    .join("");
+
+  const modeToggle = `<button class="mc-btn crime-toggle ${args.crimeMode ? "selected" : ""}"
+    data-action="team-crime-toggle" title="Show member → account → model usage details">犯罪记录</button>`;
+  const selector = args.crimeMode
+    ? accountCycleHTML(report, args.accountKey)
+    : modelDropdownHTML(report, args.model, args.dropdownOpen);
 
   // The value to rank/show per member: the chosen model's usage, or the total.
   const valueFor = (m: MemberView): { tokens: number; cost: number } => {
+    if (args.crimeMode) {
+      if (args.accountKey !== "all") {
+        return m.by_account
+          .filter((x) => x.account_key === args.accountKey)
+          .reduce(
+            (sum, account) => ({
+              tokens: sum.tokens + account.tokens,
+              cost: sum.cost + account.cost,
+            }),
+            { tokens: 0, cost: 0 },
+          );
+      }
+      return { tokens: m.tokens, cost: m.cost };
+    }
     if (args.model === "all") return { tokens: m.tokens, cost: m.cost };
     const mm = m.by_model.find((x) => x.model === args.model);
     return { tokens: mm?.tokens ?? 0, cost: mm?.cost ?? 0 };
   };
 
-  const ranked = report.members
-    .map((m) => ({ m, v: valueFor(m) }))
-    .sort((a, b) => b.v.tokens - a.v.tokens);
-  const max = Math.max(...ranked.map((r) => r.v.tokens), 1);
+  const ranked = report.members.map((m) => ({ m, v: valueFor(m) }));
+  // Equivalent cost is the fairer bill-split weight across model/cache mixes;
+  // fall back to raw tokens if any non-empty row lacks a price estimate.
+  const useCost =
+    args.crimeMode &&
+    ranked.some((r) => r.v.cost > 0) &&
+    !ranked.some((r) => r.v.tokens > 0 && r.v.cost <= 0);
+  const weight = (v: { tokens: number; cost: number }) => (useCost ? v.cost : v.tokens);
+  ranked.sort((a, b) => weight(b.v) - weight(a.v));
+  const totalWeight = ranked.reduce((sum, r) => sum + weight(r.v), 0);
+  const max = Math.max(...ranked.map((r) => weight(r.v)), 1);
   const rows = ranked
     .map((r, i) =>
-      memberRow(i + 1, r.m, r.v.tokens, r.v.cost, max, args.theme, args.selfName, {
-        open: args.expanded.has(r.m.member_id),
-        topProjects: args.topProjects,
-      }),
+      memberRow(
+        i + 1,
+        r.m,
+        r.v.tokens,
+        r.v.cost,
+        weight(r.v),
+        max,
+        args.theme,
+        args.selfName,
+        {
+          open: args.expanded.has(r.m.member_id),
+          topProjects: args.topProjects,
+        },
+        {
+          enabled: args.crimeMode,
+          accountKey: args.accountKey,
+          share: totalWeight > 0 ? weight(r.v) / totalWeight : 0,
+        },
+      ),
     )
     .join("");
-  return dropdown + `<div class="team-list">${rows}</div>`;
+  return `${notices}<div class="team-view-tools">${selector}${modeToggle}</div><div class="team-list">${rows}</div>`;
+}
+
+function accountCycleHTML(report: TeamReport, accountKey: string): string {
+  const current =
+    accountKey === "all"
+      ? { account_label: "All accounts", provider: "" }
+      : (report.accounts.find((a) => a.account_key === accountKey) ?? {
+          account_label: "All accounts",
+          provider: "",
+        });
+  const prefix = current.provider ? `${providerLabel(current.provider)} · ` : "";
+  return `<button class="mc-btn account-cycle" data-action="team-account-cycle"
+    title="Filter bill split by account">${escapeHTML(prefix + current.account_label)}
+    <span class="title-swap">⇄</span></button>`;
 }
 
 // The model selector — same markup as the local-usage dropdown, with its own
@@ -90,29 +164,87 @@ function memberRow(
   m: MemberView,
   tokens: number,
   cost: number,
+  weight: number,
   maxTokens: number,
   theme: Theme,
   selfName: string,
   expand: { open: boolean; topProjects: number },
+  crime: { enabled: boolean; accountKey: string; share: number },
 ): string {
   const bar = theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
-  const frac = clamp01(tokens / maxTokens);
-  const trailing = cost > 0 ? `${formatTokens(tokens)} · ${formatDollars(cost)}` : formatTokens(tokens);
+  const frac = clamp01(weight / maxTokens);
+  const baseTrailing =
+    cost > 0 ? `${formatTokens(tokens)} · ${formatDollars(cost)}` : formatTokens(tokens);
+  const trailing = crime.enabled ? `${baseTrailing} · ${Math.round(crime.share * 100)}%` : baseTrailing;
   // Your own row uses your locally-set name, so it can't show a stale DB value.
   const display = m.is_self && selfName ? selfName : m.display_name;
   // A chevron signals the row is expandable to its top projects.
-  const chevron = expand.open ? "▾" : "▸";
-  const name = `${chevron} ${rank}. ${escapeHTML(display)}${m.is_self ? " (you)" : ""}`;
+  const chevron = crime.enabled ? "▾" : expand.open ? "▾" : "▸";
+  // Theme bar builders escape their title; pass plain text to avoid turning an
+  // apostrophe into a visible `&#39;` after double escaping.
+  const name = `${chevron} ${rank}. ${display}${m.is_self ? " (you)" : ""}${
+    m.is_legacy ? " [legacy]" : ""
+  }`;
   const sub = [m.current_project ? `⛏ ${m.current_project}` : null, seenLabel(m)]
     .filter(Boolean)
     .join(" · ");
   return `
-    <div class="team-row ${m.is_stale ? "team-stale" : ""} ${expand.open ? "team-open" : ""}"
-         data-action="team-expand" data-value="${escapeHTML(m.member_id)}">
+    <div class="team-row ${m.is_stale ? "team-stale" : ""} ${expand.open || crime.enabled ? "team-open" : ""}"
+         ${crime.enabled ? "" : `data-action="team-expand" data-value="${escapeHTML(m.member_id)}"`}>
       ${bar(name, frac, trailing)}
       ${sub ? `<div class="team-sub">${escapeHTML(sub)}</div>` : ""}
-      ${expand.open ? projectsHTML(m, expand.topProjects) : ""}
+      ${crime.enabled ? accountDetailsHTML(m, crime.accountKey) : expand.open ? projectsHTML(m, expand.topProjects) : ""}
     </div>`;
+}
+
+function accountDetailsHTML(m: MemberView, accountKey: string): string {
+  const accounts = m.by_account.filter((a) => accountKey === "all" || a.account_key === accountKey);
+  if (accounts.length === 0) {
+    return `<div class="crime-records"><div class="team-proj-empty">no usage for this account</div></div>`;
+  }
+  const rows = accounts
+    .map((account) => {
+      const value =
+        account.cost > 0
+          ? `${formatTokens(account.tokens)} · ${formatDollars(account.cost)}`
+          : formatTokens(account.tokens);
+      const models = account.by_model
+        .map((model) => {
+          const modelValue =
+            model.cost > 0
+              ? `${formatTokens(model.tokens)} · ${formatDollars(model.cost)}`
+              : formatTokens(model.tokens);
+          return `<div class="crime-model"><span>${escapeHTML(model.display_name)}</span><span>${escapeHTML(
+            modelValue,
+          )}</span></div>`;
+        })
+        .join("");
+      const hidden = account.attribution_status === "hidden" || account.account_key === "hidden";
+      const unknown = account.attribution_status === "unknown" || account.account_key === "unknown";
+      const accountName = m.is_legacy
+        ? "Legacy client · account unavailable"
+        : hidden
+          ? "Account not shared"
+          : unknown
+            ? "Unknown account · before tracking"
+            : `${providerLabel(account.provider)} · ${account.account_label}`;
+      const uncertain = m.is_legacy || hidden || unknown ? " crime-unknown" : "";
+      return `<div class="crime-account${uncertain}">
+        <div class="crime-account-head">
+          <span>${escapeHTML(accountName)}</span>
+          <span>${escapeHTML(value)}</span>
+        </div>
+        ${models}
+      </div>`;
+    })
+    .join("");
+  return `<div class="crime-records">${rows}</div>`;
+}
+
+function providerLabel(provider: string): string {
+  if (provider === "claude") return "Claude";
+  if (provider === "codex") return "Codex";
+  return provider;
 }
 
 // The top projects for a member (desc by tokens), shown when the row is open.
@@ -219,13 +351,40 @@ function tabPaneHTML(tab: SettingsTab, d: TeamConfig): string {
     ${field("Team name", "team_name", d.team_name, "My Team")}
     ${field("Your display name", "display_name", d.display_name, "")}
     ${field("Top projects (on expand)", "top_projects", String(d.top_projects), "5", "number")}
+    ${selectField("Account labels", "account_label_mode", d.account_label_mode, [
+      ["masked", "Masked email"],
+      ["full", "Full email"],
+      ["hidden", "Hidden"],
+    ])}
 
     <div class="settings-share-title">Share</div>
+    <p class="settings-help">Account is off by default. When enabled, labels use the privacy mode above.</p>
     <div class="settings-share">
       ${toggle("Tokens", "share_tokens", d.share_tokens)}
       ${toggle("Cost", "share_cost", d.share_cost)}
       ${toggle("Project", "share_project", d.share_project)}
+      ${toggle("Account", "share_account", d.share_account)}
     </div>`;
+}
+
+function selectField(
+  label: string,
+  name: string,
+  value: string,
+  options: [string, string][],
+): string {
+  return `
+    <label class="settings-row">
+      <span class="settings-label">${escapeHTML(label)}</span>
+      <select class="settings-input" data-field="${name}">
+        ${options
+          .map(
+            ([id, text]) =>
+              `<option value="${escapeHTML(id)}" ${id === value ? "selected" : ""}>${escapeHTML(text)}</option>`,
+          )
+          .join("")}
+      </select>
+    </label>`;
 }
 
 function field(

@@ -84,7 +84,11 @@ async fn fetch_usage(
 ) -> Result<usage::UsageReport, String> {
     let mut report = usage::fetch(cache.inner()).await.map_err(|e| e.to_string())?;
     // Add the "you'll run out before reset" projection from recorded history.
-    ambient::annotate(&app, &mut report);
+    let account_key = account::claude_identity()
+        .map(|i| i.account_key)
+        .unwrap_or_else(|| "unknown".into());
+    ambient::annotate(&app, "claude", &account_key, &mut report);
+    ambient::record_history(&app, "claude", &account_key, &report);
     // Add the this-machine vs other-devices split from the recorded series.
     share::annotate(&app, "claude", &mut report);
     // Bring the tray heart along: the ambient poll can lag minutes behind this
@@ -106,12 +110,14 @@ fn recheck_credentials(cache: tauri::State<'_, CredentialCache>) {
 /// can be read from local Claude Code state, with empty fields otherwise.
 #[tauri::command]
 fn fetch_account(cache: tauri::State<'_, CredentialCache>) -> account::AccountInfo {
+    account::observe_current_accounts();
     account::fetch(cache.inner())
 }
 
 /// Codex (ChatGPT) login identity for the footer, from `~/.codex/auth.json`.
 #[tauri::command]
 fn fetch_codex_account() -> account::AccountInfo {
+    account::observe_current_accounts();
     account::fetch_codex()
 }
 
@@ -132,6 +138,11 @@ async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, 
     let mut report = tokio::task::spawn_blocking(codexstats::fetch_quota)
         .await
         .map_err(|e| e.to_string())??;
+    let account_key = account::codex_identity()
+        .map(|i| i.account_key)
+        .unwrap_or_else(|| "unknown".into());
+    ambient::annotate(&app, "codex", &account_key, &mut report);
+    ambient::record_history(&app, "codex", &account_key, &report);
     // Record this machine's Codex share sample (scans logs → blocking thread),
     // then annotate the report with the this-machine vs others split.
     let app2 = app.clone();
@@ -268,6 +279,18 @@ fn spawn_team_uploader() {
     });
 }
 
+/// Keep account epochs fresh even while the popover is closed. A 30-second
+/// cadence is cheap (two small local JSON reads) and bounds the ambiguous gap
+/// around an account switch without touching credential secrets.
+fn spawn_account_observer() {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            account::observe_current_accounts();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -307,28 +330,33 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Cross-platform debug aid: show and pin the otherwise tray-only
+            // popover at launch so its content-driven geometry can be inspected.
+            let debug_show = std::env::var_os("HPBAR_DEBUG_SHOW").is_some();
+            if debug_show {
+                PINNED.store(true, Ordering::Relaxed);
+            }
             build_popover(app.handle())?;
             build_tray(app.handle())?;
-            // Debug aid: HPBAR_DEBUG_SHOW=1 shows the popover pinned at launch
-            // (no tray interaction needed) and, with HPBAR_DEBUG_CYCLE=1,
-            // deactivates the app after 8s — lets the focused/unfocused glass
-            // states be screenshotted non-interactively.
-            #[cfg(target_os = "macos")]
-            if std::env::var_os("HPBAR_DEBUG_SHOW").is_some() {
-                PINNED.store(true, Ordering::Relaxed);
+            if debug_show {
                 if let Some(win) = app.get_webview_window("popover") {
                     position_top_right(&win);
                     let _ = win.show();
                     let _ = win.set_focus();
-                    // set_focus alone can't activate an Accessory app launched
-                    // from a background shell — force it.
-                    unsafe {
-                        use objc2::msg_send;
-                        use objc2::runtime::{AnyObject, Bool};
-                        let napp: *mut AnyObject =
-                            msg_send![objc2::class!(NSApplication), sharedApplication];
-                        let _: () = msg_send![napp, activateIgnoringOtherApps: Bool::new(true)];
-                    }
+                }
+            }
+            // macOS additionally needs app activation; DEBUG_CYCLE then
+            // deactivates after 8s for focused/unfocused glass screenshots.
+            #[cfg(target_os = "macos")]
+            if debug_show {
+                // set_focus alone can't activate an Accessory app launched
+                // from a background shell — force it.
+                unsafe {
+                    use objc2::msg_send;
+                    use objc2::runtime::{AnyObject, Bool};
+                    let napp: *mut AnyObject =
+                        msg_send![objc2::class!(NSApplication), sharedApplication];
+                    let _: () = msg_send![napp, activateIgnoringOtherApps: Bool::new(true)];
                 }
                 if std::env::var_os("HPBAR_DEBUG_CYCLE").is_some() {
                     let handle = app.handle().clone();
@@ -352,6 +380,8 @@ pub fn run() {
             if let Ok(dir) = app.path().app_config_dir() {
                 app.state::<CredentialCache>().set_audit_dir(dir);
             }
+            account::start_observer_run();
+            spawn_account_observer();
             spawn_team_uploader();
             // Ambient HP: keep the menu-bar heart + tooltip live, and alert on
             // low/critical quota. Runs for the app's lifetime; no-op when signed out.
@@ -366,7 +396,25 @@ pub fn run() {
 /// tray click. We `hide()` rather than close it so its webview (and JS poll
 /// loop) stays alive between opens.
 fn build_popover(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let builder = WebviewWindowBuilder::new(app, "popover", WebviewUrl::App("index.html".into()))
+    let mut debug_query = Vec::new();
+    if let Ok(source @ ("live" | "local" | "team")) = std::env::var("HPBAR_DEBUG_SOURCE").as_deref()
+    {
+        debug_query.push(format!("source={source}"));
+    }
+    if let Ok(provider @ ("claude" | "codex")) =
+        std::env::var("HPBAR_DEBUG_PROVIDER").as_deref()
+    {
+        debug_query.push(format!("provider={provider}"));
+    }
+    if std::env::var_os("HPBAR_DEBUG_CRIME").is_some() {
+        debug_query.push("crime=1".to_string());
+    }
+    let page = if debug_query.is_empty() {
+        "index.html".to_string()
+    } else {
+        format!("index.html?{}", debug_query.join("&"))
+    };
+    let builder = WebviewWindowBuilder::new(app, "popover", WebviewUrl::App(page.into()))
         .title("HPBar")
         .inner_size(360.0, 300.0)
         .resizable(false)
