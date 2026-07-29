@@ -700,13 +700,16 @@ function usageDetailsHTML(report: UsageReport): string {
 // wait in `pendingCelebration` until the popover is actually on screen.
 const CELEBRATE_MS = 7_300; // a hair past the 7s CSS animation, then settle
 const REFILL_MIN_PRIOR = 0.5; // must have used ≥ half to "earn" the cheer
-const REFILL_FULL_UTIL = 0.2; // fallback signal: back to ≥ 80% remaining
+const REFILL_MIN_DROP = 0.3; // utilization must actually *fall* this much (a real reset)
 const REFILL_KEY = "hpbar-refill-v2";
 const REFILL_KEY_V1 = "hpbar-refill"; // pre-0.8.1: bare utilization numbers
-const REFILL_PENDING_KEY = "hpbar-refill-pending";
+// v2 (0.8.1) queued false positives; the rename orphans any stored junk.
+const REFILL_PENDING_KEY = "hpbar-refill-pending-v3";
+const REFILL_PENDING_KEY_V2 = "hpbar-refill-pending";
 
-// Per-window baseline: utilization and reset clock at the last poll.
-type RefillSeen = Record<string, { u: number; r: string | null }>;
+// Per-window baseline: utilization at the last poll. (0.8.1 also stored the
+// reset clock `r`; loading tolerates and drops it.)
+type RefillSeen = Record<string, { u: number }>;
 
 const celebrating = new Set<string>(); // window keys currently animating
 const pendingCelebration = new Set<string>(); // detected, waiting to be visible
@@ -717,11 +720,15 @@ const winKey = (w: UsageWindow): string => `${state.provider}/${w.title}`;
 function loadRefillState(): RefillSeen {
   try {
     const v2 = JSON.parse(localStorage.getItem(REFILL_KEY) ?? "null");
-    if (v2 && typeof v2 === "object") return v2 as RefillSeen;
+    if (v2 && typeof v2 === "object") {
+      return Object.fromEntries(
+        Object.entries(v2 as Record<string, { u: number }>).map(([k, v]) => [k, { u: Number(v.u) }]),
+      );
+    }
     const v1 = JSON.parse(localStorage.getItem(REFILL_KEY_V1) ?? "null");
     if (v1 && typeof v1 === "object") {
       return Object.fromEntries(
-        Object.entries(v1 as Record<string, number>).map(([k, u]) => [k, { u: Number(u), r: null }]),
+        Object.entries(v1 as Record<string, number>).map(([k, u]) => [k, { u: Number(u) }]),
       );
     }
   } catch {
@@ -745,6 +752,7 @@ function savePendingCelebration(): void {
 }
 function loadPendingCelebration(): void {
   try {
+    localStorage.removeItem(REFILL_PENDING_KEY_V2); // may hold 0.8.1 false positives
     const v = JSON.parse(localStorage.getItem(REFILL_PENDING_KEY) ?? "[]");
     if (Array.isArray(v)) v.forEach((k) => typeof k === "string" && pendingCelebration.add(k));
   } catch {
@@ -753,11 +761,13 @@ function loadPendingCelebration(): void {
 }
 
 // Compare live windows against the persisted baseline; return the keys whose
-// window reset since we last looked, and update the baseline. The primary
-// signal is the reset clock moving to a new instant (or the old one passing) —
-// robust even when the poll lands late enough that the fresh window is already
-// partly spent. The utilization-drop check remains as a fallback for windows
-// whose clock we never saw.
+// window actually reset since we last looked, and update the baseline. Within
+// a window utilization only ever climbs, so the one trustworthy reset signal
+// is utilization *falling* — and by a margin (REFILL_MIN_DROP) that neither
+// rounding jitter nor a rolling window slowly aging out old usage can produce.
+// This still catches a poll landing late into an already-in-use fresh window.
+// (Watching `resets_at` move was tried in 0.8.1 and fires falsely: some
+// sources recompute it on every fetch.)
 function detectRefills(report: UsageReport): string[] {
   const seen = loadRefillState();
   const refilled: string[] = [];
@@ -765,15 +775,10 @@ function detectRefills(report: UsageReport): string[] {
     if (w.trailing === "Off") continue;
     const key = winKey(w);
     const prev = seen[key];
-    if (prev != null && prev.u >= REFILL_MIN_PRIOR) {
-      const clockMoved =
-        prev.r != null &&
-        (w.resets_at != null
-          ? w.resets_at !== prev.r
-          : (Date.parse(prev.r) || Infinity) <= Date.now());
-      if (clockMoved || w.utilization <= REFILL_FULL_UTIL) refilled.push(key);
+    if (prev != null && prev.u >= REFILL_MIN_PRIOR && prev.u - w.utilization >= REFILL_MIN_DROP) {
+      refilled.push(key);
     }
-    seen[key] = { u: w.utilization, r: w.resets_at ?? null };
+    seen[key] = { u: w.utilization };
   }
   saveRefillState(seen);
   return refilled;
