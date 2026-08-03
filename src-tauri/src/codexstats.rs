@@ -303,9 +303,14 @@ pub fn fetch_quota(max_age_secs: i64) -> Result<UsageReport, String> {
 }
 
 fn build_quota(limits: RateLimits) -> Result<UsageReport, String> {
+    let scope = limits.limit_name.filter(|s| !s.trim().is_empty());
     let windows: Vec<UsageWindow> = [
-        limits.primary.map(|w| w.into_window()),
-        limits.secondary.map(|w| w.into_window()),
+        limits
+            .primary
+            .map(|w| w.into_window(scope.as_deref())),
+        limits
+            .secondary
+            .map(|w| w.into_window(scope.as_deref())),
     ]
     .into_iter()
     .flatten()
@@ -319,7 +324,9 @@ fn build_quota(limits: RateLimits) -> Result<UsageReport, String> {
 
     let mut details = Vec::new();
     if let Some(credits) = limits.credits {
-        if credits.unlimited == Some(true) {
+        if credits.has_credits == Some(false) {
+            // No add-on balance means there is nothing useful to display.
+        } else if credits.unlimited == Some(true) {
             details.push(UsageDetail {
                 label: "Credits".into(),
                 value: "Unlimited".into(),
@@ -329,23 +336,12 @@ fn build_quota(limits: RateLimits) -> Result<UsageReport, String> {
                 label: "Credit balance".into(),
                 value: format_number(balance),
             });
-        } else if credits.has_credits == Some(false) {
-            details.push(UsageDetail {
-                label: "Credits".into(),
-                value: "No add-on balance".into(),
-            });
         }
     }
     if limits.spend_control_reached == Some(true) {
         details.push(UsageDetail {
             label: "Spend control".into(),
             value: "Reached".into(),
-        });
-    }
-    if let Some(name) = limits.limit_name.filter(|s| !s.trim().is_empty()) {
-        details.push(UsageDetail {
-            label: "Limit".into(),
-            value: name,
         });
     }
     let plan = limits.plan_type.unwrap_or_else(|| "Codex".into());
@@ -459,13 +455,18 @@ struct Window {
 }
 
 impl Window {
-    fn into_window(self) -> UsageWindow {
+    fn into_window(self, scope: Option<&str>) -> UsageWindow {
         let util = clamp01(self.used_percent.unwrap_or(0.0) / 100.0);
+        let base = window_title(self.window_minutes);
+        let title = match scope {
+            Some(name) => format!("{base} ({name})"),
+            None => base,
+        };
         UsageWindow {
             utilization: util,
             remaining: clamp01(1.0 - util),
             resets_at: self.resets_at.and_then(epoch_to_rfc3339),
-            title: window_title(self.window_minutes),
+            title,
             window_minutes: self.window_minutes,
             trailing: None,
             eta_secs: None,
@@ -578,5 +579,22 @@ mod tests {
         assert_eq!(report.windows[0].window_minutes, Some(10_080));
         assert_eq!(report.details[0].label, "Credit balance");
         assert_eq!(report.details[0].value, "123.50");
+    }
+
+    #[test]
+    fn scoped_fallback_labels_the_bar_instead_of_a_detail_box() {
+        let limits: RateLimits = serde_json::from_str(
+            r#"{
+              "primary":{"used_percent":0,"window_minutes":10080,"resets_at":1786000000},
+              "secondary":null,
+              "plan_type":"prolite",
+              "limit_name":"GPT-5.3-Codex-Spark",
+              "credits":{"has_credits":false,"unlimited":false,"balance":"0"}
+            }"#,
+        )
+        .unwrap();
+        let report = build_quota(limits).unwrap();
+        assert_eq!(report.windows[0].title, "Weekly (GPT-5.3-Codex-Spark)");
+        assert!(report.details.is_empty());
     }
 }

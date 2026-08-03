@@ -12,6 +12,7 @@ pub mod codexstats;
 pub mod credentials;
 pub mod heart_icon;
 pub mod localstats;
+pub mod network;
 pub mod openclawstats;
 pub mod pricing;
 pub mod share;

@@ -123,7 +123,7 @@ struct State {
     /// Fingerprint of the storage item as of our last data read. `None` means we
     /// have never read it.
     fingerprint: Option<String>,
-    /// The cached token was rejected by the API (401) or has expired: unusable,
+    /// The cached token was rejected by the API (401/auth-related 403) or has expired: unusable,
     /// but re-reading is pointless until the fingerprint moves.
     rejected: bool,
     /// Have we ever attempted a data read? The first one is always warranted.
@@ -257,7 +257,7 @@ impl CredentialCache {
         }
     }
 
-    /// The cached token was rejected by the API (401) or has expired.
+    /// The cached token was rejected by the API (401/auth-related 403) or has expired.
     ///
     /// This does *not* schedule a re-read: the token in storage is the same one
     /// we already hold, so re-reading would only raise another password prompt.

@@ -274,20 +274,39 @@ let refreshGeneration = 0;
 // switches) can't spam SSH tunnels / the DB: at most one in flight, and no more
 // than once per minute. The 30-min background uploader is separate/unaffected.
 let teamUploadInFlight: Promise<string | null> | null = null;
+let teamFetchInFlight: Promise<TeamReport> | null = null;
+let teamFetchRange: WindowKey | null = null;
 let lastTeamUploadAt = 0;
 const TEAM_UPLOAD_MIN_MS = 60_000;
+// Includes the local 90-day log scan that happens before the DB's own 60s
+// deadline. Upload is background-only on Team, so a generous coalescing window
+// is preferable to starting a duplicate scan while the first is still useful.
+const TEAM_UPLOAD_DEADLINE_MS = 120_000;
+const TEAM_FETCH_DEADLINE_MS = 35_000;
 
-/** Upload before reading Team so a freshly-migrated v2 member never sees an
- * empty roster while waiting for the background loop. Concurrent refreshes
- * share one promise; callers that only want a best-effort push can ignore the
- * returned error string. */
+function withDeadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/** Start a best-effort Team upload. Concurrent refreshes share one promise;
+ * callers that only want to prime the next report can ignore its error. */
 function maybeUploadTeam(force = false): Promise<string | null> {
   if (MOCK || !state.teamConfig?.enabled) return Promise.resolve(null);
   if (teamUploadInFlight) return teamUploadInFlight;
   const now = Date.now();
   if (!force && now - lastTeamUploadAt < TEAM_UPLOAD_MIN_MS) return Promise.resolve(null);
   lastTeamUploadAt = now;
-  const upload = invoke("upload_team_snapshot")
+  const upload = withDeadline(
+    invoke("upload_team_snapshot"),
+    TEAM_UPLOAD_DEADLINE_MS,
+    "Team upload timed out after 120s.",
+  )
     .then(() => null)
     .catch((err) => String(err))
     .finally(() => {
@@ -295,6 +314,25 @@ function maybeUploadTeam(force = false): Promise<string | null> {
     });
   teamUploadInFlight = upload;
   return upload;
+}
+
+/** Coalesce the startup/config-load double refresh onto one DB read. A range
+ * change may start its own request, but every request still has a deadline. */
+function fetchTeamReport(range: WindowKey): Promise<TeamReport> {
+  if (teamFetchInFlight && teamFetchRange === range) return teamFetchInFlight;
+  const request = withDeadline(
+    invoke<TeamReport>("fetch_team", { range }),
+    TEAM_FETCH_DEADLINE_MS,
+    "Team refresh timed out after 35s.",
+  ).finally(() => {
+    if (teamFetchInFlight === request) {
+      teamFetchInFlight = null;
+      teamFetchRange = null;
+    }
+  });
+  teamFetchInFlight = request;
+  teamFetchRange = range;
+  return request;
 }
 
 async function refresh(): Promise<void> {
@@ -343,7 +381,9 @@ async function refresh(): Promise<void> {
   const source = state.source;
   const teamRange = state.teamRange;
   const windowSecs = WINDOW_SECS[state.window];
-  state.loading = true;
+  // Keep the last good Team report stable during a background refresh. The
+  // header does not need an endless spinner while usable cached data exists.
+  state.loading = source !== "team" || state.team === null;
   render();
   const codex = provider === "codex";
   // Refetch identity on every poll: it's a cheap local-file read, and the plan
@@ -375,10 +415,11 @@ async function refresh(): Promise<void> {
       savePendingCelebration();
       armDamage(detectDamage(state.live));
     } else if (source === "team") {
-      // Push first, then read. This makes a v1→v2 migration visible on the very
-      // first Team open instead of showing an empty roster until the next poll.
-      await maybeUploadTeam();
-      const team = await invoke<TeamReport>("fetch_team", { range: teamRange });
+      // Uploading a 90-day snapshot can take longer than reading the roster,
+      // especially over a high-latency SSH tunnel. It is best-effort and must
+      // never hold the Team tab hostage; the next refresh picks up the result.
+      void maybeUploadTeam();
+      const team = await fetchTeamReport(teamRange);
       if (generation !== refreshGeneration) return;
       state.team = team;
       // Keep the model selection valid as the range/data changes.
@@ -1671,6 +1712,19 @@ if (params.get("view") === "settings") {
 // Tauri-only wiring: re-fetch when the popover opens, and on a slow timer.
 // Skipped in showcase/browser mode (no Tauri runtime).
 if (!MOCK) {
+  listen<UsageReport>("claude-usage-updated", (event) => {
+    if (state.provider !== "claude") return;
+    state.live = event.payload;
+    if (state.source === "live") {
+      // A successful background response is newer than any foreground error
+      // still in flight, so make it authoritative and clear the stale 403.
+      refreshGeneration += 1;
+      state.error = "";
+      state.loading = false;
+      state.updatedAt = nowTime();
+      render();
+    }
+  });
   listen("refresh", () => {
     // Popover just became visible: play any refill detected while hidden, even
     // if the refresh itself short-circuits (poll already in flight, etc.).

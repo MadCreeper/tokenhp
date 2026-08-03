@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 /// Tray icon id — must match the `TrayIconBuilder::with_id` in `lib.rs`.
@@ -88,12 +88,15 @@ fn crossing(prev: u8, remaining: f64) -> Crossing {
 
 /// The most-depleted *active* window's remaining fraction — the "are you about to
 /// be blocked" signal that drives the icon. Disabled extra-usage ("Off") windows
-/// are skipped. `None` when there are no windows.
+/// are skipped, and so is anything without a window duration (the extra-usage
+/// spending balance): a balance never resets, so letting it drive the heart pins
+/// the low-HP annunciator on permanently even while every rate window is
+/// healthy. `None` when there are no rate windows.
 pub fn min_remaining(report: &UsageReport) -> Option<f64> {
     report
         .windows
         .iter()
-        .filter(|w| w.trailing.as_deref() != Some("Off"))
+        .filter(|w| w.trailing.as_deref() != Some("Off") && w.window_minutes.is_some())
         .map(|w| w.remaining)
         .fold(None, |acc, r| Some(acc.map_or(r, |a: f64| a.min(r))))
 }
@@ -348,10 +351,11 @@ pub fn spawn(app: AppHandle) {
         // annunciator must clear even when we can't reach the endpoint.
         let mut last_good: Option<UsageReport> = None;
         loop {
-            if let Ok(report) = fetch(&app).await {
+            if let Ok(mut report) = fetch(&app).await {
                 let account_key = crate::account::claude_identity()
                     .map(|i| i.account_key)
                     .unwrap_or_else(|| "unknown".into());
+                annotate(&app, "claude", &account_key, &mut report);
                 record_history(&app, "claude", &account_key, &report);
                 // Record the device-share series (scans local logs → blocking thread).
                 {
@@ -362,6 +366,11 @@ pub fn spawn(app: AppHandle) {
                     })
                     .await;
                 }
+                crate::share::annotate(&app, "claude", &mut report);
+                // Keep an open/pinned Live view in sync with this successful
+                // read. This carries quota data only—never credential data—and
+                // avoids leaving an old 403 on screen after token rollover.
+                let _ = app.emit("claude-usage-updated", report.clone());
                 last_good = Some(report);
             }
             if let Some(report) = &last_good {
@@ -575,6 +584,24 @@ mod tests {
     }
 
     #[test]
+    fn min_remaining_skips_the_extra_usage_balance() {
+        // An 83%-spent extra-usage balance has no reset clock: it must not hold
+        // the tray at "17%" while every rate window is healthy.
+        let r = report(vec![
+            win("5-Hour", 0.75, false),
+            win("Weekly", 0.96, false),
+            win("Extra usage", 0.17, false),
+        ]);
+        assert_eq!(min_remaining(&r), Some(0.75));
+    }
+
+    #[test]
+    fn min_remaining_none_without_rate_windows() {
+        let r = report(vec![win("Extra usage", 0.17, false)]);
+        assert_eq!(min_remaining(&r), None);
+    }
+
+    #[test]
     fn severity_buckets() {
         assert_eq!(severity(0.9), 0);
         assert_eq!(severity(0.20), 1);
@@ -643,8 +670,9 @@ mod tests {
             Some(future.as_str())
         );
         assert_eq!(rolled.windows[2].remaining, 0.30);
-        // The stale "12%" tray annunciator clears: min is no longer ≤ LOW.
-        assert_eq!(min_remaining(&rolled), Some(0.30));
+        // The stale "12%" tray annunciator clears: min is no longer ≤ LOW, and
+        // the clockless extra-usage balance doesn't get to drive the heart.
+        assert_eq!(min_remaining(&rolled), Some(0.40));
     }
 
     #[test]

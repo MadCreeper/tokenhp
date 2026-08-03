@@ -38,19 +38,17 @@ pub async fn fetch() -> Result<UsageReport, String> {
         return Err("Codex login expired. Open Codex to refresh it, then retry.".into());
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| format!("Network error: {e}"))?;
-    let resp = client
-        .get(USAGE_URL)
-        .header("Authorization", format!("Bearer {}", auth.access_token))
-        .header("chatgpt-account-id", &auth.account_id)
-        .header("originator", "codex_cli_rs")
-        .header("User-Agent", format!("codex_cli_rs/{CODEX_CLI_VERSION}"))
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {e}"))?;
+    // Codex itself is launched from the terminal and therefore honors the
+    // shell's HTTPS proxy. Mirror that route up front: the direct ChatGPT path
+    // can hang until timeout from a Finder-launched app, so waiting for a 403
+    // before discovering the proxy would silently force the local fallback.
+    let proxy_url = crate::network::login_shell_proxy();
+    let client = crate::network::client(
+        proxy_url.as_deref(),
+        std::time::Duration::from_secs(20),
+    )
+    .map_err(|e| format!("Network error: {e}"))?;
+    let resp = send_request(&client, &auth).await?;
 
     match resp.status().as_u16() {
         200 => {}
@@ -66,6 +64,18 @@ pub async fn fetch() -> Result<UsageReport, String> {
         .await
         .map_err(|_| "Could not parse the Codex usage response.".to_string())?;
     payload.into_report()
+}
+
+async fn send_request(client: &reqwest::Client, auth: &Auth) -> Result<reqwest::Response, String> {
+    client
+        .get(USAGE_URL)
+        .header("Authorization", format!("Bearer {}", auth.access_token))
+        .header("chatgpt-account-id", &auth.account_id)
+        .header("originator", "codex_cli_rs")
+        .header("User-Agent", format!("codex_cli_rs/{CODEX_CLI_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))
 }
 
 struct Auth {
@@ -186,7 +196,10 @@ impl Payload {
         let mut details = Vec::new();
         if let Some(credits) = self.credits {
             let balance = credits.balance.as_ref().and_then(parse_number);
-            if credits.unlimited == Some(true) {
+            if credits.has_credits == Some(false) {
+                // A zero balance with add-on credits disabled is not actionable
+                // quota information; omit the cosmetic metadata block.
+            } else if credits.unlimited == Some(true) {
                 details.push(UsageDetail {
                     label: "Credits".into(),
                     value: "Unlimited".into(),
@@ -195,11 +208,6 @@ impl Payload {
                 details.push(UsageDetail {
                     label: "Credit balance".into(),
                     value: format_number(balance),
-                });
-            } else if credits.has_credits == Some(false) {
-                details.push(UsageDetail {
-                    label: "Credits".into(),
-                    value: "No add-on balance".into(),
                 });
             }
         }
@@ -342,10 +350,8 @@ mod tests {
             Some("2026-08-04T07:40:50+00:00")
         );
         assert!(crate::usage::is_model_scoped_title(&report.windows[1].title));
-        // Zero string balance renders as a "Credit balance" row, same as the
-        // rollout path.
-        assert_eq!(report.details[0].label, "Credit balance");
-        assert_eq!(report.details[0].value, "0");
+        // Add-on credits are disabled, so the zero balance is not useful UI.
+        assert!(report.details.is_empty());
     }
 
     #[test]

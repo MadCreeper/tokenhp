@@ -1179,22 +1179,24 @@ html.glass.blurred body.theme-classic .header {
 .quota-details {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  margin-top: 9px;
-  padding: 7px 9px;
-  border: 1px solid var(--bevel-shadow);
+  gap: 4px;
+  margin-top: 8px;
+  padding: 7px 2px 0;
+  border-top: 1px solid var(--bevel-shadow);
   color: var(--panel-text-dim);
 }
 .quota-detail {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 12px;
+  padding: 0 2px;
   font-size: 9px;
   font-variant-numeric: tabular-nums;
 }
 .theme-classic .quota-details,
 .theme-arknights .quota-details {
-  border-color: #c4c4c4;
+  border-top-color: #c4c4c4;
 }
 .theme-classic .quota-detail,
 .theme-arknights .quota-detail {

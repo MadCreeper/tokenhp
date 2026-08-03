@@ -16,10 +16,11 @@ use super::TeamConfig;
 use crate::localstats::UsageRow;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{types::ToSql, Client, NoTls, Transaction};
 
 /// A member is "stale" (row fades) once their last activity is older than this
 /// — scaled to the viewed range: 2h reads right for Today, but over 7d/30d the
@@ -33,6 +34,12 @@ fn stale_secs(range: &str) -> i64 {
 }
 /// Arbitrary key so concurrent migrators serialize via `pg_advisory_xact_lock`.
 const MIGRATE_LOCK: i64 = 0x0048_5042_4152; // "HPBAR"
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+const SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(75);
+const INSERT_CHUNK_SIZE: usize = 128;
 
 /// Ordered schema migrations. To evolve the schema later, append a new
 /// `(version, sql)` entry — it runs once on the next connect.
@@ -294,16 +301,24 @@ pub async fn upload(
     email: Option<&str>,
     rows: Vec<UsageRow>,
 ) -> Result<(), String> {
-    let mut conn = connect(cfg).await?;
-    migrate(&mut conn.client).await?;
-    write_member(&mut conn.client, cfg, email, &rows).await
+    tokio::time::timeout(UPLOAD_TIMEOUT, async {
+        let mut conn = connect(cfg).await?;
+        migrate(&mut conn.client).await?;
+        write_member(&mut conn.client, cfg, email, &rows).await
+    })
+    .await
+    .map_err(|_| "Team upload timed out after 60s; its transaction was rolled back.".to_string())?
 }
 
 /// Aggregate the leaderboard for `range` ("day" | "week" | "month").
 pub async fn fetch(cfg: &TeamConfig, range: &str) -> Result<TeamReport, String> {
-    let mut conn = connect(cfg).await?;
-    migrate(&mut conn.client).await?;
-    read_team(&conn.client, cfg, range).await
+    tokio::time::timeout(FETCH_TIMEOUT, async {
+        let mut conn = connect(cfg).await?;
+        migrate(&mut conn.client).await?;
+        read_team(&conn.client, cfg, range).await
+    })
+    .await
+    .map_err(|_| "Team refresh timed out after 30s.".to_string())?
 }
 
 /// The handshake: connect, migrate, write our member, read the roster back.
@@ -312,21 +327,27 @@ pub async fn handshake(
     email: Option<&str>,
     rows: Vec<UsageRow>,
 ) -> Result<TeamHandshake, String> {
-    let mut conn = connect(cfg).await?;
-    migrate(&mut conn.client).await?;
-    write_member(&mut conn.client, cfg, email, &rows).await?;
-    let report = read_team(&conn.client, cfg, "day").await?;
-    let members = report
-        .members
-        .iter()
-        .map(|m| m.display_name.clone())
-        .collect();
-    Ok(TeamHandshake {
-        ok: true,
-        team_name: report.team_name,
-        member_count: report.members.len(),
-        members,
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let mut conn = connect(cfg).await?;
+        migrate(&mut conn.client).await?;
+        write_member(&mut conn.client, cfg, email, &rows).await?;
+        let report = read_team(&conn.client, cfg, "day").await?;
+        let members = report
+            .members
+            .iter()
+            .map(|m| m.display_name.clone())
+            .collect();
+        Ok(TeamHandshake {
+            ok: true,
+            team_name: report.team_name,
+            member_count: report.members.len(),
+            members,
+        })
     })
+    .await
+    .map_err(|_| {
+        "Team connection test timed out after 75s; its transaction was rolled back.".to_string()
+    })?
 }
 
 // --- connection + tunnel -----------------------------------------------------
@@ -357,17 +378,32 @@ async fn connect(cfg: &TeamConfig) -> Result<Conn, String> {
         }
     };
 
-    let conf = format!(
-        "host={host} port={port} dbname={} user={} application_name=hpbar connect_timeout=10",
-        cfg.db_name, cfg.db_user
-    );
-    let (client, connection) = tokio_postgres::connect(&conf, NoTls)
+    let mut conf = tokio_postgres::Config::new();
+    conf.host(&host)
+        .port(port)
+        .dbname(&cfg.db_name)
+        .user(&cfg.db_user)
+        .application_name("hpbar")
+        .connect_timeout(Duration::from_secs(10));
+    let (client, connection) = tokio::time::timeout(CONNECT_TIMEOUT, conf.connect(NoTls))
         .await
+        .map_err(|_| "Postgres handshake timed out after 12s.".to_string())?
         .map_err(|e| format!("Postgres connect failed: {e}"))?;
     // The connection drives the protocol; it ends when `client` is dropped.
     tokio::spawn(async move {
         let _ = connection.await;
     });
+    tokio::time::timeout(
+        SESSION_SETUP_TIMEOUT,
+        client.batch_execute(
+            "SET lock_timeout = '5s';
+             SET statement_timeout = '30s';
+             SET idle_in_transaction_session_timeout = '30s';",
+        ),
+    )
+    .await
+    .map_err(|_| "Postgres session setup timed out after 5s.".to_string())?
+    .map_err(|e| format!("Postgres session setup failed: {e}"))?;
     Ok(Conn {
         client,
         _tunnel: tunnel,
@@ -535,9 +571,14 @@ async fn migrate(client: &mut Client) -> Result<(), String> {
 
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
     // Serialize concurrent migrators; auto-released at commit.
-    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&MIGRATE_LOCK])
+    let lock_acquired: bool = tx
+        .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&MIGRATE_LOCK])
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .get(0);
+    if !lock_acquired {
+        return Err("Team database migration is already in progress; retry shortly.".into());
+    }
     let current: i32 = tx
         .query_one(
             "SELECT COALESCE(MAX(version), 0)::int FROM schema_migrations",
@@ -598,6 +639,20 @@ async fn write_member(
     };
 
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
+    // The foreground refresh and background timer can otherwise upload the
+    // same installation concurrently. Fail the redundant writer quickly
+    // instead of waiting behind its row locks for the whole backfill.
+    let upload_lock_acquired: bool = tx
+        .query_one(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1, $2))",
+            &[&cfg.member_id, &MIGRATE_LOCK],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .get(0);
+    if !upload_lock_acquired {
+        return Err("A Team upload for this member is already in progress.".into());
+    }
     let mut legacy_member_id = cfg.legacy_member_id.clone();
     let configured_legacy_exists = if legacy_member_id.trim().is_empty() {
         false
@@ -660,7 +715,7 @@ async fn write_member(
         ],
     )
     .await
-    .map_err(|e| format!("upsert member failed: {e}"))?;
+    .map_err(|e| postgres_error("upsert member failed", e))?;
 
     // Replace this member's recent window wholesale (idempotent; only our rows).
     tx.execute(
@@ -676,104 +731,9 @@ async fn write_member(
     .await
     .map_err(|e| e.to_string())?;
 
-    for r in rows {
-        let Ok(day) = NaiveDate::parse_from_str(&r.day, "%Y-%m-%d") else {
-            continue;
-        };
-        let project = project_label(&r.project, cfg);
-        let (input, output, cache_read, cache_create, unattributed, tokens) = if cfg.share_tokens {
-            (
-                r.input,
-                r.output,
-                r.cache_read,
-                r.cache_create,
-                r.unattributed,
-                r.tokens,
-            )
-        } else {
-            (0, 0, 0, 0, 0, 0)
-        };
-        let cost = if cfg.share_cost { r.cost } else { 0.0 };
-        let account_label = super::shared_account_label(cfg, &r.account_label);
-        let (account_key, billing_key) =
-            super::shared_account_keys(cfg, &r.account_key, &r.billing_key);
-        let attribution_status = if cfg.share_account {
-            r.attribution_status.as_str()
-        } else {
-            "hidden"
-        };
-        tx.execute(
-            "INSERT INTO usage_daily_v2(
-               member_id, day, provider, account_key, billing_key, account_label,
-               attribution_status, project, model, input, output, cache_read,
-               cache_create, unattributed, tokens, cost
-             )
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-             ON CONFLICT (member_id, day, provider, account_key, project, model) DO UPDATE SET
-               billing_key=excluded.billing_key, account_label=excluded.account_label,
-               attribution_status=excluded.attribution_status,
-               input=usage_daily_v2.input + excluded.input,
-               output=usage_daily_v2.output + excluded.output,
-               cache_read=usage_daily_v2.cache_read + excluded.cache_read,
-               cache_create=usage_daily_v2.cache_create + excluded.cache_create,
-               unattributed=usage_daily_v2.unattributed + excluded.unattributed,
-               tokens=usage_daily_v2.tokens + excluded.tokens,
-               cost=usage_daily_v2.cost + excluded.cost",
-            &[
-                &cfg.member_id,
-                &day,
-                &r.provider,
-                &account_key,
-                &billing_key,
-                &account_label,
-                &attribution_status,
-                &project,
-                &r.model,
-                &input,
-                &output,
-                &cache_read,
-                &cache_create,
-                &unattributed,
-                &tokens,
-                &cost,
-            ],
-        )
-        .await
-        .map_err(|e| format!("insert usage failed: {e}"))?;
-
-        // v1-compatible aggregate. Multiple provider/account rows collapse onto
-        // the old key; the precise rows above remain authoritative for v2.
-        tx.execute(
-            "INSERT INTO usage_daily(
-               member_id, day, project, model, input, output, cache_read,
-               cache_create, unattributed, tokens, cost
-             )
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-             ON CONFLICT (member_id, day, project, model) DO UPDATE SET
-               input=usage_daily.input + excluded.input,
-               output=usage_daily.output + excluded.output,
-               cache_read=usage_daily.cache_read + excluded.cache_read,
-               cache_create=usage_daily.cache_create + excluded.cache_create,
-               unattributed=usage_daily.unattributed + excluded.unattributed,
-               tokens=usage_daily.tokens + excluded.tokens,
-               cost=usage_daily.cost + excluded.cost",
-            &[
-                &cfg.member_id,
-                &day,
-                &project,
-                &r.model,
-                &input,
-                &output,
-                &cache_read,
-                &cache_create,
-                &unattributed,
-                &tokens,
-                &cost,
-            ],
-        )
-        .await
-        .map_err(|e| format!("insert legacy-compatible usage failed: {e}"))?;
-    }
+    let prepared = prepare_usage_rows(cfg, rows);
+    insert_usage_v2(&tx, &cfg.member_id, &prepared).await?;
+    insert_legacy_usage(&tx, &cfg.member_id, &prepared).await?;
 
     tx.execute(
         "INSERT INTO team_meta(key, value) VALUES('team_name', $1) ON CONFLICT (key) DO NOTHING",
@@ -783,6 +743,273 @@ async fn write_member(
     .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct UsageKey {
+    day: NaiveDate,
+    provider: String,
+    account_key: String,
+    project: String,
+    model: String,
+}
+
+struct PreparedUsage {
+    key: UsageKey,
+    billing_key: String,
+    account_label: String,
+    attribution_status: String,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_create: i64,
+    unattributed: i64,
+    tokens: i64,
+    cost: f64,
+}
+
+/// Apply sharing controls and combine rows that privacy masking collapses onto
+/// the same DB key. Pre-aggregation is also required for a multi-row Postgres
+/// upsert: one statement cannot update the same conflict target twice.
+fn prepare_usage_rows(cfg: &TeamConfig, rows: &[UsageRow]) -> Vec<PreparedUsage> {
+    let mut prepared: HashMap<UsageKey, PreparedUsage> = HashMap::new();
+    for row in rows {
+        let Ok(day) = NaiveDate::parse_from_str(&row.day, "%Y-%m-%d") else {
+            continue;
+        };
+        let project = project_label(&row.project, cfg);
+        let (account_key, billing_key) =
+            super::shared_account_keys(cfg, &row.account_key, &row.billing_key);
+        let key = UsageKey {
+            day,
+            provider: row.provider.clone(),
+            account_key,
+            project,
+            model: row.model.clone(),
+        };
+        let (input, output, cache_read, cache_create, unattributed, tokens) =
+            if cfg.share_tokens {
+                (
+                    row.input,
+                    row.output,
+                    row.cache_read,
+                    row.cache_create,
+                    row.unattributed,
+                    row.tokens,
+                )
+            } else {
+                (0, 0, 0, 0, 0, 0)
+            };
+        let cost = if cfg.share_cost { row.cost } else { 0.0 };
+        let entry = prepared.entry(key).or_insert_with_key(|key| PreparedUsage {
+            key: UsageKey {
+                day: key.day,
+                provider: key.provider.clone(),
+                account_key: key.account_key.clone(),
+                project: key.project.clone(),
+                model: key.model.clone(),
+            },
+            billing_key,
+            account_label: super::shared_account_label(cfg, &row.account_label),
+            attribution_status: if cfg.share_account {
+                row.attribution_status.clone()
+            } else {
+                "hidden".into()
+            },
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_create: 0,
+            unattributed: 0,
+            tokens: 0,
+            cost: 0.0,
+        });
+        entry.input += input;
+        entry.output += output;
+        entry.cache_read += cache_read;
+        entry.cache_create += cache_create;
+        entry.unattributed += unattributed;
+        entry.tokens += tokens;
+        entry.cost += cost;
+    }
+    let mut rows: Vec<_> = prepared.into_values().collect();
+    rows.sort_by(|a, b| {
+        a.key
+            .day
+            .cmp(&b.key.day)
+            .then(a.key.provider.cmp(&b.key.provider))
+            .then(a.key.account_key.cmp(&b.key.account_key))
+            .then(a.key.project.cmp(&b.key.project))
+            .then(a.key.model.cmp(&b.key.model))
+    });
+    rows
+}
+
+async fn insert_usage_v2(
+    tx: &Transaction<'_>,
+    member_id: &String,
+    rows: &[PreparedUsage],
+) -> Result<(), String> {
+    for chunk in rows.chunks(INSERT_CHUNK_SIZE) {
+        let mut sql = String::from(
+            "INSERT INTO usage_daily_v2(
+               member_id, day, provider, account_key, billing_key, account_label,
+               attribution_status, project, model, input, output, cache_read,
+               cache_create, unattributed, tokens, cost
+             ) VALUES ",
+        );
+        append_placeholders(&mut sql, chunk.len(), 16);
+        sql.push_str(
+            " ON CONFLICT (member_id, day, provider, account_key, project, model) DO UPDATE SET
+               billing_key=excluded.billing_key, account_label=excluded.account_label,
+               attribution_status=excluded.attribution_status,
+               input=usage_daily_v2.input + excluded.input,
+               output=usage_daily_v2.output + excluded.output,
+               cache_read=usage_daily_v2.cache_read + excluded.cache_read,
+               cache_create=usage_daily_v2.cache_create + excluded.cache_create,
+               unattributed=usage_daily_v2.unattributed + excluded.unattributed,
+               tokens=usage_daily_v2.tokens + excluded.tokens,
+               cost=usage_daily_v2.cost + excluded.cost",
+        );
+        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 16);
+        for row in chunk {
+            params.extend_from_slice(&[
+                member_id,
+                &row.key.day,
+                &row.key.provider,
+                &row.key.account_key,
+                &row.billing_key,
+                &row.account_label,
+                &row.attribution_status,
+                &row.key.project,
+                &row.key.model,
+                &row.input,
+                &row.output,
+                &row.cache_read,
+                &row.cache_create,
+                &row.unattributed,
+                &row.tokens,
+                &row.cost,
+            ]);
+        }
+        tx.execute(&sql, &params)
+            .await
+            .map_err(|e| postgres_error("insert usage failed", e))?;
+    }
+    Ok(())
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct LegacyKey {
+    day: NaiveDate,
+    project: String,
+    model: String,
+}
+
+#[derive(Default)]
+struct UsageTotals {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_create: i64,
+    unattributed: i64,
+    tokens: i64,
+    cost: f64,
+}
+
+async fn insert_legacy_usage(
+    tx: &Transaction<'_>,
+    member_id: &String,
+    rows: &[PreparedUsage],
+) -> Result<(), String> {
+    let mut collapsed: HashMap<LegacyKey, UsageTotals> = HashMap::new();
+    for row in rows {
+        let totals = collapsed
+            .entry(LegacyKey {
+                day: row.key.day,
+                project: row.key.project.clone(),
+                model: row.key.model.clone(),
+            })
+            .or_default();
+        totals.input += row.input;
+        totals.output += row.output;
+        totals.cache_read += row.cache_read;
+        totals.cache_create += row.cache_create;
+        totals.unattributed += row.unattributed;
+        totals.tokens += row.tokens;
+        totals.cost += row.cost;
+    }
+    let mut collapsed: Vec<_> = collapsed.into_iter().collect();
+    collapsed.sort_by(|(a, _), (b, _)| {
+        a.day
+            .cmp(&b.day)
+            .then(a.project.cmp(&b.project))
+            .then(a.model.cmp(&b.model))
+    });
+
+    for chunk in collapsed.chunks(INSERT_CHUNK_SIZE) {
+        let mut sql = String::from(
+            "INSERT INTO usage_daily(
+               member_id, day, project, model, input, output, cache_read,
+               cache_create, unattributed, tokens, cost
+             ) VALUES ",
+        );
+        append_placeholders(&mut sql, chunk.len(), 11);
+        sql.push_str(
+            " ON CONFLICT (member_id, day, project, model) DO UPDATE SET
+               input=usage_daily.input + excluded.input,
+               output=usage_daily.output + excluded.output,
+               cache_read=usage_daily.cache_read + excluded.cache_read,
+               cache_create=usage_daily.cache_create + excluded.cache_create,
+               unattributed=usage_daily.unattributed + excluded.unattributed,
+               tokens=usage_daily.tokens + excluded.tokens,
+               cost=usage_daily.cost + excluded.cost",
+        );
+        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 11);
+        for (key, totals) in chunk {
+            params.extend_from_slice(&[
+                member_id,
+                &key.day,
+                &key.project,
+                &key.model,
+                &totals.input,
+                &totals.output,
+                &totals.cache_read,
+                &totals.cache_create,
+                &totals.unattributed,
+                &totals.tokens,
+                &totals.cost,
+            ]);
+        }
+        tx.execute(&sql, &params)
+            .await
+            .map_err(|e| postgres_error("insert legacy-compatible usage failed", e))?;
+    }
+    Ok(())
+}
+
+fn append_placeholders(sql: &mut String, rows: usize, columns: usize) {
+    for row in 0..rows {
+        if row > 0 {
+            sql.push(',');
+        }
+        sql.push('(');
+        for column in 0..columns {
+            if column > 0 {
+                sql.push(',');
+            }
+            sql.push('$');
+            sql.push_str(&(row * columns + column + 1).to_string());
+        }
+        sql.push(')');
+    }
+}
+
+fn postgres_error(context: &str, error: tokio_postgres::Error) -> String {
+    match error.as_db_error() {
+        Some(db) => format!("{context}: {} (SQLSTATE {})", db.message(), db.code().code()),
+        None => format!("{context}: {error}"),
+    }
 }
 
 async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<TeamReport, String> {
@@ -1089,6 +1316,52 @@ mod integration_tests {
             cost,
             last_active: Utc::now().timestamp(),
         }
+    }
+
+    #[test]
+    fn privacy_collisions_are_aggregated_before_batch_insert() {
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let cfg = TeamConfig {
+            share_project: false,
+            share_account: false,
+            ..TeamConfig::default()
+        };
+        let prepared = prepare_usage_rows(
+            &cfg,
+            &[
+                row(
+                    &day,
+                    "claude",
+                    "account-one",
+                    "project-one",
+                    "claude-fable-5",
+                    50,
+                    5.0,
+                ),
+                row(
+                    &day,
+                    "claude",
+                    "account-two",
+                    "project-two",
+                    "claude-fable-5",
+                    70,
+                    7.0,
+                ),
+            ],
+        );
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].key.account_key, "hidden");
+        assert_eq!(prepared[0].key.project, "(hidden)");
+        assert_eq!(prepared[0].tokens, 120);
+        assert_eq!(prepared[0].cost, 12.0);
+    }
+
+    #[test]
+    fn batch_placeholders_are_numbered_across_rows() {
+        let mut sql = String::new();
+        append_placeholders(&mut sql, 2, 3);
+        assert_eq!(sql, "($1,$2,$3),($4,$5,$6)");
     }
 
     /// Run explicitly against a disposable Postgres:

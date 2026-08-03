@@ -104,10 +104,66 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
         return Err(FetchError::TokenExpired);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| FetchError::Network(e.to_string()))?;
+    let mut client = build_client(None)?;
+    let first = fetch_payload(&client, &credentials).await;
+    let response = match first {
+        // Finder-launched macOS apps do not inherit proxy variables from the
+        // login shell. If direct access is rejected, mirror the shell's HTTPS
+        // proxy for this client and retry with the already-read token. This
+        // neither changes system proxy settings nor touches credential storage.
+        Err(error) if should_retry_same_token(&error) => {
+            if let Some(proxy_url) = crate::network::login_shell_proxy() {
+                client = build_client(Some(&proxy_url))?;
+            } else {
+                // Also cover a brief auth propagation delay when no proxy is
+                // configured. The retry is the same read-only GET.
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            }
+            fetch_payload(&client, &credentials).await
+        }
+        other => other,
+    };
+    let payload = match response {
+        Ok(payload) => payload,
+        Err(error) if is_credential_rejection(&error) => {
+            // This changes HPBar's in-memory cache only. `get()` consults the
+            // attribute-only Keychain fingerprint and reads data only if Claude
+            // Code has already rotated the item; HPBar never writes or refreshes
+            // credentials itself.
+            creds.mark_rejected();
+            let replacement = match creds.get() {
+                Ok(fresh) if fresh.access_token != credentials.access_token => fresh,
+                Ok(_) | Err(_) => return Err(error),
+            };
+            match fetch_payload(&client, &replacement).await {
+                Ok(payload) => payload,
+                Err(retry_error) => {
+                    if is_credential_rejection(&retry_error) {
+                        creds.mark_rejected();
+                    }
+                    return Err(retry_error);
+                }
+            }
+        }
+        Err(error) => return Err(error),
+    };
+
+    Ok(UsageReport {
+        windows: payload.into_windows(),
+        source_label: "Live quota".into(),
+        details: Vec::new(),
+    })
+}
+
+fn build_client(proxy_url: Option<&str>) -> Result<reqwest::Client, FetchError> {
+    crate::network::client(proxy_url, std::time::Duration::from_secs(20))
+        .map_err(|e| FetchError::Network(e.to_string()))
+}
+
+async fn fetch_payload(
+    client: &reqwest::Client,
+    credentials: &crate::credentials::ClaudeCredentials,
+) -> Result<Payload, FetchError> {
     let resp = client
         .get(USAGE_URL)
         .header(
@@ -123,25 +179,60 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
 
     match resp.status().as_u16() {
         200 => {}
-        401 => {
-            // The cached token was rejected — almost always because Claude Code
-            // rotated it out from under us. Mark it dead; the next fetch picks
-            // up the replacement as soon as Claude Code writes one, without
-            // re-reading (and re-prompting for) storage in the meantime.
-            creds.mark_rejected();
-            return Err(FetchError::Unauthorized);
+        401 => return Err(FetchError::Unauthorized),
+        403 => {
+            // Anthropic sometimes reports an expired/revoked OAuth token as
+            // 403 rather than 401. Inspect only the small error response; never
+            // log it or the token. Organization-policy 403s stay ordinary
+            // server errors and do not invalidate the in-memory credential.
+            let challenge = resp
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = resp.text().await.unwrap_or_default();
+            if forbidden_is_oauth_rejection(&challenge, &body) {
+                return Err(FetchError::Unauthorized);
+            }
+            return Err(FetchError::Server(403));
         }
         429 => return Err(FetchError::RateLimited),
         code => return Err(FetchError::Server(code)),
     }
 
-    let payload: Payload = resp.json().await.map_err(|_| FetchError::Decoding)?;
+    resp.json().await.map_err(|_| FetchError::Decoding)
+}
 
-    Ok(UsageReport {
-        windows: payload.into_windows(),
-        source_label: "Live quota".into(),
-        details: Vec::new(),
-    })
+fn is_credential_rejection(error: &FetchError) -> bool {
+    matches!(error, FetchError::Unauthorized | FetchError::TokenExpired)
+}
+
+fn should_retry_same_token(error: &FetchError) -> bool {
+    matches!(error, FetchError::Unauthorized | FetchError::Server(403))
+}
+
+fn forbidden_is_oauth_rejection(challenge: &str, body: &str) -> bool {
+    let text = format!("{challenge}\n{body}").to_ascii_lowercase();
+    // A new token cannot fix an organization-level ban, so preserve that 403.
+    if text.contains("not allowed for this organization")
+        || text.contains("organization policy")
+    {
+        return false;
+    }
+    let token_rejected = (text.contains("token") || text.contains("bearer"))
+        && ["invalid", "expired", "revoked"]
+            .iter()
+            .any(|state| text.contains(state));
+    let scope_rejected = text.contains("scope")
+        && ["insufficient", "required", "missing", "lacks"]
+            .iter()
+            .any(|state| text.contains(state));
+    token_rejected
+        || scope_rejected
+        || text.contains("invalid_token")
+        || text.contains("token_expired")
+        || text.contains("insufficient_scope")
 }
 
 /// Title for a per-model weekly cap, e.g. "Weekly (Fable)".
@@ -307,6 +398,37 @@ mod tests {
         serde_json::from_str::<Payload>(json)
             .expect("payload parses")
             .into_windows()
+    }
+
+    #[test]
+    fn oauth_403_rejections_are_distinguished_from_org_policy() {
+        assert!(forbidden_is_oauth_rejection(
+            r#"Bearer error="invalid_token""#,
+            ""
+        ));
+        assert!(forbidden_is_oauth_rejection(
+            "",
+            r#"{"error":{"message":"Invalid OAuth token"}}"#,
+        ));
+        assert!(forbidden_is_oauth_rejection(
+            "",
+            r#"{"error":{"message":"OAuth token expired"}}"#,
+        ));
+        assert!(forbidden_is_oauth_rejection(
+            "",
+            r#"{"error":{"type":"permission_error","message":"OAuth token is missing required scope user:profile"}}"#,
+        ));
+        assert!(!forbidden_is_oauth_rejection(
+            "",
+            r#"{"error":{"type":"authentication_error","message":"OAuth authentication is currently not allowed for this organization"}}"#,
+        ));
+        assert!(!forbidden_is_oauth_rejection(
+            "",
+            r#"{"error":{"type":"permission_error","message":"Usage data is disabled by an administrator"}}"#,
+        ));
+        assert!(should_retry_same_token(&FetchError::Unauthorized));
+        assert!(should_retry_same_token(&FetchError::Server(403)));
+        assert!(!should_retry_same_token(&FetchError::RateLimited));
     }
 
     #[test]
