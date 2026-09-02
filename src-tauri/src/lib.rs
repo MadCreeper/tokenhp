@@ -140,11 +140,14 @@ async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
 /// is the actionable one.
 #[tauri::command]
 async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, String> {
-    let mut report = match codexquota::fetch().await {
-        Ok(r) => r,
+    // `observed_at`: when the figures were true — now for the live endpoint,
+    // the snapshot's own write time for the rollout fallback. Recorded samples
+    // carry that stamp so a stale snapshot never poses as a fresh reading.
+    let (observed_at, mut report) = match codexquota::fetch().await {
+        Ok(r) => (chrono::Utc::now().timestamp(), r),
         Err(live_err) => {
             tokio::task::spawn_blocking(|| {
-                codexstats::fetch_quota(codexstats::SNAPSHOT_MAX_AGE_SECS)
+                codexstats::fetch_quota_with_ts(codexstats::SNAPSHOT_MAX_AGE_SECS)
             })
             .await
             .map_err(|e| e.to_string())?
@@ -155,12 +158,15 @@ async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, 
         .map(|i| i.account_key)
         .unwrap_or_else(|| "unknown".into());
     ambient::annotate(&app, "codex", &account_key, &mut report);
-    ambient::record_history(&app, "codex", &account_key, &report);
+    ambient::record_history_at(&app, "codex", &account_key, &report, observed_at);
     // Record this machine's Codex share sample (scans logs → blocking thread),
     // then annotate the report with the this-machine vs others split.
     let app2 = app.clone();
     let report2 = report.clone();
-    let _ = tokio::task::spawn_blocking(move || share::record(&app2, "codex", &report2)).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        share::record_at(&app2, "codex", &report2, observed_at)
+    })
+    .await;
     share::annotate(&app, "codex", &mut report);
     Ok(report)
 }

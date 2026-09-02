@@ -240,11 +240,14 @@ fn scoped_weekly_title(model: &str) -> String {
     format!("Weekly ({model})")
 }
 
-/// True for titles minted by `scoped_weekly_title`. The device-share fit skips
-/// these windows: its local-cost series is account-wide, which would skew a
+/// True for per-model / per-limit windows — titles minted by
+/// `scoped_weekly_title`, and Codex's `"<length> (<limit name>)"` shape for
+/// every length (a rollout snapshot carries a scoped *5-hour* window too, which
+/// the old `"Weekly ("` check let through). The device-share fit skips these
+/// windows: its local-cost series is account-wide, which would skew a
 /// per-model window's implied-budget ratio.
 pub fn is_model_scoped_title(title: &str) -> bool {
-    title.starts_with("Weekly (")
+    title.contains(" (")
 }
 
 /// Mirrors the endpoint's JSON. Unknown fields are ignored.
@@ -460,6 +463,9 @@ mod tests {
         );
         assert!(is_model_scoped_title(&fable.title));
         assert!(!is_model_scoped_title("Weekly"));
+        // Codex's scoped windows come in every length, not just weekly.
+        assert!(is_model_scoped_title("5-Hour (GPT-5.3-Codex-Spark)"));
+        assert!(!is_model_scoped_title("5-Hour"));
     }
 
     #[test]

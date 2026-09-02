@@ -260,6 +260,22 @@ fn history_key(provider: &str, account_key: &str, title: &str) -> String {
 }
 
 pub fn record_history(app: &AppHandle, provider: &str, account_key: &str, report: &UsageReport) {
+    record_history_at(app, provider, account_key, report, now_unix());
+}
+
+/// [`record_history`] for figures observed at `at` rather than now — a Codex
+/// rollout snapshot describes the account as of the turn that wrote it. A
+/// window that already has a sample at or after `at` is skipped: the same
+/// snapshot re-read every poll is one observation. (Stamping it "now" each time
+/// flattened the burn rate with duplicates and, after a reset, alternated a
+/// stale high reading with the live low one so the series kept clearing.)
+pub fn record_history_at(
+    app: &AppHandle,
+    provider: &str,
+    account_key: &str,
+    report: &UsageReport,
+    at: i64,
+) {
     let _guard = HISTORY_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
@@ -275,12 +291,15 @@ pub fn record_history(app: &AppHandle, provider: &str, account_key: &str, report
             .entry(history_key(provider, account_key, &w.title))
             .or_default();
         if let Some(last) = v.last() {
+            if at <= last.ts {
+                continue; // already observed this instant (or something newer)
+            }
             if w.utilization + 1e-9 < last.used {
                 v.clear(); // window reset since last sample
             }
         }
         v.push(Sample {
-            ts: now,
+            ts: at,
             used: w.utilization,
         });
         v.retain(|s| now - s.ts <= HISTORY_RETAIN_SECS);
@@ -384,18 +403,20 @@ pub fn spawn(app: AppHandle) {
             // heart stays Claude-driven. Deliberately local-only with a
             // freshness guard: no background polling of OpenAI's endpoint —
             // live samples get recorded by `fetch_codex_quota` whenever the
-            // Codex view is open.
+            // Codex view is open. The snapshot is stamped with the time Codex
+            // wrote it, so re-reading it every poll records nothing new (see
+            // `record_history_at` / `share::record_at`).
             {
                 let app2 = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(codex) =
-                        crate::codexstats::fetch_quota(crate::codexstats::SNAPSHOT_MAX_AGE_SECS)
-                    {
+                    if let Ok((snapshot_ts, codex)) = crate::codexstats::fetch_quota_with_ts(
+                        crate::codexstats::SNAPSHOT_MAX_AGE_SECS,
+                    ) {
                         let account_key = crate::account::codex_identity()
                             .map(|i| i.account_key)
                             .unwrap_or_else(|| "unknown".into());
-                        record_history(&app2, "codex", &account_key, &codex);
-                        crate::share::record(&app2, "codex", &codex);
+                        record_history_at(&app2, "codex", &account_key, &codex, snapshot_ts);
+                        crate::share::record_at(&app2, "codex", &codex, snapshot_ts);
                     }
                 })
                 .await;
@@ -437,7 +458,14 @@ fn roll_forward(report: &UsageReport) -> UsageReport {
 /// a later theme switch can repaint instantly. Also called by the popover's
 /// `fetch_usage` so a manual refresh brings the tray along — the background poll
 /// alone can lag `POLL_SECS` behind what the popover just showed.
+///
+/// Rolls passed resets forward itself (idempotent for callers that already
+/// did): the provider can keep reporting a window's *old* reset clock and
+/// figures for a while after it reset, and painting those straight from a
+/// popover fetch re-raised the "NN%" annunciator the background tick had just
+/// cleared.
 pub fn apply(app: &AppHandle, report: &UsageReport) {
+    let report = &roll_forward(report);
     if let Some(remaining) = min_remaining(report) {
         let tip = tooltip(report);
         if let Some(st) = app.try_state::<TrayState>() {
@@ -475,8 +503,14 @@ fn paint(app: &AppHandle, remaining: f64, tooltip: &str, theme: heart_icon::Tray
             // twice → a visible flicker. On Linux/Windows this just sets the icon.
             let _ = tray.set_icon_with_as_template(Some(Image::new_owned(rgba, w, h)), false);
             let _ = tray.set_tooltip(Some(&tooltip));
+            // Clear with `Some("")`, never `None`: on macOS the tray-icon crate
+            // (0.23) treats `set_title(None)` as "leave the button's title
+            // alone", so a `None` sent once HP recovered left the last "NN%"
+            // stuck in the menu bar until the *next* dip painted a new number
+            // — the "low-HP warning never refreshes" bug. An empty title is
+            // what actually removes the text.
             #[cfg(target_os = "macos")]
-            let _ = tray.set_title(title.as_deref());
+            let _ = tray.set_title(Some(title.as_deref().unwrap_or("")));
         }
     });
 }

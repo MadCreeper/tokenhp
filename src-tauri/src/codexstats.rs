@@ -30,6 +30,13 @@ pub const SNAPSHOT_MAX_AGE_SECS: i64 = 24 * 3600;
 /// this is the Codex [`crate::tools::ToolAdapter`] implementation's data source.
 pub fn collect_local(window_secs: i64) -> Vec<ModelUsageDTO> {
     let now = Utc::now().timestamp();
+    collect_local_range(now - window_secs, now)
+}
+
+/// Per-model Codex token usage for turns with `start <= timestamp < end` (unix
+/// seconds). The device-share fit uses this to price the span a provider
+/// window covered *as of* an observation, which need not end now.
+pub fn collect_local_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
     for file in &session_files() {
@@ -63,8 +70,7 @@ pub fn collect_local(window_secs: i64) -> Vec<ModelUsageDTO> {
                     let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
                         continue;
                     };
-                    let age = now - ts;
-                    if age < 0 || age >= window_secs {
+                    if ts < start || ts >= end {
                         continue;
                     }
                     let Some(usage) = payload
@@ -252,6 +258,14 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
 /// `max_age_secs` is rejected rather than shown as if it were current (an idle
 /// machine once surfaced a six-week-old snapshot as live data).
 pub fn fetch_quota(max_age_secs: i64) -> Result<UsageReport, String> {
+    fetch_quota_with_ts(max_age_secs).map(|(_, report)| report)
+}
+
+/// [`fetch_quota`] plus the unix time the snapshot was written. Anything that
+/// *records* the figures (burn history, device-share samples) must stamp them
+/// with this, not with "now": the snapshot describes the account as of that
+/// turn, and re-reading it on every poll is one observation, not many.
+pub fn fetch_quota_with_ts(max_age_secs: i64) -> Result<(i64, UsageReport), String> {
     let mut files = session_files();
     if files.is_empty() {
         return Err("No local Codex sessions found under ~/.codex/sessions.".into());
@@ -295,7 +309,7 @@ pub fn fetch_quota(max_age_secs: i64) -> Result<UsageReport, String> {
             if Utc::now().timestamp() - ts > max_age_secs {
                 return Err("Codex hasn't written a local rate-limit snapshot recently.".into());
             }
-            return build_quota(limits);
+            return build_quota(limits).map(|report| (ts, report));
         }
     }
 

@@ -54,10 +54,29 @@ impl Pricing {
         Pricing { table }
     }
 
+    /// Exact id, then the id without its date stamp, then the model's family
+    /// (`claude-fable-5-1` → `claude-fable-5`): a point release the table
+    /// doesn't know yet prices at its predecessor's rate instead of $0 — which
+    /// silently zeroed this machine's local cost the day a new model landed,
+    /// and with it the device-share split. Explicit entries still win.
     fn price(&self, model_id: &str) -> Option<&ModelPrice> {
-        self.table
-            .get(model_id)
-            .or_else(|| self.table.get(&strip_date_suffix(model_id)))
+        if let Some(p) = self.table.get(model_id) {
+            return Some(p);
+        }
+        let base = strip_date_suffix(model_id);
+        if let Some(p) = self.table.get(&base) {
+            return Some(p);
+        }
+        let mut parts: Vec<&str> = base.split('-').collect();
+        // Stop short of the bare family name (`claude-opus`): nothing that
+        // generic is a price we'd want to assume.
+        while parts.len() > 3 {
+            parts.pop();
+            if let Some(p) = self.table.get(&parts.join("-")) {
+                return Some(p);
+            }
+        }
+        None
     }
 
     /// Dollar cost split by component. Cache writes come as two buckets because
@@ -105,9 +124,35 @@ mod tests {
         let table: HashMap<String, ModelPrice> =
             serde_json::from_str(BUNDLED).expect("pricing.json is not valid JSON");
         assert!(table.len() > 30, "bundled table looks truncated");
-        for id in ["claude-opus-4-8", "claude-fable-5", "kimi-k3", "glm-5.2"] {
+        for id in [
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "kimi-k3",
+            "glm-5.2",
+        ] {
             assert!(table.contains_key(id), "missing {id}");
         }
+    }
+
+    /// An unknown point release prices at its family's rate rather than
+    /// vanishing from every cost total; the bare family name never matches.
+    #[test]
+    fn unknown_point_release_falls_back_to_its_family() {
+        let table: HashMap<String, ModelPrice> = serde_json::from_str(BUNDLED).unwrap();
+        let pricing = Pricing { table };
+        let base = pricing
+            .cost("claude-fable-5", 1_000_000, 0, 0, 0, 0)
+            .unwrap();
+        let next = pricing
+            .cost("claude-fable-5-9", 1_000_000, 0, 0, 0, 0)
+            .expect("falls back to claude-fable-5");
+        assert!((base.total() - next.total()).abs() < 1e-9);
+        let dated = pricing.cost("claude-fable-5-9-20270101", 1, 0, 0, 0, 0);
+        assert!(dated.is_some());
+        assert!(pricing.cost("claude-nova-7", 1, 0, 0, 0, 0).is_none());
+        assert!(pricing.cost("gpt-9.1-sol", 1, 0, 0, 0, 0).is_none());
     }
 
     /// Every rate is a sane, positive-or-zero dollars-per-million figure — a

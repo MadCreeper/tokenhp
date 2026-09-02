@@ -45,17 +45,23 @@ pub struct ModelUsageDTO {
 /// Claude Code [`crate::tools::ToolAdapter`] implementation's data source.
 /// Synchronous (file IO) — call via `spawn_blocking`.
 pub fn collect(window_secs: i64) -> Vec<ModelUsageDTO> {
+    let now = Utc::now().timestamp();
+    collect_range(now - window_secs, now)
+}
+
+/// Per-model Claude Code token usage for messages with `start <= timestamp <
+/// end` (unix seconds). The device-share fit uses this to price the span a
+/// provider window covered *as of* an observation, which need not end now.
+pub fn collect_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
     let projects = crate::credentials::claude_config_dir()
         .map(|d| d.join("projects"))
         .unwrap_or_default();
 
     let files = session_files(&projects);
-    let now = Utc::now().timestamp();
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
     for event in collect_events(&files) {
-        let age = now - event.ts;
-        if age < 0 || age >= window_secs {
+        if event.ts < start || event.ts >= end {
             continue;
         }
         totals
