@@ -1,5 +1,5 @@
 import type { CalendarEntry, CalendarReport } from "./types";
-import { escapeHTML as esc, formatDollars, formatTokens } from "./util";
+import { escapeHTML as esc, formatUsageCost, formatTokens } from "./util";
 
 export type CalendarScale = "days" | "months";
 export interface CalendarFilters { tool: string; model: string; account: string }
@@ -8,6 +8,7 @@ export interface CalendarBucket {
   tokens: number;
   cost: number;
   complete: boolean;
+  estimated: boolean;
   entries: CalendarEntry[];
 }
 export function calendarBuckets(report: CalendarReport, scale: CalendarScale, filters: CalendarFilters): Map<string, CalendarBucket> {
@@ -17,10 +18,11 @@ export function calendarBuckets(report: CalendarReport, scale: CalendarScale, fi
       || (filters.model !== "all" && e.model !== filters.model)
       || (filters.account !== "all" && e.account_key !== filters.account)) continue;
     const key = e.day.slice(0, scale === "months" ? 7 : 10);
-    const b = buckets.get(key) ?? { key, tokens: 0, cost: 0, complete: true, entries: [] };
+    const b = buckets.get(key) ?? { key, tokens: 0, cost: 0, complete: true, estimated: false, entries: [] };
     b.tokens += e.tokens;
     b.cost += e.cost ?? 0;
-    b.complete &&= e.cost !== null;
+    b.complete &&= e.cost !== null && e.cost_complete !== false;
+    b.estimated ||= e.cost_estimated === true;
     b.entries.push(e);
     buckets.set(key, b);
   }
@@ -30,15 +32,15 @@ const monthName = (year: number, month: number, long = false) => new Date(Date.U
   .toLocaleDateString("en", { month: long ? "long" : "short", timeZone: "UTC" });
 const dateKey = (year: number, month: number, day = 1) => `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 function costLabel(b: CalendarBucket): string {
-  return b.complete ? formatDollars(b.cost) : b.cost > 0 ? `${formatDollars(b.cost)}+ · partial pricing` : "Cost unavailable";
+  return formatUsageCost(b.cost, b.complete, b.estimated);
 }
 export function calendarDetailHTML(label: string, b?: CalendarBucket): string {
   if (!b?.entries.length) return `<strong>${esc(label)}</strong><div>No recorded usage</div>`;
-  const models = new Map<string, { name: string; tokens: number; cost: number; complete: boolean }>();
+  const models = new Map<string, { name: string; tokens: number; cost: number; complete: boolean; estimated: boolean }>();
   const members = new Map<string, { name: string; tokens: number }>();
   for (const e of b.entries) {
-    const m = models.get(e.model) ?? { name: e.display_name, tokens: 0, cost: 0, complete: true };
-    m.tokens += e.tokens; m.cost += e.cost ?? 0; m.complete &&= e.cost !== null;
+    const m = models.get(e.model) ?? { name: e.display_name, tokens: 0, cost: 0, complete: true, estimated: false };
+    m.tokens += e.tokens; m.cost += e.cost ?? 0; m.complete &&= e.cost !== null && e.cost_complete !== false; m.estimated ||= e.cost_estimated === true;
     models.set(e.model, m);
     if (e.member_id) {
       const member = members.get(e.member_id) ?? { name: e.member || "Team member", tokens: 0 };
@@ -47,7 +49,7 @@ export function calendarDetailHTML(label: string, b?: CalendarBucket): string {
     }
   }
   const sorted = [...models.values()].sort((a, b) => b.tokens - a.tokens);
-  const modelRows = sorted.slice(0, 5).map(m => `<div class="calendar-tip-row"><span>${esc(m.name)}</span><span>${formatTokens(m.tokens)} · ${m.complete ? formatDollars(m.cost) : m.cost > 0 ? `${formatDollars(m.cost)}+` : "unpriced"}</span></div>`).join("");
+  const modelRows = sorted.slice(0, 5).map(m => `<div class="calendar-tip-row"><span>${esc(m.name)}</span><span>${formatTokens(m.tokens)} · ${formatUsageCost(m.cost, m.complete, m.estimated)}</span></div>`).join("");
   const memberRows = [...members.values()].sort((a, b) => b.tokens - a.tokens).slice(0, 3)
     .map(m => `<div class="calendar-tip-row"><span>${esc(m.name)}</span><span>${formatTokens(m.tokens)}</span></div>`).join("");
   return `<strong>${esc(label)}</strong><div class="calendar-tip-total">${formatTokens(b.tokens)} tokens · ${esc(costLabel(b))}</div>
@@ -108,10 +110,10 @@ export function calendarHTML(a: CalendarArgs): string {
   } else {
     grid = `<div class="calendar-grid calendar-months">${Array.from({ length: 12 }, (_, m) => cell(dateKey(a.year, m).slice(0, 7), monthName(a.year, m), `${monthName(a.year, m, true)} ${a.year}`, a.year === currentYear && m > currentMonth)).join("")}</div>`;
   }
-  const sum = visible.reduce((s, b) => ({ tokens: s.tokens + b.tokens, cost: s.cost + b.cost, complete: s.complete && b.complete }), { tokens: 0, cost: 0, complete: true });
+  const sum = visible.reduce((s, b) => ({ tokens: s.tokens + b.tokens, cost: s.cost + b.cost, complete: s.complete && b.complete, estimated: s.estimated || b.estimated }), { tokens: 0, cost: 0, complete: true, estimated: false });
   const summary = visible.length ? `${formatTokens(sum.tokens)} tokens · ${costLabel({ ...sum, key: "", entries: [] })}` : "No recorded usage";
   return `<section class="usage-calendar" aria-busy="${a.loading}">${controls}${filters}${a.error ? `<button class="detail-link refresh-error" data-action="refresh" title="${esc(a.error)} · Showing cached history">Refresh failed · Retry</button>` : ""}${grid}
-    <div class="calendar-summary"><span title="Estimated at API rates">${esc(summary)}</span><span class="calendar-legend" role="img" aria-label="Low to high ${useCost ? "estimated cost" : "token usage"}" title="Low to high ${useCost ? "estimated cost" : "token usage"}">${[0,1,2,3,4].map(n => `<i class="level-${n}"></i>`).join("")}</span></div></section>`;
+    <div class="calendar-summary"><span title="API-rate estimates. ~ reconstructed from shared token counts; + incomplete pricing.">${esc(summary)}</span><span class="calendar-legend" role="img" aria-label="Low to high ${useCost ? "estimated cost" : "token usage"}" title="Low to high ${useCost ? "estimated cost" : "token usage"}">${[0,1,2,3,4].map(n => `<i class="level-${n}"></i>`).join("")}</span></div></section>`;
 }
 
 /** One overlay for the whole panel. Mouse, keyboard focus and touch/click all

@@ -12,8 +12,10 @@ pub struct CalendarEntry {
     pub account_key: String,
     pub account_label: String,
     pub tokens: i64,
-    /// None means incomplete or intentionally unshared pricing, never free usage.
+    /// None means unavailable or intentionally unshared pricing, never free usage.
     pub cost: Option<f64>,
+    pub cost_complete: bool,
+    pub cost_estimated: bool,
 }
 
 #[derive(Serialize)]
@@ -52,7 +54,9 @@ pub fn fetch_local(year: i32) -> Result<CalendarReport, String> {
             account_key: r.account_key,
             account_label: r.account_label,
             tokens: r.tokens,
-            cost: ((r.tokens == 0 || r.cost > 0.0) && r.unattributed == 0).then_some(r.cost),
+            cost: (r.tokens == 0 || r.cost > 0.0).then_some(r.cost),
+            cost_complete: (r.tokens == 0 || r.cost > 0.0) && r.unattributed == 0,
+            cost_estimated: false,
         }));
     }
     entries.extend(crate::openclawstats::collect_calendar(&start, &end));

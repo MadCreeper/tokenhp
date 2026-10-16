@@ -62,3 +62,26 @@ test('missing legacy project-model data never shows unfiltered totals', () => {
   assert.doesNotMatch(html, /\$100/);
   assert.match(html, /no project activity/);
 });
+
+test('recovered partial costs agree across member, account, model and project views', () => {
+  const historical = { ...model('gpt-6.1-sol', 1000, 3.2, false), cost_estimated: true };
+  const fixed = { ...member, by_model: [historical],
+    by_account: [account('shared', [historical])],
+    by_project: [{ project: 'History', tokens: 1000, cost: 3.2, by_model: [historical] }] };
+  const data = { ...report, members: [fixed] };
+  for (const theme of ['classic', 'minecraft', 'arknights']) {
+    const breakdown = render({ theme, breakdownMode: true, report: data });
+    assert.equal((breakdown.match(/~\$3\.20\+/g) ?? []).length, 3);
+    assert.match(breakdown, /token share/);
+    const projects = render({ theme, report: data });
+    assert.equal((projects.match(/~\$3\.20\+/g) ?? []).length, 2);
+  }
+});
+
+test('unrecoverable model prices are explicit instead of blank or zero dollars', () => {
+  const unknown = model('codex-auto-review', 1000, 0, false);
+  const data = { ...report, members: [{ ...member, by_model: [unknown], by_account: [account('shared', [unknown])] }] };
+  const html = render({ report: data, breakdownMode: true });
+  assert.match(html, /1k · unpriced/);
+  assert.doesNotMatch(html, /\$0\.00/);
+});

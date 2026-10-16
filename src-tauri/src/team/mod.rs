@@ -6,6 +6,7 @@
 //! the optional password field is used, that password is stored in this local
 //! config file. Postgres itself is reached only through the tunnel.
 
+mod cost;
 pub mod db;
 
 pub use db::{TeamHandshake, TeamReport};

@@ -4,7 +4,7 @@
 
 import type { MemberView, TeamConfig, TeamReport, TeamModelUsage } from "./types";
 import type { Theme } from "./theme";
-import { clamp01, escapeHTML, formatDollars, formatTokens } from "./util";
+import { clamp01, escapeHTML, formatUsageCost, formatTokens } from "./util";
 import { xpBar } from "./xpbar";
 import { classicNeutralBar } from "./classicbar";
 import { akBar } from "./arknights";
@@ -60,6 +60,8 @@ export function teamContentHTML(args: {
         r.m,
         r.v.tokens,
         r.v.cost,
+        r.v.complete,
+        r.v.estimated,
         weight(r.v),
         max,
         args.theme,
@@ -78,16 +80,17 @@ export function teamContentHTML(args: {
       ),
     )
     .join("");
-  const shareHint = `Percentages: ${useCost ? "estimated cost share" : "token share (complete pricing unavailable)"}. Costs estimated at API rates.`;
+  const shareHint = `Percentages: ${useCost ? "estimated cost share" : "token share (complete pricing unavailable)"}. Costs estimated at API rates. ~ reconstructed from shared token counts; + incomplete pricing.`;
   return `<div class="team-view-tools">${selector}${modeToggle}</div><div class="team-list" title="${escapeHTML(shareHint)}">${rows}</div>`;
 }
 
-function sumModels(models: TeamModelUsage[]): { tokens: number; cost: number; complete: boolean } {
-  return models.reduce<{ tokens: number; cost: number; complete: boolean }>((sum, m) => ({
+function sumModels(models: TeamModelUsage[]): { tokens: number; cost: number; complete: boolean; estimated: boolean } {
+  return models.reduce<{ tokens: number; cost: number; complete: boolean; estimated: boolean }>((sum, m) => ({
     tokens: sum.tokens + m.tokens,
     cost: sum.cost + m.cost,
+    estimated: sum.estimated || m.cost_estimated === true,
     complete: sum.complete && m.cost_complete !== false && (m.tokens === 0 || m.cost > 0),
-  }), { tokens: 0, cost: 0, complete: true });
+  }), { tokens: 0, cost: 0, complete: true, estimated: false });
 }
 
 function accountCycleHTML(report: TeamReport, accountKey: string): string {
@@ -138,6 +141,8 @@ function memberRow(
   m: MemberView,
   tokens: number,
   cost: number,
+  complete: boolean,
+  estimated: boolean,
   weight: number,
   maxTokens: number,
   theme: Theme,
@@ -148,7 +153,7 @@ function memberRow(
   const bar = theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
   const frac = clamp01(weight / maxTokens);
   const baseTrailing =
-    cost > 0 ? `${formatTokens(tokens)} · ${formatDollars(cost)}` : formatTokens(tokens);
+    cost > 0 ? `${formatTokens(tokens)} · ${formatUsageCost(cost, complete, estimated)}` : formatTokens(tokens);
   const trailing = breakdown.enabled ? `${baseTrailing} · ${Math.round(breakdown.share * 100)}%` : baseTrailing;
   // Your own row uses your locally-set name, so it can't show a stale DB value.
   const display = m.is_self && selfName ? selfName : m.display_name;
@@ -184,14 +189,13 @@ function accountDetailsHTML(m: MemberView, accountKey: string, model: string): s
     .map((account) => {
       const value =
         account.cost > 0
-          ? `${formatTokens(account.tokens)} · ${formatDollars(account.cost)}`
+          ? `${formatTokens(account.tokens)} · ${formatUsageCost(account.cost, account.complete, account.estimated)}`
           : formatTokens(account.tokens);
       const models = account.by_model
         .map((model) => {
           const modelValue =
-            model.cost > 0
-              ? `${formatTokens(model.tokens)} · ${formatDollars(model.cost)}`
-              : formatTokens(model.tokens);
+            `${formatTokens(model.tokens)} · ${formatUsageCost(model.cost,
+              model.cost_complete !== false && (model.tokens === 0 || model.cost > 0), model.cost_estimated === true)}`;
           return `<div class="breakdown-model"><span>${escapeHTML(model.display_name)}</span><span>${escapeHTML(
             modelValue,
           )}</span></div>`;
@@ -227,9 +231,9 @@ function providerLabel(provider: string): string {
 
 // The top projects for a member (desc by tokens), shown when the row is open.
 function projectsHTML(m: MemberView, topProjects: number, model: string): string {
-  const list = m.by_project.map((p) => model === "all" ? p : {
-    ...p, ...sumModels((p.by_model ?? []).filter((x) => x.model === model)),
-  }).filter((p) => p.tokens > 0 || p.cost > 0)
+  const list = m.by_project.map((p) => ({
+    ...p, ...sumModels((p.by_model ?? []).filter((x) => model === "all" || x.model === model)),
+  })).filter((p) => p.tokens > 0 || p.cost > 0)
     .sort((a, b) => b.tokens - a.tokens || a.project.localeCompare(b.project))
     .slice(0, Math.max(1, topProjects));
   if (list.length === 0) {
@@ -238,7 +242,7 @@ function projectsHTML(m: MemberView, topProjects: number, model: string): string
   const rows = list
     .map((p) => {
       const val =
-        p.cost > 0 ? `${formatTokens(p.tokens)} · ${formatDollars(p.cost)}` : formatTokens(p.tokens);
+        p.cost > 0 ? `${formatTokens(p.tokens)} · ${formatUsageCost(p.cost, p.complete, p.estimated)}` : formatTokens(p.tokens);
       return `<div class="team-proj"><span class="team-proj-name">${escapeHTML(
         p.project,
       )}</span><span class="team-proj-val">${val}</span></div>`;

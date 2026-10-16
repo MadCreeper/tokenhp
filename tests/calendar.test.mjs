@@ -41,8 +41,32 @@ test('unpriced data stays incomplete when mixed with priced records', () => {
   const b = calendarBuckets(r, 'days', filters).get('2024-02-01');
   assert.equal(b.cost, 1); assert.equal(b.complete, false);
   const detail = calendarDetailHTML('February 1', b);
-  assert.match(detail, /partial pricing/); assert.match(detail, /unpriced/);
+  assert.match(detail, /\$1\.00\+/); assert.match(detail, /unpriced/);
   assert.match(detail, /Alice/);
+});
+
+test('partial and recovered prices survive daily/monthly totals and model filters', () => {
+  const r = { year: 2024, entries: [
+    entry({ cost: 3.2, cost_complete: false, cost_estimated: true }),
+    entry({ cost: 2, day: '2024-02-02', cost_complete: true }),
+    entry({ model: 'codex-auto-review', cost: null }),
+  ] };
+  for (const scale of ['days', 'months']) {
+    const buckets = calendarBuckets(r, scale, filters);
+    assert.equal([...buckets.values()].reduce((s, b) => s + b.cost, 0), 5.2);
+    const first = [...buckets.values()][0];
+    assert.equal(first.complete, false);
+    assert.equal(first.estimated, true);
+    assert.match(calendarDetailHTML('History', first), /~\$[35]\.20\+/);
+    assert.match(calendarDetailHTML('History', first), /unpriced/);
+  }
+  const selected = calendarBuckets(r, 'months', { ...filters, model: 'a' }).get('2024-02');
+  assert.equal(selected.cost, 5.2);
+  assert.equal(selected.complete, false);
+  assert.doesNotMatch(calendarDetailHTML('History', selected), /unpriced/);
+  const html = calendarHTML({ ...args, report: r });
+  assert.match(html, /~\$5\.20\+/);
+  assert.doesNotMatch(html, /partial pricing/);
 });
 
 test('missing history is distinct from zero-dollar usage; stale-year data never renders', () => {

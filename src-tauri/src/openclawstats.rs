@@ -153,7 +153,9 @@ pub fn collect_calendar(start: &str, end: &str) -> Vec<crate::calendar::Calendar
             account_key: String::new(),
             account_label: String::new(),
             tokens: t.input + t.output + t.cache_read,
-            cost: (!t.unpriced).then_some(t.priced.total()),
+            cost: (!t.unpriced || t.priced.total() > 0.0).then_some(t.priced.total()),
+            cost_complete: !t.unpriced,
+            cost_estimated: false,
         })
         .collect()
 }

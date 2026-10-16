@@ -120,6 +120,7 @@ export interface TeamConfig {
 /** Mirrors `team::db::ModelUsage` — one model's usage for a member. */
 export interface TeamModelUsage {
   cost_complete?: boolean;
+  cost_estimated?: boolean;
   model: string;
   display_name: string;
   tokens: number;
@@ -215,6 +216,8 @@ export interface TeamHandshake {
 }
 
 export interface CalendarEntry {
+  cost_complete?: boolean;
+  cost_estimated?: boolean;
   day: string;
   model: string;
   display_name: string;

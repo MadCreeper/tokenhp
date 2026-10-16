@@ -43,7 +43,12 @@ const INSERT_CHUNK_SIZE: usize = 128;
 
 /// Ordered schema migrations. To evolve the schema later, append a new
 /// `(version, sql)` entry — it runs once on the next connect.
-const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)];
+const MIGRATIONS: &[(i32, &str)] = &[
+    (1, MIGRATION_V1),
+    (2, MIGRATION_V2),
+    (3, MIGRATION_V3),
+    (4, MIGRATION_V4),
+];
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS members (
@@ -172,18 +177,26 @@ DO UPDATE SET
   cost=excluded.cost;
 ";
 
+// Older clients encoded missing prices and withheld costs as the same zero.
+// Preserve explicit privacy choices on new uploads; old shared token counts
+// can still support a clearly marked, read-time API-rate estimate.
+const MIGRATION_V4: &str = "
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS cost_shared boolean NOT NULL DEFAULT true;
+ALTER TABLE usage_daily_v2 ADD COLUMN IF NOT EXISTS cost_shared boolean NOT NULL DEFAULT true;
+";
+
 const USAGE_CTE: &str = "
 WITH readable_usage AS (
   SELECT
     member_id, day, provider, account_key, billing_key, account_label,
     attribution_status, project, model, input, output, cache_read,
-    cache_create, unattributed, tokens, cost
+    cache_create, unattributed, tokens, cost, cost_shared
   FROM usage_daily_v2
   UNION ALL
   SELECT
     u.member_id, u.day, u.provider, u.account_key, u.billing_key,
     u.account_label, u.attribution_status, u.project, u.model, u.input,
-    u.output, u.cache_read, u.cache_create, u.unattributed, u.tokens, u.cost
+    u.output, u.cache_read, u.cache_create, u.unattributed, u.tokens, u.cost, u.cost_shared
   FROM usage_daily u
   JOIN members legacy_member ON legacy_member.member_id=u.member_id
   WHERE legacy_member.identity_version < 2
@@ -211,6 +224,7 @@ const VISIBLE_MEMBER: &str = "
 #[derive(Serialize, Clone)]
 pub struct ModelUsage {
     pub cost_complete: bool,
+    pub cost_estimated: bool,
     pub model: String,
     pub display_name: String,
     pub tokens: i64,
@@ -333,49 +347,57 @@ pub async fn fetch_calendar(
     tokio::time::timeout(FETCH_TIMEOUT, async {
         let mut conn = connect(cfg).await?;
         migrate(&mut conn.client).await?;
-        let sql = format!(
-            "{USAGE_CTE}
-            SELECT u.day::text AS day, u.model, u.member_id, m.display_name,
-                   u.account_key, MAX(u.account_label) AS account_label,
-                   SUM(u.tokens)::bigint AS tokens,
-                   SUM(u.cost)::double precision AS cost,
-                   BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS complete
-            FROM readable_usage u JOIN members m ON m.member_id=u.member_id
-            WHERE u.day >= $1::text::date AND u.day <= $2::text::date AND {VISIBLE_MEMBER}
-            GROUP BY u.day, u.model, u.member_id, m.display_name, u.account_key"
-        );
-        let rows = conn
-            .client
-            .query(&sql, &[&start, &end])
-            .await
-            .map_err(|e| e.to_string())?;
-        let entries = rows
-            .into_iter()
-            .map(|r| {
-                let model: String = r.get("model");
-                let member_id: String = r.get("member_id");
-                crate::calendar::CalendarEntry {
-                    day: r.get("day"),
-                    display_name: crate::localstats::display_name(&model),
-                    model,
-                    tool: String::new(),
-                    member: if member_id == cfg.member_id && !cfg.display_name.is_empty() {
-                        cfg.display_name.clone()
-                    } else {
-                        r.get("display_name")
-                    },
-                    member_id,
-                    account_key: r.get("account_key"),
-                    account_label: r.get("account_label"),
-                    tokens: r.get("tokens"),
-                    cost: r.get::<_, bool>("complete").then(|| r.get("cost")),
-                }
-            })
-            .collect();
-        Ok(crate::calendar::CalendarReport { year, entries })
+        read_calendar(&conn.client, cfg, year, &start, &end).await
     })
     .await
     .map_err(|_| "Team calendar timed out after 30s.".to_string())?
+}
+
+async fn read_calendar(
+    client: &Client,
+    cfg: &TeamConfig,
+    year: i32,
+    start: &str,
+    end: &str,
+) -> Result<crate::calendar::CalendarReport, String> {
+    let sql = format!(
+        "{USAGE_CTE}
+            SELECT u.*, u.day::text AS day_text, m.display_name
+            FROM readable_usage u JOIN members m ON m.member_id=u.member_id
+            WHERE u.day >= $1::text::date AND u.day <= $2::text::date AND {VISIBLE_MEMBER}"
+    );
+    let rows = client
+        .query(&sql, &[&start, &end])
+        .await
+        .map_err(|e| e.to_string())?;
+    let pricing = crate::pricing::Pricing::loaded();
+    let entries = rows
+        .into_iter()
+        .map(|r| {
+            let model: String = r.get("model");
+            let member_id: String = r.get("member_id");
+            let cost = resolve_row_cost(&r, &pricing);
+            crate::calendar::CalendarEntry {
+                day: r.get("day_text"),
+                display_name: crate::localstats::display_name(&model),
+                model,
+                tool: String::new(),
+                member: if member_id == cfg.member_id && !cfg.display_name.is_empty() {
+                    cfg.display_name.clone()
+                } else {
+                    r.get("display_name")
+                },
+                member_id,
+                account_key: r.get("account_key"),
+                account_label: r.get("account_label"),
+                tokens: r.get("tokens"),
+                cost: cost.value,
+                cost_complete: cost.complete,
+                cost_estimated: cost.estimated,
+            }
+        })
+        .collect();
+    Ok(crate::calendar::CalendarReport { year, entries })
 }
 
 /// The handshake: connect, migrate, write our member, read the roster back.
@@ -832,6 +854,7 @@ struct PreparedUsage {
     unattributed: i64,
     tokens: i64,
     cost: f64,
+    cost_hidden: bool,
 }
 
 /// Apply sharing controls and combine rows that privacy masking collapses onto
@@ -888,6 +911,7 @@ fn prepare_usage_rows(cfg: &TeamConfig, rows: &[UsageRow]) -> Vec<PreparedUsage>
             unattributed: 0,
             tokens: 0,
             cost: 0.0,
+            cost_hidden: !cfg.share_cost,
         });
         entry.input += input;
         entry.output += output;
@@ -920,10 +944,10 @@ async fn insert_usage_v2(
             "INSERT INTO usage_daily_v2(
                member_id, day, provider, account_key, billing_key, account_label,
                attribution_status, project, model, input, output, cache_read,
-               cache_create, unattributed, tokens, cost
+               cache_create, unattributed, tokens, cost, cost_shared
              ) VALUES ",
         );
-        append_placeholders(&mut sql, chunk.len(), 16);
+        append_placeholders(&mut sql, chunk.len(), 17);
         sql.push_str(
             " ON CONFLICT (member_id, day, provider, account_key, project, model) DO UPDATE SET
                billing_key=excluded.billing_key, account_label=excluded.account_label,
@@ -934,10 +958,12 @@ async fn insert_usage_v2(
                cache_create=usage_daily_v2.cache_create + excluded.cache_create,
                unattributed=usage_daily_v2.unattributed + excluded.unattributed,
                tokens=usage_daily_v2.tokens + excluded.tokens,
-               cost=usage_daily_v2.cost + excluded.cost",
+               cost=usage_daily_v2.cost + excluded.cost,
+               cost_shared=usage_daily_v2.cost_shared AND excluded.cost_shared",
         );
-        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 16);
-        for row in chunk {
+        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 17);
+        let shared: Vec<bool> = chunk.iter().map(|r| !r.cost_hidden).collect();
+        for (row, cost_shared) in chunk.iter().zip(&shared) {
             params.extend_from_slice(&[
                 member_id,
                 &row.key.day,
@@ -955,6 +981,7 @@ async fn insert_usage_v2(
                 &row.unattributed,
                 &row.tokens,
                 &row.cost,
+                cost_shared,
             ]);
         }
         tx.execute(&sql, &params)
@@ -980,6 +1007,7 @@ struct UsageTotals {
     unattributed: i64,
     tokens: i64,
     cost: f64,
+    cost_hidden: bool,
 }
 
 async fn insert_legacy_usage(
@@ -1003,6 +1031,7 @@ async fn insert_legacy_usage(
         totals.unattributed += row.unattributed;
         totals.tokens += row.tokens;
         totals.cost += row.cost;
+        totals.cost_hidden |= row.cost_hidden;
     }
     let mut collapsed: Vec<_> = collapsed.into_iter().collect();
     collapsed.sort_by(|(a, _), (b, _)| {
@@ -1016,10 +1045,10 @@ async fn insert_legacy_usage(
         let mut sql = String::from(
             "INSERT INTO usage_daily(
                member_id, day, project, model, input, output, cache_read,
-               cache_create, unattributed, tokens, cost
+               cache_create, unattributed, tokens, cost, cost_shared
              ) VALUES ",
         );
-        append_placeholders(&mut sql, chunk.len(), 11);
+        append_placeholders(&mut sql, chunk.len(), 12);
         sql.push_str(
             " ON CONFLICT (member_id, day, project, model) DO UPDATE SET
                input=usage_daily.input + excluded.input,
@@ -1028,10 +1057,12 @@ async fn insert_legacy_usage(
                cache_create=usage_daily.cache_create + excluded.cache_create,
                unattributed=usage_daily.unattributed + excluded.unattributed,
                tokens=usage_daily.tokens + excluded.tokens,
-               cost=usage_daily.cost + excluded.cost",
+               cost=usage_daily.cost + excluded.cost,
+               cost_shared=usage_daily.cost_shared AND excluded.cost_shared",
         );
-        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 11);
-        for (key, totals) in chunk {
+        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 12);
+        let shared: Vec<bool> = chunk.iter().map(|(_, t)| !t.cost_hidden).collect();
+        for ((key, totals), cost_shared) in chunk.iter().zip(&shared) {
             params.extend_from_slice(&[
                 member_id,
                 &key.day,
@@ -1044,6 +1075,7 @@ async fn insert_legacy_usage(
                 &totals.unattributed,
                 &totals.tokens,
                 &totals.cost,
+                cost_shared,
             ]);
         }
         tx.execute(&sql, &params)
@@ -1081,6 +1113,37 @@ fn postgres_error(context: &str, error: tokio_postgres::Error) -> String {
     }
 }
 
+fn resolve_row_cost(
+    row: &tokio_postgres::Row,
+    pricing: &crate::pricing::Pricing,
+) -> super::cost::ResolvedCost {
+    super::cost::resolve(
+        pricing,
+        &row.get::<_, String>("model"),
+        [
+            row.get("input"),
+            row.get("output"),
+            row.get("cache_read"),
+            row.get("cache_create"),
+        ],
+        row.get("tokens"),
+        row.get("unattributed"),
+        row.get("cost"),
+        row.get("cost_shared"),
+    )
+}
+
+fn merge_model(models: &mut Vec<ModelUsage>, usage: &ModelUsage) {
+    if let Some(existing) = models.iter_mut().find(|m| m.model == usage.model) {
+        existing.tokens += usage.tokens;
+        existing.cost += usage.cost;
+        existing.cost_complete &= usage.cost_complete;
+        existing.cost_estimated |= usage.cost_estimated;
+    } else {
+        models.push(usage.clone());
+    }
+}
+
 async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<TeamReport, String> {
     let day_filter = match range {
         "week" => "u.day BETWEEN (now() AT TIME ZONE 'UTC')::date - 6 AND (now() AT TIME ZONE 'UTC')::date",
@@ -1088,63 +1151,35 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         _ => "u.day = (now() AT TIME ZONE 'UTC')::date",
     };
 
-    // Per-(member, model) totals for the range — the frontend slices this by
-    // model client-side so the dropdown switches instantly.
-    let usage_sql = format!(
+    let sql = format!(
         "{USAGE_CTE}
-         SELECT u.member_id, u.model, SUM(u.tokens)::bigint AS tokens,
-                COALESCE(SUM(u.cost), 0)::double precision AS cost,
-                BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS cost_complete
-         FROM readable_usage u
-         JOIN members m ON m.member_id=u.member_id
-         WHERE {day_filter} AND {VISIBLE_MEMBER}
-         GROUP BY u.member_id, u.model"
+        SELECT u.* FROM readable_usage u JOIN members m ON m.member_id=u.member_id
+        WHERE {day_filter} AND {VISIBLE_MEMBER}"
     );
-    let usage_rows = client
-        .query(&usage_sql, &[])
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut by_member: std::collections::HashMap<String, Vec<ModelUsage>> =
-        std::collections::HashMap::new();
-    let mut model_totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    for row in &usage_rows {
+    let rows = client.query(&sql, &[]).await.map_err(|e| e.to_string())?;
+    let pricing = crate::pricing::Pricing::loaded();
+    let mut by_member: HashMap<String, Vec<ModelUsage>> = HashMap::new();
+    let mut model_totals: HashMap<String, i64> = HashMap::new();
+    let mut projects_by_member: HashMap<String, Vec<ProjectUsage>> = HashMap::new();
+    type AccountMap = HashMap<(String, String, String, String, String), Vec<ModelUsage>>;
+    let mut accounts_by_member: HashMap<String, AccountMap> = HashMap::new();
+    for row in &rows {
         let member_id: String = row.get("member_id");
         let model: String = row.get("model");
         let tokens: i64 = row.get("tokens");
-        let cost: f64 = row.get("cost");
-        *model_totals.entry(model.clone()).or_default() += tokens;
-        by_member.entry(member_id).or_default().push(ModelUsage {
-            cost_complete: row.get("cost_complete"),
+        let cost = resolve_row_cost(row, &pricing);
+        let usage = ModelUsage {
             display_name: crate::localstats::display_name(&model),
-            model,
+            model: model.clone(),
             tokens,
-            cost,
-        });
-    }
-
-    // Per-(member, project) totals for the range (the expandable "top projects").
-    let project_sql = format!(
-        "{USAGE_CTE}
-         SELECT u.member_id, u.project, u.model, SUM(u.tokens)::bigint AS tokens,
-                COALESCE(SUM(u.cost), 0)::double precision AS cost,
-                BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS cost_complete
-         FROM readable_usage u
-         JOIN members m ON m.member_id=u.member_id
-         WHERE {day_filter} AND {VISIBLE_MEMBER}
-         GROUP BY u.member_id, u.project, u.model"
-    );
-    let project_rows = client
-        .query(&project_sql, &[])
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut projects_by_member: std::collections::HashMap<String, Vec<ProjectUsage>> =
-        std::collections::HashMap::new();
-    for row in &project_rows {
-        let member_id: String = row.get("member_id");
+            cost: cost.value.unwrap_or(0.0),
+            cost_complete: cost.complete,
+            cost_estimated: cost.estimated,
+        };
+        *model_totals.entry(model).or_default() += tokens;
+        merge_model(by_member.entry(member_id.clone()).or_default(), &usage);
         let project: String = row.get("project");
-        let model: String = row.get("model");
-        let projects = projects_by_member.entry(member_id).or_default();
+        let projects = projects_by_member.entry(member_id.clone()).or_default();
         let index = projects
             .iter()
             .position(|p| p.project == project)
@@ -1157,61 +1192,23 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
                 });
                 projects.len() - 1
             });
-        let usage = ModelUsage {
-            display_name: crate::localstats::display_name(&model),
-            model,
-            tokens: row.get("tokens"),
-            cost: row.get("cost"),
-            cost_complete: row.get("cost_complete"),
-        };
-        projects[index].tokens += usage.tokens;
+        projects[index].tokens += tokens;
         projects[index].cost += usage.cost;
-        projects[index].by_model.push(usage);
-    }
-
-    // Full member → account → model detail for Usage breakdown and bill splits.
-    let account_sql = format!(
-        "{USAGE_CTE}
-         SELECT u.member_id, u.provider, u.account_key, u.billing_key,
-                u.account_label, u.attribution_status, u.model,
-                SUM(u.tokens)::bigint AS tokens,
-                COALESCE(SUM(u.cost), 0)::double precision AS cost,
-                BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS cost_complete
-         FROM readable_usage u
-         JOIN members m ON m.member_id=u.member_id
-         WHERE {day_filter} AND {VISIBLE_MEMBER}
-         GROUP BY u.member_id, u.provider, u.account_key, u.billing_key,
-                  u.account_label, u.attribution_status, u.model"
-    );
-    let account_rows = client
-        .query(&account_sql, &[])
-        .await
-        .map_err(|e| e.to_string())?;
-    type AccountMap =
-        std::collections::HashMap<(String, String, String, String, String), Vec<ModelUsage>>;
-    let mut accounts_by_member: std::collections::HashMap<String, AccountMap> =
-        std::collections::HashMap::new();
-    for row in &account_rows {
-        let member_id: String = row.get("member_id");
-        let model: String = row.get("model");
-        accounts_by_member
-            .entry(member_id)
-            .or_default()
-            .entry((
-                row.get("provider"),
-                row.get("account_key"),
-                row.get("billing_key"),
-                row.get("account_label"),
-                row.get("attribution_status"),
-            ))
-            .or_default()
-            .push(ModelUsage {
-                cost_complete: row.get("cost_complete"),
-                display_name: crate::localstats::display_name(&model),
-                model,
-                tokens: row.get("tokens"),
-                cost: row.get("cost"),
-            });
+        merge_model(&mut projects[index].by_model, &usage);
+        merge_model(
+            accounts_by_member
+                .entry(member_id)
+                .or_default()
+                .entry((
+                    row.get("provider"),
+                    row.get("account_key"),
+                    row.get("billing_key"),
+                    row.get("account_label"),
+                    row.get("attribution_status"),
+                ))
+                .or_default(),
+            &usage,
+        );
     }
 
     // Member identity/metadata (everyone, even with no usage in the range).
@@ -1816,6 +1813,171 @@ mod integration_tests {
             );
         }
         lock.rollback().await.unwrap();
+
+        // History from old clients has token components but no uploaded price.
+        // Repricing must agree across every view/range without rewriting rows.
+        let date = Utc::now().date_naive();
+        let ago = |days| (date - chrono::Duration::days(days)).to_string();
+        let mut partial = row(
+            &day,
+            "codex",
+            "history",
+            "partial",
+            "gpt-6.1-sol",
+            1_000_000,
+            0.0,
+        );
+        partial.tokens += 123;
+        partial.unattributed = 123;
+        let history = vec![
+            row(
+                &day,
+                "codex",
+                "history",
+                "today",
+                "gpt-6.1-sol",
+                1_000_000,
+                0.0,
+            ),
+            partial,
+            row(
+                &ago(1),
+                "codex",
+                "history",
+                "yesterday",
+                "gpt-6.1-sol",
+                2_000_000,
+                0.0,
+            ),
+            row(
+                &ago(14),
+                "codex",
+                "history",
+                "fortnight",
+                "gpt-5.6-terra",
+                4_000_000,
+                0.0,
+            ),
+            row(
+                &ago(40),
+                "claude",
+                "older",
+                "archive",
+                "claude-opus-5-5",
+                1_000_000,
+                0.0,
+            ),
+            row(
+                &day,
+                "codex",
+                "history",
+                "recorded",
+                "gpt-6-astra",
+                1_000_000,
+                20.0,
+            ),
+            row(
+                &day,
+                "codex",
+                "history",
+                "review",
+                "codex-auto-review",
+                1_000_000,
+                28.6,
+            ),
+        ];
+        upload(&cfg, None, history.clone()).await.unwrap();
+        let year = chrono::Datelike::year(&date);
+        // Explicit bounds also cover Jan/Feb test runs whose history crosses years.
+        let conn = connect(&cfg).await.unwrap();
+        let calendar = read_calendar(&conn.client, &cfg, year, &ago(45), &day)
+            .await
+            .unwrap();
+        for (range, days, expected) in [("day", 0, 24.0), ("week", 6, 28.0), ("month", 29, 36.0)] {
+            let report = fetch(&cfg, range).await.unwrap();
+            let own = report.members.iter().find(|m| m.is_self).unwrap();
+            assert!((own.cost - expected).abs() < 1e-9, "{range}");
+            assert!((own.by_project.iter().map(|p| p.cost).sum::<f64>() - expected).abs() < 1e-9);
+            assert!((own.by_account.iter().map(|a| a.cost).sum::<f64>() - expected).abs() < 1e-9);
+            let cutoff = ago(days);
+            let cells: Vec<_> = calendar
+                .entries
+                .iter()
+                .filter(|e| e.member_id == cfg.member_id && e.day >= cutoff)
+                .collect();
+            assert_eq!(cells.iter().map(|e| e.tokens).sum::<i64>(), own.tokens);
+            assert!((cells.iter().filter_map(|e| e.cost).sum::<f64>() - expected).abs() < 1e-9);
+            let sol = own
+                .by_model
+                .iter()
+                .find(|m| m.model == "gpt-6.1-sol")
+                .unwrap();
+            assert!(sol.cost_estimated && !sol.cost_complete && sol.cost > 0.0);
+            let review = own
+                .by_model
+                .iter()
+                .find(|m| m.model == "codex-auto-review")
+                .unwrap();
+            assert_eq!(review.cost, 0.0);
+            assert!(!review.cost_complete);
+        }
+        let old = calendar
+            .entries
+            .iter()
+            .find(|e| e.member_id == cfg.member_id && e.day == ago(40))
+            .unwrap();
+        assert_eq!(old.cost, Some(4.0));
+        assert!(old.cost_estimated && old.cost_complete);
+        assert!(calendar
+            .entries
+            .iter()
+            .filter(|e| e.model == "codex-auto-review")
+            .all(|e| e.cost.is_none()));
+        let unchanged: i64 = conn
+            .client
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM usage_daily_v2 WHERE member_id=$1 AND cost=0",
+                &[&cfg.member_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            unchanged, 5,
+            "read-time estimates must not rewrite shared history"
+        );
+
+        // New privacy metadata survives writes and prevents read-time recovery.
+        let private = TeamConfig {
+            share_cost: false,
+            ..cfg.clone()
+        };
+        upload(&private, None, history).await.unwrap();
+        let report = fetch(&private, "month").await.unwrap();
+        let own = report.members.iter().find(|m| m.is_self).unwrap();
+        assert_eq!(own.cost, 0.0);
+        assert!(own
+            .by_model
+            .iter()
+            .all(|m| !m.cost_complete && !m.cost_estimated));
+        let calendar = read_calendar(&conn.client, &private, year, &ago(45), &day)
+            .await
+            .unwrap();
+        assert!(calendar
+            .entries
+            .iter()
+            .filter(|e| e.member_id == cfg.member_id)
+            .all(|e| e.cost.is_none()));
+        let leaked: i64 = conn
+            .client
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM usage_daily WHERE member_id=$1 AND cost_shared",
+                &[&cfg.member_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(leaked, 0, "legacy mirror must preserve cost privacy");
     }
 }
 
@@ -1830,7 +1992,18 @@ mod pricing_audit {
         let cfg: TeamConfig = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let conn = connect(&cfg).await.unwrap();
         conn.client.batch_execute("BEGIN READ ONLY").await.unwrap();
-        let sql = format!("{USAGE_CTE}
+        // Audit pre-v4 servers without a migration or any persistent writes.
+        let has_shared: bool = conn.client.query_one("SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns WHERE table_name='usage_daily_v2' AND column_name='cost_shared'
+        )", &[]).await.unwrap().get(0);
+        let cte = if has_shared {
+            USAGE_CTE.to_string()
+        } else {
+            USAGE_CTE
+                .replace(", cost_shared", ", true AS cost_shared")
+                .replace(", u.cost_shared", ", true AS cost_shared")
+        };
+        let sql = format!("{cte}
             SELECT u.model, SUM(u.tokens)::bigint AS tokens,
                 COUNT(*)::bigint AS rows, COUNT(*) FILTER (WHERE u.cost=0 AND u.tokens>0)::bigint AS unpriced_rows,
                 SUM(u.unattributed)::bigint AS unattributed,
@@ -1857,6 +2030,50 @@ mod pricing_audit {
                 "first_day": row.get::<_, String>("first_day"), "last_day": row.get::<_, String>("last_day")})
             );
         }
+        let rows = conn
+            .client
+            .query(
+                &format!(
+                    "{cte}
+            SELECT u.* FROM readable_usage u JOIN members m ON m.member_id=u.member_id
+            WHERE {VISIBLE_MEMBER}"
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        let mut recovered = 0;
+        let mut unpriced = HashMap::<String, usize>::new();
+        for row in &rows {
+            let c = resolve_row_cost(row, &pricing);
+            let model: String = row.get("model");
+            if c.estimated {
+                recovered += 1;
+            }
+            if c.value.is_none() {
+                *unpriced.entry(model.clone()).or_default() += 1;
+            }
+            let components: i64 = ["input", "output", "cache_read", "cache_create"]
+                .iter()
+                .map(|key| row.get::<_, i64>(*key))
+                .sum();
+            if pricing.cost(&model, 0, 0, 0, 0, 0).is_some()
+                && components > 0
+                && row.get::<_, bool>("cost_shared")
+            {
+                assert!(
+                    c.value.is_some(),
+                    "Recoverable row remained unpriced: {model}"
+                );
+            }
+            if model == "codex-auto-review" {
+                assert!(c.value.is_none());
+            }
+        }
+        println!(
+            "History audit: {} rows, {recovered} recovered estimates; unavailable: {unpriced:?}",
+            rows.len()
+        );
         conn.client.batch_execute("ROLLBACK").await.unwrap();
         assert_eq!(
             missing,

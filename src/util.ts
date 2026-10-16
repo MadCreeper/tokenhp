@@ -43,3 +43,9 @@ export function formatDuration(secs: number): string {
   const rem = m % 60;
   return rem ? `${h}h ${rem}m` : `${h}h`;
 }
+
+/** Compact pricing provenance, shared by team totals and calendar tooltips. */
+export function formatUsageCost(cost: number, complete: boolean, estimated = false): string {
+  if (!complete && cost <= 0) return "unpriced";
+  return `${estimated ? "~" : ""}${formatDollars(cost)}${complete ? "" : "+"}`;
+}
