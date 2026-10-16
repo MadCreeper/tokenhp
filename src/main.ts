@@ -1,4 +1,5 @@
 import { TeamReports } from "./team-data";
+import { installPinnedDragging } from "./window-drag";
 import { calendarHTML, installCalendarTooltip, type CalendarScale, type CalendarMetric } from "./calendar";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -679,7 +680,8 @@ function headerHTML(): string {
         }">${escapeHTML(title)} <span class="title-swap">⇄</span></span>`
       : `<span class="title">${escapeHTML(title)}</span>`;
   return `
-    <header class="header">
+    <header class="header${state.pinned ? " pinned-draggable" : ""}">
+      ${state.pinned ? '<span class="window-drag-handle" title="Drag window" aria-label="Drag window"></span>' : ""}
       ${titleHTML}
       ${state.loading ? `<span class="spinner">…</span>` : ""}
       <button class="mc-btn icon ${state.pinned ? "selected" : ""}" data-action="pin" title="${
@@ -693,7 +695,8 @@ function headerHTML(): string {
 
 function settingsHeaderHTML(): string {
   return `
-    <header class="header">
+    <header class="header${state.pinned ? " pinned-draggable" : ""}">
+      ${state.pinned ? '<span class="window-drag-handle" title="Drag window" aria-label="Drag window"></span>' : ""}
       <span class="title">Settings</span>
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings-close" title="Back">✕</button>
@@ -1377,6 +1380,8 @@ function footerHTML(): string {
 
 // ---------------------------------------------------------------- events
 
+installPinnedDragging(app, () => state.pinned && !MOCK, () => getCurrentWindow().startDragging());
+
 app.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-action]");
   if (!btn) return;
@@ -1385,6 +1390,16 @@ app.addEventListener("click", (e) => {
   cancelCelebration(); // a click ends the refill show; the action re-renders below
 
   switch (action) {
+    case "team-password-toggle": {
+      const input = app.querySelector<HTMLInputElement>("#team-ssh_password");
+      if (!input) break;
+      const visible = input.type === "password";
+      input.type = visible ? "text" : "password";
+      btn.textContent = visible ? "Hide" : "Show";
+      btn.setAttribute("aria-label", `${visible ? "Hide" : "Show"} SSH password`);
+      btn.setAttribute("aria-pressed", String(visible));
+      break;
+    }
     case "usage-view": {
       const c = activeCalendar();
       if (!c || (value !== "calendar" && value !== "bars") || value === c.view) break;

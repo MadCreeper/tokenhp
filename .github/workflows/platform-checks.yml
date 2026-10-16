@@ -1,0 +1,60 @@
+name: Platform checks
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'src-tauri/**', 'scripts/**', 'tests/**', 'package*.json', '.github/workflows/platform-checks.yml']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: platform-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+            cache_suffix: universal
+          - platform: ubuntu-22.04
+            args: ''
+            cache_suffix: ''
+          - platform: windows-latest
+            args: ''
+            cache_suffix: ''
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-${{ matrix.platform }}-${{ matrix.cache_suffix }}
+          save-if: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Rust regression tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib ${{ matrix.args }}
+      - name: Install local SSH test server
+        run: python -m pip install paramiko==4.0.0
+      - name: Native SSH password and tunnel test
+        run: python scripts/test-ssh-platform.py ${{ matrix.args }}

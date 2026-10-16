@@ -17,8 +17,7 @@ use crate::localstats::UsageRow;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::time::Duration;
 use tokio_postgres::{types::ToSql, Client, NoTls, Transaction};
 
@@ -493,57 +492,24 @@ async fn connect(cfg: &TeamConfig) -> Result<Conn, String> {
 struct Tunnel {
     child: Child,
     port: u16,
-    /// Temp SSH_ASKPASS helper to remove when the tunnel closes (password auth).
-    askpass: Option<PathBuf>,
 }
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        cleanup_askpass(&self.askpass);
     }
 }
 
 async fn open_tunnel(cfg: &TeamConfig) -> Result<Tunnel, String> {
     let port = free_local_port()?;
     let forward = format!("127.0.0.1:{port}:{}:{}", cfg.db_host, cfg.db_port);
-    let target = format!("{}@{}", cfg.ssh_user, cfg.ssh_host);
-    let ssh_port = cfg.ssh_port.to_string();
-
-    let mut cmd = Command::new("ssh");
-    cmd.args([
-        "-N",
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ServerAliveInterval=15",
-        "-p",
-        &ssh_port,
-        "-L",
-        &forward,
-        &target,
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped());
-
-    // Optional password auth, fed via SSH_ASKPASS so we never block on a prompt.
-    // Without a password we stay key/agent-only (BatchMode) so a missing
-    // credential errors fast instead of hanging.
-    let askpass = setup_auth(&mut cmd, cfg)?;
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            cleanup_askpass(&askpass);
-            return Err(format!(
-                "could not run ssh ({e}); is it installed and on PATH?"
-            ));
-        }
-    };
+    let helper = std::env::current_exe().map_err(|e| format!("Could not locate SSH password helper: {e}"))?;
+    let mut cmd = crate::platform::ssh_command(&cfg.ssh_host, &cfg.ssh_user, cfg.ssh_port,
+        &forward, &cfg.ssh_password, &helper)?;
+    let mut child = cmd.spawn().map_err(|e| format!(
+        "Could not run SSH ({e}). Install the OpenSSH Client and check its PATH."
+    ))?;
 
     // Wait (≤10s) for the forwarded port to accept connections.
     for _ in 0..50 {
@@ -554,12 +520,10 @@ async fn open_tunnel(cfg: &TeamConfig) -> Result<Tunnel, String> {
             return Ok(Tunnel {
                 child,
                 port,
-                askpass,
             });
         }
         if let Ok(Some(status)) = child.try_wait() {
             let msg = drain_stderr(&mut child);
-            cleanup_askpass(&askpass);
             return Err(format!("ssh tunnel exited ({status}): {msg}"));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -567,59 +531,7 @@ async fn open_tunnel(cfg: &TeamConfig) -> Result<Tunnel, String> {
     let _ = child.kill();
     let _ = child.wait();
     let msg = drain_stderr(&mut child);
-    cleanup_askpass(&askpass);
     Err(format!("ssh tunnel did not come up within 10s: {msg}"))
-}
-
-/// Configure the ssh auth method on `cmd`. Returns the temp askpass helper to
-/// clean up (Some only when a password is in use, unix only).
-#[cfg(unix)]
-fn setup_auth(cmd: &mut Command, cfg: &TeamConfig) -> Result<Option<PathBuf>, String> {
-    if cfg.ssh_password.trim().is_empty() {
-        cmd.arg("-o").arg("BatchMode=yes");
-        return Ok(None);
-    }
-    let path = write_askpass_helper()?;
-    cmd.env("HPBAR_TUNNEL_PW", &cfg.ssh_password)
-        .env("SSH_ASKPASS", &path)
-        .env("SSH_ASKPASS_REQUIRE", "force")
-        .env("DISPLAY", ":0")
-        .arg("-o")
-        .arg("BatchMode=no")
-        .arg("-o")
-        .arg("NumberOfPasswordPrompts=1");
-    Ok(Some(path))
-}
-
-#[cfg(not(unix))]
-fn setup_auth(cmd: &mut Command, _cfg: &TeamConfig) -> Result<Option<PathBuf>, String> {
-    // The SSH_ASKPASS helper is a /bin/sh script, so password auth is unix-only;
-    // elsewhere fall back to key/agent auth.
-    cmd.arg("-o").arg("BatchMode=yes");
-    Ok(None)
-}
-
-fn cleanup_askpass(askpass: &Option<PathBuf>) {
-    if let Some(p) = askpass {
-        let _ = std::fs::remove_file(p);
-    }
-}
-
-/// Write a one-shot SSH_ASKPASS helper that echoes `$HPBAR_TUNNEL_PW`.
-#[cfg(unix)]
-fn write_askpass_helper() -> Result<PathBuf, String> {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut path = std::env::temp_dir();
-    path.push(format!("hpbar-askpass-{}-{}.sh", std::process::id(), n));
-    let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-    f.write_all(b"#!/bin/sh\nprintf '%s\\n' \"$HPBAR_TUNNEL_PW\"\n")
-        .map_err(|e| e.to_string())?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| e.to_string())?;
-    Ok(path)
 }
 
 fn free_local_port() -> Result<u16, String> {

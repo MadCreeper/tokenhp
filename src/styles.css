@@ -1272,6 +1272,12 @@ html.glass.blurred body.theme-classic .header {
   outline: none;
   border-color: #0a84ff;
 }
+.pinned-draggable { cursor: grab; }
+.window-drag-handle { width: 10px; height: 16px; flex-shrink: 0;
+  color: var(--panel-text-dim); background: radial-gradient(circle, currentColor 1px, transparent 1.5px) 0 0 / 5px 5px; }
+.settings-password { display: flex; gap: 6px; }
+.settings-password .settings-input { flex: 1; min-width: 0; }
+.settings-password-toggle { flex-shrink: 0; width: 50px; padding: 4px 6px; font-size: 10px; }
 /* Inputs pick up each theme's surface/border so they stop reading as a
    generic white box dropped into the panel. */
 .theme-minecraft .settings-input {

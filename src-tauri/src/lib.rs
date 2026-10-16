@@ -15,6 +15,8 @@ pub mod heart_icon;
 pub mod localstats;
 pub mod network;
 pub mod openclawstats;
+pub mod platform;
+mod placement;
 pub mod pricing;
 pub mod share;
 pub mod team;
@@ -43,10 +45,18 @@ use tauri_plugin_autostart::ManagerExt;
 /// header pin button; not persisted here — the frontend re-syncs it on launch
 /// from its own stored preference.
 static PINNED: AtomicBool = AtomicBool::new(false);
+static TRAY_ANCHOR: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+static POPOVER_PLACED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
-fn set_pinned(pinned: bool) {
+fn set_pinned(app: tauri::AppHandle, pinned: bool) {
     PINNED.store(pinned, Ordering::Relaxed);
+    if !pinned {
+        let anchor = TRAY_ANCHOR.lock().ok().and_then(|a| *a);
+        if let (Some(anchor), Some(win)) = (anchor, app.get_webview_window("popover")) {
+            position_under_tray(&win, anchor);
+        }
+    }
 }
 
 /// The popover's NSGlassEffectView, kept alive by its superview. Stored raw so
@@ -502,6 +512,16 @@ fn build_popover(app: &tauri::AppHandle) -> tauri::Result<()> {
     // Dismiss like a real menu-bar popover: hide as soon as focus leaves.
     let win = popover.clone();
     popover.on_window_event(move |event| {
+        if matches!(
+            event,
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+        ) && !PINNED.load(Ordering::Relaxed)
+        {
+            let anchor = TRAY_ANCHOR.lock().ok().and_then(|a| *a);
+            if let Some(anchor) = anchor {
+                position_under_tray(&win, anchor);
+            }
+        }
         if let WindowEvent::Focused(focused) = event {
             // Mirror focus into the page as a root class (widget styling: opaque
             // in focus, clear glass out of focus). Direct eval — the JS-side
@@ -769,7 +789,14 @@ fn toggle_popover(win: &WebviewWindow, rect: Rect) {
         return;
     }
 
-    position_under_tray(win, rect);
+    if !PINNED.load(Ordering::Relaxed) || !POPOVER_PLACED.load(Ordering::Relaxed) {
+        if let Ok(mut anchor) = TRAY_ANCHOR.lock() {
+            *anchor = Some(rect);
+        }
+        position_under_tray(win, rect);
+        POPOVER_PLACED.store(true, Ordering::Relaxed);
+    }
+    mark_shown();
     let _ = win.show();
     let _ = win.set_focus();
     // Tell the frontend to re-fetch now that we're visible.
@@ -787,7 +814,10 @@ fn toggle_popover_no_anchor(win: &WebviewWindow) {
         return;
     }
 
-    position_top_right(win);
+    if !PINNED.load(Ordering::Relaxed) || !POPOVER_PLACED.load(Ordering::Relaxed) {
+        position_top_right(win);
+        POPOVER_PLACED.store(true, Ordering::Relaxed);
+    }
     mark_shown();
     let _ = win.show();
     let _ = win.set_focus();
@@ -893,32 +923,18 @@ fn position_under_tray(win: &WebviewWindow, rect: Rect) {
         })
         .or_else(|| win.current_monitor().ok().flatten());
 
-    const GAP: f64 = 6.0;
-    let mut x = icon_x + icon_w - win_w; // right edge under the icon's right edge
-
-    // Below the icon by default (top menu bar); above it if the icon sits in the
-    // bottom half of its monitor (a bottom taskbar tray, e.g. Windows).
-    let icon_in_bottom_half = icon_monitor.as_ref().is_some_and(|m| {
-        let mid = m.position().y as f64 + m.size().height as f64 / 2.0;
-        icon_y > mid
-    });
-    let mut y = if icon_in_bottom_half {
-        icon_y - win_h - GAP
-    } else {
-        icon_y + icon_h + GAP
-    };
-
-    // Clamp onto the icon's monitor so the panel stays fully on-screen.
     if let Some(monitor) = &icon_monitor {
-        let mp = monitor.position();
-        let ms = monitor.size();
-        let (mx, my) = (mp.x as f64, mp.y as f64);
-        x = x.clamp(mx + 8.0, (mx + ms.width as f64 - win_w - 8.0).max(mx + 8.0));
-        y = y.clamp(
-            my + 8.0,
-            (my + ms.height as f64 - win_h - 8.0).max(my + 8.0),
+        let work = monitor.work_area();
+        let (x, y) = placement::anchored(
+            placement::Bounds {
+                x: icon_x, y: icon_y, width: icon_w, height: icon_h,
+            },
+            placement::Bounds {
+                x: work.position.x as f64, y: work.position.y as f64,
+                width: work.size.width as f64, height: work.size.height as f64,
+            },
+            (win_w, win_h), monitor.scale_factor(),
         );
+        let _ = win.set_position(PhysicalPosition::new(x, y));
     }
-
-    let _ = win.set_position(PhysicalPosition::new(x, y));
 }

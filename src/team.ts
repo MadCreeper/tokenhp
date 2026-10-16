@@ -380,12 +380,21 @@ function field(
   placeholder: string,
   type: "text" | "number" | "password" = "text",
 ): string {
+  const id = `team-${name}`;
+  const input = `<input id="${id}" class="settings-input" type="${type}" data-field="${name}"
+    value="${escapeHTML(value)}" placeholder="${escapeHTML(placeholder)}"
+    spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" />`;
+  if (type === "password") {
+    return `<div class="settings-row">
+      <label class="settings-label" for="${id}">${escapeHTML(label)}</label>
+      <div class="settings-password">${input}<button type="button" class="mc-btn settings-password-toggle"
+        data-action="team-password-toggle" aria-controls="${id}" aria-label="Show SSH password" aria-pressed="false">Show</button></div>
+    </div>`;
+  }
   return `
     <label class="settings-row">
       <span class="settings-label">${label}</span>
-      <input class="settings-input" type="${type}" data-field="${name}"
-        value="${escapeHTML(value)}" placeholder="${escapeHTML(placeholder)}"
-        spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" />
+      ${input}
     </label>`;
 }
 

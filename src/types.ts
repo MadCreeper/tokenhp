@@ -88,14 +88,14 @@ export interface Account {
   plan: string | null;
 }
 
-/** Mirrors `team::TeamConfig` — local-only, no secrets (auth is your SSH key). */
+/** Mirrors `team::TeamConfig` — local-only, including the optional SSH password. */
 export interface TeamConfig {
   enabled: boolean;
   // SSH tunnel endpoint
   ssh_host: string;
   ssh_user: string;
   ssh_port: number;
-  ssh_password: string; // optional; plaintext in config (unix only)
+  ssh_password: string; // optional; plaintext in local config
   // Postgres (as reached through the tunnel, i.e. the VPS's localhost)
   db_host: string;
   db_port: number;

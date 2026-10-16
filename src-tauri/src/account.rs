@@ -338,11 +338,6 @@ fn save_history(history: &AccountHistory) {
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, body).is_ok() {
         restrict_file_permissions(&tmp);
-        // Windows rename does not replace an existing destination. The small
-        // remove/rename gap is preferable to silently freezing attribution
-        // after the first observation.
-        #[cfg(target_os = "windows")]
-        let _ = std::fs::remove_file(&path);
         let _ = std::fs::rename(tmp, path);
     }
 }

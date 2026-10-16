@@ -225,8 +225,6 @@ fn save_history(app: &AppHandle, h: &HashMap<String, Vec<Sample>>) {
     // Write-then-rename so a popover read never sees a half-written file.
     let tmp = p.with_extension("json.tmp");
     if std::fs::write(&tmp, json).is_ok() {
-        #[cfg(target_os = "windows")]
-        let _ = std::fs::remove_file(&p);
         let _ = std::fs::rename(&tmp, &p);
     }
 }

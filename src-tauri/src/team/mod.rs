@@ -62,7 +62,7 @@ pub struct TeamConfig {
     pub ssh_user: String,
     #[serde(default = "default_ssh_port")]
     pub ssh_port: u16,
-    /// Optional SSH password (unix only). Stored in the local config file in
+    /// Optional SSH password. Stored in the local config file in
     /// plaintext — less safe than a key; provided as an onboarding convenience.
     #[serde(default)]
     pub ssh_password: String,
@@ -303,7 +303,7 @@ fn mask_email(label: &str) -> String {
 /// Machine name for the member's profile. Shells out to `hostname` (present on
 /// macOS, Linux and Windows).
 pub fn hostname() -> String {
-    std::process::Command::new("hostname")
+    crate::platform::background_command("hostname")
         .output()
         .ok()
         .filter(|o| o.status.success())

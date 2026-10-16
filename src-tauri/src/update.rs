@@ -402,23 +402,21 @@ fn os_open(target: &str) -> Result<(), String> {
         c
     };
     #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        // Empty "" is start's window-title arg, so a quoted target isn't eaten.
-        c.args(["/C", "start", "", target]);
-        c
-    };
+    return crate::platform::open_external(target);
     #[cfg(target_os = "linux")]
     let mut cmd = {
         let mut c = std::process::Command::new("xdg-open");
         c.arg(target);
         c
     };
-    let status = cmd.status().map_err(|e| format!("Couldn't open it: {e}"))?;
-    if !status.success() {
-        return Err(format!("Couldn't open the installer or link ({status})."));
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = cmd.status().map_err(|e| format!("Couldn't open it: {e}"))?;
+        if !status.success() {
+            return Err(format!("Couldn't open the installer or link ({status})."));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]

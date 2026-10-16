@@ -139,3 +139,18 @@ jobs:
           # Prerelease iff the tag carries a suffix (e.g. -beta, -alpha).
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }} -- --locked
+
+      - name: Keep test installers
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: HPBar-${{ matrix.platform }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            src-tauri/target/**/bundle/dmg/*.dmg
+            src-tauri/target/**/bundle/nsis/*-setup.exe
+            src-tauri/target/**/bundle/msi/*.msi
+            src-tauri/target/**/bundle/deb/*.deb
+            src-tauri/target/**/bundle/rpm/*.rpm
+            src-tauri/target/**/bundle/appimage/*.AppImage
