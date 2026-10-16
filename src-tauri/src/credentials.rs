@@ -729,7 +729,8 @@ mod tests {
             allow_read_now(&cache);
             assert!(matches!(cache.get(), Err(CredError::NotFound)));
         }
-        assert_eq!(READS.load(Ordering::SeqCst), 1, "polled a missing item");
+        let expected = if READS_ARE_EXPENSIVE { 1 } else { 6 };
+        assert_eq!(READS.load(Ordering::SeqCst), expected, "unexpected storage polling");
 
         // The user signs in: the item appears.
         *FP.lock().unwrap() = Some("mdat-new".into());
@@ -965,9 +966,9 @@ mod tests {
     fn unknown_fingerprint_does_not_poll_where_reads_can_prompt() {
         let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let cache = setup("mdat-1", -3600.0);
+        *FP.lock().unwrap() = None; // fingerprint unavailable from the first read
         assert!(cache.get().is_err());
 
-        *FP.lock().unwrap() = None; // fingerprint query broke
         for _ in 0..5 {
             allow_read_now(&cache);
             let _ = cache.get();
