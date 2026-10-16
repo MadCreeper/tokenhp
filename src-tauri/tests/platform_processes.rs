@@ -71,13 +71,20 @@ fn isolated_ssh(
         platform::ssh_command("127.0.0.1", "hpbar-smoke", port, forward, password, helper).unwrap();
     let config = known_hosts.with_extension("config");
     std::fs::write(&config, "").unwrap();
+    // -o values are parsed as SSH configuration after argv parsing; quote the
+    // filename inside that value too, so spaces don't become multiple paths.
+    let known_hosts = known_hosts
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace('"', "\\\"");
     let mut cmd = platform::background_command(base.get_program());
-    cmd.arg("-F")
+    cmd.arg("-v")
+        .arg("-F")
         .arg(config)
         .arg("-o")
-        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+        .arg(format!("UserKnownHostsFile=\"{known_hosts}\""))
         .arg("-o")
-        .arg(format!("GlobalKnownHostsFile={}", known_hosts.display()))
+        .arg(format!("GlobalKnownHostsFile=\"{known_hosts}\""))
         .args(base.get_args());
     for (name, value) in base.get_envs() {
         if let Some(value) = value {
@@ -122,10 +129,17 @@ fn real_openssh_password_tunnel_works_without_remote_shell() {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", local)) {
             break s;
         }
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "SSH exited before forwarding opened"
-        );
+        if let Some(status) = child.0.try_wait().unwrap() {
+            let mut stderr = String::new();
+            child
+                .0
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("SSH exited before forwarding opened ({status}): {stderr}");
+        }
         assert!(Instant::now() < deadline, "SSH tunnel startup timed out");
         std::thread::sleep(Duration::from_millis(50));
     };
