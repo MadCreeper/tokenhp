@@ -1,4 +1,4 @@
-# Cross-platform release builds. Triggered by tags like `v0.2.0`.
+# Cross-platform builds. Only tags like `v0.2.0` publish releases.
 # Produces .app/.dmg (macOS, universal), .deb/.rpm/.AppImage (Linux), and
 # .msi/.exe (Windows). A tag with a prerelease suffix (`-beta`, `-alpha`) is
 # published as a GitHub prerelease; a plain `vX.Y.Z` tag is a full release —
@@ -7,9 +7,25 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+    paths:
+      - '.github/workflows/release.yml'
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'scripts/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package*.json'
+      - '*config*'
   workflow_dispatch:
+
+# Superseded branch builds can stop; each release tag always finishes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   build:
@@ -39,6 +55,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
+          cache: npm
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -49,6 +66,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          # Tags can restore main's cache, but cannot restore other tags' caches.
+          # Build the same targets/profile on main so future releases start warm.
+          # rust-cache also keys by compiler, environment and dependency inputs.
+          shared-key: release-${{ matrix.platform }}-${{ matrix.rust_targets }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -65,6 +87,7 @@ jobs:
             file wget
 
       - name: Validate release version
+        if: github.ref_type == 'tag'
         run: node scripts/release-version.mjs
 
       - name: Install frontend dependencies
@@ -74,6 +97,7 @@ jobs:
       # changelog), with the install caveat appended. Falls back to just the
       # caveat if the tag has no message.
       - name: Release notes from tag
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
           # actions/checkout resolves the tag to a SHA and leaves a *lightweight*
@@ -93,7 +117,16 @@ jobs:
             echo 'RELEASE_EOF'
           } >> "$GITHUB_ENV"
 
+      # Exercise actual packaging while warming the default-branch cache. With
+      # no tagName/releaseId, tauri-action builds without publishing a release.
+      - name: Build packages
+        if: github.ref_type != 'tag'
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: ${{ matrix.args }} -- --locked
+
       - name: Build + release
+        if: github.ref_type == 'tag'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -104,4 +137,4 @@ jobs:
           releaseDraft: false
           # Prerelease iff the tag carries a suffix (e.g. -beta, -alpha).
           prerelease: ${{ contains(github.ref_name, '-') }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} -- --locked
