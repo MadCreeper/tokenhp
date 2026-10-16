@@ -6,8 +6,190 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// Drain concurrently: Windows pipes are small enough that SSH debug output
+/// or a server banner can otherwise block authentication before it completes.
+pub struct StderrCapture {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl StderrCapture {
+    pub fn start(child: &mut std::process::Child) -> Self {
+        let pipe = child.stderr.take().expect("SSH stderr must be piped");
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = bytes.clone();
+        let worker = std::thread::spawn(move || read_stderr_tail(pipe, output));
+        Self {
+            bytes,
+            worker: Some(worker),
+        }
+    }
+    /// Call after the child exits. Bound the wait: a proxy/helper descendant
+    /// could have inherited stderr and outlived SSH itself.
+    pub fn finish(&mut self) -> String {
+        for _ in 0..20 {
+            if self.worker.as_ref().is_some_and(|w| w.is_finished()) {
+                let _ = self.worker.take().unwrap().join();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        String::from_utf8_lossy(&self.bytes.lock().unwrap())
+            .trim()
+            .to_string()
+    }
+}
+fn read_stderr_tail(
+    mut reader: impl std::io::Read,
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    let mut chunk = [0; 1024];
+    while let Ok(n) = reader.read(&mut chunk) {
+        if n == 0 {
+            break;
+        }
+        let mut out = bytes.lock().unwrap();
+        out.extend_from_slice(&chunk[..n]);
+        let excess = out.len().saturating_sub(8192);
+        out.drain(..excess);
+    }
+}
+
 pub const ASKPASS_MODE: &str = "HPBAR_SSH_ASKPASS";
 pub const ASKPASS_PASSWORD: &str = "HPBAR_TUNNEL_PW";
+
+/// Some Windows OpenSSH versions cannot spawn a Unicode askpass filename.
+/// Prefer its DOS-compatible spelling; if short names are unavailable, keep a
+/// private ASCII-path executable copy alive for the lifetime of the tunnel.
+pub struct AskpassHelper {
+    pub path: std::path::PathBuf,
+    #[cfg(windows)]
+    directory: Option<std::path::PathBuf>,
+}
+impl AskpassHelper {
+    pub fn prepare(path: std::path::PathBuf, needed: bool) -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            if needed {
+                let compatible = windows_short_path(&path).unwrap_or_else(|| path.clone());
+                let name = compatible.as_os_str().to_string_lossy();
+                if !name.is_ascii() || name.contains(' ') {
+                    return Self::private_copy(&path);
+                }
+                return Ok(Self {
+                    path: compatible,
+                    directory: None,
+                });
+            }
+            Ok(Self {
+                path,
+                directory: None,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = needed;
+            Ok(Self { path })
+        }
+    }
+    #[cfg(windows)]
+    fn private_copy(source: &Path) -> Result<Self, String> {
+        use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr::null_mut};
+        #[repr(C)]
+        struct SecurityAttributes {
+            length: u32,
+            descriptor: *mut c_void,
+            inherit: i32,
+        }
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                s: *const u16,
+                revision: u32,
+                out: *mut *mut c_void,
+                size: *mut u32,
+            ) -> i32;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateDirectoryW(path: *const u16, security: *const SecurityAttributes) -> i32;
+            fn LocalFree(ptr: *mut c_void) -> *mut c_void;
+        }
+        let root = std::env::var_os("SystemRoot").ok_or("Windows directory is unavailable.")?;
+        let directory = std::path::PathBuf::from(root)
+            .join("Temp")
+            .join(format!("hpbar-askpass-{}", uuid::Uuid::new_v4()));
+        if !directory.as_os_str().to_string_lossy().is_ascii() {
+            return Err(
+                "OpenSSH needs an ASCII-compatible helper path on this Windows installation."
+                    .into(),
+            );
+        }
+        // Protected DACL: owner and SYSTEM only, inherited by the executable.
+        // Do not inherit a shared Windows Temp directory's writable ACL.
+        let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut descriptor = null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(format!(
+                "Could not secure SSH helper: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let attributes = SecurityAttributes {
+            length: std::mem::size_of::<SecurityAttributes>() as u32,
+            descriptor,
+            inherit: 0,
+        };
+        let wide: Vec<u16> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
+        let created = unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) };
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            LocalFree(descriptor);
+        }
+        if created == 0 {
+            return Err(format!("Could not prepare SSH helper: {error}"));
+        }
+        let helper = Self {
+            path: directory.join("askpass.exe"),
+            directory: Some(directory),
+        };
+        std::fs::copy(source, &helper.path)
+            .map_err(|e| format!("Could not copy SSH helper: {e}"))?;
+        Ok(helper)
+    }
+}
+#[cfg(windows)]
+impl Drop for AskpassHelper {
+    fn drop(&mut self) {
+        if let Some(directory) = &self.directory {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_short_path(path: &Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetShortPathNameW(long: *const u16, short: *mut u16, size: u32) -> u32;
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut out = vec![0; 32768];
+    let len =
+        unsafe { GetShortPathNameW(wide.as_ptr(), out.as_mut_ptr(), out.len() as u32) } as usize;
+    (len > 0 && len < out.len()).then(|| std::ffi::OsString::from_wide(&out[..len]).into())
+}
 
 /// OpenSSH starts this executable with inherited stdout redirected to a pipe.
 /// Run before Tauri starts: no second window, tray, database access, or logging.
@@ -93,6 +275,10 @@ pub fn ssh_command(
     if password.is_empty() {
         cmd.args(["-o", "BatchMode=yes"]);
     } else {
+        #[cfg(windows)]
+        let compatible = windows_short_path(helper).unwrap_or_else(|| helper.to_path_buf());
+        #[cfg(windows)]
+        let helper = compatible.as_path();
         cmd.env(ASKPASS_MODE, "1")
             .env(ASKPASS_PASSWORD, password)
             .env("SSH_ASKPASS", helper)
@@ -160,6 +346,28 @@ pub fn open_external(target: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_fallback_is_private_and_removed_after_use() {
+        let directory;
+        {
+            let helper = AskpassHelper::private_copy(&std::env::current_exe().unwrap()).unwrap();
+            assert!(helper.path.is_file());
+            assert!(helper.path.as_os_str().to_string_lossy().is_ascii());
+            directory = helper.directory.clone().unwrap();
+        }
+        assert!(!directory.exists());
+    }
+    #[test]
+    fn noisy_stderr_is_drained_and_keeps_a_bounded_diagnostic_tail() {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut data = vec![b'x'; 100_000];
+        data.extend_from_slice(b"permission denied");
+        read_stderr_tail(std::io::Cursor::new(data), bytes.clone());
+        let out = bytes.lock().unwrap();
+        assert_eq!(out.len(), 8192);
+        assert!(out.ends_with(b"permission denied"));
+    }
     #[test]
     fn explicit_password_and_key_only_modes_are_distinct() {
         let helper = Path::new("Program Files/HPBar/hpbar.exe");

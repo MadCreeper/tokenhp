@@ -29,11 +29,24 @@ impl Drop for Scratch {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-struct Running(Child);
+struct Running {
+    child: Child,
+    stderr: platform::StderrCapture,
+}
+impl Running {
+    fn new(mut child: Child) -> Self {
+        let stderr = platform::StderrCapture::start(&mut child);
+        Self { child, stderr }
+    }
+    fn errors(&mut self) -> String {
+        self.stderr.finish()
+    }
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -113,7 +126,7 @@ fn real_openssh_password_tunnel_works_without_remote_shell() {
         .unwrap()
         .port();
     let forward = format!("127.0.0.1:{local}:127.0.0.1:5432");
-    let mut child = Running(
+    let mut child = Running::new(
         isolated_ssh(
             &helper,
             &scratch.0.join("known_hosts"),
@@ -129,15 +142,8 @@ fn real_openssh_password_tunnel_works_without_remote_shell() {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", local)) {
             break s;
         }
-        if let Some(status) = child.0.try_wait().unwrap() {
-            let mut stderr = String::new();
-            child
-                .0
-                .stderr
-                .take()
-                .unwrap()
-                .read_to_string(&mut stderr)
-                .unwrap();
+        if let Some(status) = child.child.try_wait().unwrap() {
+            let stderr = child.errors();
             panic!("SSH exited before forwarding opened ({status}): {stderr}");
         }
         assert!(Instant::now() < deadline, "SSH tunnel startup timed out");
@@ -152,7 +158,7 @@ fn real_openssh_password_tunnel_works_without_remote_shell() {
     assert_eq!(&response, b"hpbar-smoke");
     drop(stream);
     drop(child);
-    let mut bad = Running(
+    let mut bad = Running::new(
         isolated_ssh(
             &helper,
             &scratch.0.join("known_hosts"),
@@ -165,7 +171,7 @@ fn real_openssh_password_tunnel_works_without_remote_shell() {
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if let Some(status) = bad.0.try_wait().unwrap() {
+        if let Some(status) = bad.child.try_wait().unwrap() {
             assert!(!status.success());
             break;
         }

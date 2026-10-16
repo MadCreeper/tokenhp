@@ -492,6 +492,8 @@ async fn connect(cfg: &TeamConfig) -> Result<Conn, String> {
 struct Tunnel {
     child: Child,
     port: u16,
+    _stderr: crate::platform::StderrCapture,
+    _helper: crate::platform::AskpassHelper,
 }
 
 impl Drop for Tunnel {
@@ -505,11 +507,14 @@ async fn open_tunnel(cfg: &TeamConfig) -> Result<Tunnel, String> {
     let port = free_local_port()?;
     let forward = format!("127.0.0.1:{port}:{}:{}", cfg.db_host, cfg.db_port);
     let helper = std::env::current_exe().map_err(|e| format!("Could not locate SSH password helper: {e}"))?;
+    let helper = crate::platform::AskpassHelper::prepare(helper, !cfg.ssh_password.is_empty())?;
     let mut cmd = crate::platform::ssh_command(&cfg.ssh_host, &cfg.ssh_user, cfg.ssh_port,
-        &forward, &cfg.ssh_password, &helper)?;
+        &forward, &cfg.ssh_password, &helper.path)?;
     let mut child = cmd.spawn().map_err(|e| format!(
         "Could not run SSH ({e}). Install the OpenSSH Client and check its PATH."
     ))?;
+
+    let mut stderr = crate::platform::StderrCapture::start(&mut child);
 
     // Wait (≤10s) for the forwarded port to accept connections.
     for _ in 0..50 {
@@ -520,17 +525,19 @@ async fn open_tunnel(cfg: &TeamConfig) -> Result<Tunnel, String> {
             return Ok(Tunnel {
                 child,
                 port,
+                _stderr: stderr,
+                _helper: helper,
             });
         }
         if let Ok(Some(status)) = child.try_wait() {
-            let msg = drain_stderr(&mut child);
+            let msg = stderr.finish();
             return Err(format!("ssh tunnel exited ({status}): {msg}"));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let _ = child.kill();
     let _ = child.wait();
-    let msg = drain_stderr(&mut child);
+    let msg = stderr.finish();
     Err(format!("ssh tunnel did not come up within 10s: {msg}"))
 }
 
@@ -539,16 +546,6 @@ fn free_local_port() -> Result<u16, String> {
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .map_err(|e| e.to_string())
-}
-
-/// Best-effort read of a *terminated* ssh child's stderr for the error message.
-fn drain_stderr(child: &mut Child) -> String {
-    use std::io::Read;
-    let mut out = String::new();
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_string(&mut out);
-    }
-    out.trim().to_string()
 }
 
 // --- migrations + queries ----------------------------------------------------

@@ -24,6 +24,11 @@ Git/MSYS SSH, and reports a missing client instead of silently ignoring password
 SSH passwords retain their exact contents and are supplied only through the SSH
 child's environment. The helper writes directly to OpenSSH's private stdout pipe;
 it starts no GUI and writes no password script. Local password storage is unchanged.
+Windows OpenSSH is given a compatible short executable path. If short names are
+unavailable, the app makes an ASCII-path executable copy in a private temporary
+directory accessible only to its owner and SYSTEM, and removes it with the tunnel.
+SSH stderr is drained concurrently into a bounded buffer so verbose configuration
+or a long banner cannot fill a Windows pipe and block authentication.
 
 Popup geometry tests cover bottom/top/side taskbars, negative monitor coordinates,
 DPI-scaled sizes and content growth. Unpinned popups re-anchor on resize and DPI
