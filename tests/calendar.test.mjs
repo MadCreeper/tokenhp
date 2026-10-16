@@ -6,7 +6,40 @@ const { calendarBuckets, calendarHTML, calendarDetailHTML } = await import(`data
 const entry = (overrides = {}) => ({ day: '2024-02-01', model: 'a', display_name: 'Model A', tool: 'codex', member: 'Alice', member_id: '1', account_key: 'work', account_label: 'Work', tokens: 100, cost: 1, ...overrides });
 const report = { year: 2024, entries: [entry(), entry({ day: '2024-02-29', cost: 2 }), entry({ day: '2024-03-01', model: 'b', tool: 'claude-code', account_key: 'private', tokens: 500, cost: null })] };
 const filters = { tool: 'all', model: 'all', account: 'all' };
-const args = { report, year: 2024, month: 1, scale: 'days', filters, source: 'team', error: '', loading: false, now: new Date('2024-03-15T00:00:00Z') };
+const args = { report, year: 2024, month: 1, scale: 'days', metric: 'tokens', filters, source: 'team', error: '', loading: false, now: new Date('2024-03-15T00:00:00Z') };
+
+test('both sources show tokens and cost and use the chosen heatmap unit in both scales', () => {
+  for (const source of ['local', 'team']) for (const scale of ['days', 'months']) {
+    const firstDay = scale === 'days' ? '2024-02-01' : '2024-01-01';
+    const secondDay = scale === 'days' ? '2024-02-02' : '2024-02-01';
+    const r = { year: 2024, entries: [
+      entry({ day: firstDay, tokens: 10000, cost: 1 }),
+      entry({ day: secondDay, tokens: 100, cost: 1000, cost_complete: false }),
+    ] };
+    for (const metric of ['tokens', 'cost']) {
+      const html = calendarHTML({ ...args, report: r, source, scale, metric });
+      assert.match(html, /calendar-summary[\s\S]*10k tokens · \$1\.0k\+/);
+      assert.match(html, new RegExp(`option value="${metric}" selected`));
+      assert.match(html, new RegExp(`Low to high ${metric === 'cost' ? 'estimated cost' : 'token usage'}`));
+      const cells = [...html.matchAll(/<button class="calendar-cell ([^"]+)"[^>]*data-calendar-key="([^"]+)"/g)];
+      const key = firstDay.slice(0, scale === 'months' ? 7 : 10);
+      assert.match(cells.find(c => c[2] === key)[1], metric === 'tokens' ? /level-4/ : /level-1/);
+      const bucket = calendarBuckets(r, scale, filters).get(key);
+      assert.match(calendarDetailHTML('Selected', bucket), /10k tokens · \$1\.00/);
+    }
+  }
+});
+
+test('member details include costs and preserve partial, estimated and unpriced status', () => {
+  const r = { year: 2024, entries: [
+    entry({ tokens: 1000, cost: 2, cost_estimated: true }),
+    entry({ tokens: 500, cost: null }),
+    entry({ member_id: '2', member: 'Bob', tokens: 200, cost: null }),
+  ] };
+  const html = calendarDetailHTML('Selected', calendarBuckets(r, 'days', filters).get('2024-02-01'));
+  assert.match(html, /<span>Alice<\/span><span>2k · ~\$2\.00\+<\/span>/);
+  assert.match(html, /<span>Bob<\/span><span>200 · unpriced<\/span>/);
+});
 
 test('daily and monthly aggregation agree without crossing month boundaries', () => {
   const days = calendarBuckets(report, 'days', filters);

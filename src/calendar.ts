@@ -2,6 +2,7 @@ import type { CalendarEntry, CalendarReport } from "./types";
 import { escapeHTML as esc, formatUsageCost, formatTokens } from "./util";
 
 export type CalendarScale = "days" | "months";
+export type CalendarMetric = "tokens" | "cost";
 export interface CalendarFilters { tool: string; model: string; account: string }
 export interface CalendarBucket {
   key: string;
@@ -37,21 +38,24 @@ function costLabel(b: CalendarBucket): string {
 export function calendarDetailHTML(label: string, b?: CalendarBucket): string {
   if (!b?.entries.length) return `<strong>${esc(label)}</strong><div>No recorded usage</div>`;
   const models = new Map<string, { name: string; tokens: number; cost: number; complete: boolean; estimated: boolean }>();
-  const members = new Map<string, { name: string; tokens: number }>();
+  const members = new Map<string, { name: string; tokens: number; cost: number; complete: boolean; estimated: boolean }>();
   for (const e of b.entries) {
     const m = models.get(e.model) ?? { name: e.display_name, tokens: 0, cost: 0, complete: true, estimated: false };
     m.tokens += e.tokens; m.cost += e.cost ?? 0; m.complete &&= e.cost !== null && e.cost_complete !== false; m.estimated ||= e.cost_estimated === true;
     models.set(e.model, m);
     if (e.member_id) {
-      const member = members.get(e.member_id) ?? { name: e.member || "Team member", tokens: 0 };
+      const member = members.get(e.member_id) ?? { name: e.member || "Team member", tokens: 0, cost: 0, complete: true, estimated: false };
       member.tokens += e.tokens;
+      member.cost += e.cost ?? 0;
+      member.complete &&= e.cost !== null && e.cost_complete !== false;
+      member.estimated ||= e.cost_estimated === true;
       members.set(e.member_id, member);
     }
   }
   const sorted = [...models.values()].sort((a, b) => b.tokens - a.tokens);
   const modelRows = sorted.slice(0, 5).map(m => `<div class="calendar-tip-row"><span>${esc(m.name)}</span><span>${formatTokens(m.tokens)} · ${formatUsageCost(m.cost, m.complete, m.estimated)}</span></div>`).join("");
   const memberRows = [...members.values()].sort((a, b) => b.tokens - a.tokens).slice(0, 3)
-    .map(m => `<div class="calendar-tip-row"><span>${esc(m.name)}</span><span>${formatTokens(m.tokens)}</span></div>`).join("");
+    .map(m => `<div class="calendar-tip-row"><span>${esc(m.name)}</span><span>${formatTokens(m.tokens)} · ${formatUsageCost(m.cost, m.complete, m.estimated)}</span></div>`).join("");
   return `<strong>${esc(label)}</strong><div class="calendar-tip-total">${formatTokens(b.tokens)} tokens · ${esc(costLabel(b))}</div>
     <div class="calendar-tip-section">${modelRows}${sorted.length > 5 ? `<div>+${sorted.length - 5} more models</div>` : ""}</div>
     ${memberRows ? `<div class="calendar-tip-section">${memberRows}${members.size > 3 ? `<div>+${members.size - 3} more members</div>` : ""}</div>` : ""}`;
@@ -62,6 +66,7 @@ export interface CalendarArgs {
   year: number;
   month: number; // zero-based, UTC
   scale: CalendarScale;
+  metric: CalendarMetric;
   filters: CalendarFilters;
   source: "local" | "team";
   error: string;
@@ -85,11 +90,12 @@ export function calendarHTML(a: CalendarArgs): string {
   const accounts = new Map(report.entries.map(e => [e.account_key, e.account_label || "Unknown account"]));
   const select = (field: string, all: string, selected: string, options: Map<string, string>) =>
     `<select class="calendar-filter" data-calendar-filter="${field}" aria-label="Calendar ${field}"><option value="all">${all}</option>${[...options].sort((a,b) => a[1].localeCompare(b[1])).map(([id, name]) => `<option value="${esc(id)}" ${selected === id ? "selected" : ""}>${esc(name)}</option>`).join("")}</select>`;
-  const filters = `<div class="calendar-filters">${select("model", "All models", a.filters.model, modelNames)}${a.source === "team" && accounts.size > 1 ? select("account", "All accounts", a.filters.account, accounts) : ""}</div>`;
+  const metric = `<select class="calendar-filter calendar-metric" data-calendar-metric aria-label="Calendar heatmap metric">${(["tokens", "cost"] as const).map(m => `<option value="${m}" ${a.metric === m ? "selected" : ""}>${m === "tokens" ? "Tokens" : "Cost"}</option>`).join("")}</select>`;
+  const filters = `<div class="calendar-filters">${select("model", "All models", a.filters.model, modelNames)}${a.source === "team" && accounts.size > 1 ? select("account", "All accounts", a.filters.account, accounts) : ""}${metric}</div>`;
   const buckets = calendarBuckets(report, a.scale, a.filters);
   const visible = [...buckets.values()].filter(b => a.scale === "months" || b.key.startsWith(dateKey(a.year, a.month).slice(0, 7)));
-  // Prefer costs when comparable; token intensity still works with unshared pricing.
-  const useCost = visible.length > 0 && visible.every(b => b.complete) && visible.some(b => b.cost > 0);
+  // Never silently switch units as pricing coverage or the source changes.
+  const useCost = a.metric === "cost";
   const magnitude = (b: CalendarBucket) => useCost ? b.cost : b.tokens;
   const peak = Math.max(Number.EPSILON, ...visible.map(magnitude));
   const cell = (key: string, text: string, fullLabel: string, future: boolean): string => {

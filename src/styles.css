@@ -1622,6 +1622,7 @@ body.theme-arknights {
   color: var(--calendar-control-text); background: var(--calendar-control);
   border: 1px solid var(--calendar-border); border-radius: var(--calendar-radius); padding: 5px; }
 .calendar-filter option { background: var(--calendar-tip-bg); color: var(--calendar-tip-text); }
+.calendar-metric { width: auto; flex-shrink: 0; }
 .calendar-grid { display: grid; gap: 6px; margin: 0 auto 14px; }
 .calendar-days { grid-template-columns: repeat(7, minmax(0, 1fr)); max-width: 270px; }
 .calendar-months { grid-template-columns: repeat(6, minmax(0, 1fr)); }

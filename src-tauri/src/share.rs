@@ -320,7 +320,12 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
 }
 
 fn key(provider: &str, title: &str, account: &str, cycle: i64, pricing: &str) -> String {
-    format!("v4/{provider}/{account}/{cycle}/{pricing}/{title}")
+    let parser = if provider == "codex" {
+        format!("/parser-{}", crate::codexstats::PARSER_REVISION)
+    } else {
+        String::new()
+    };
+    format!("v4/{provider}{parser}/{account}/{cycle}/{pricing}/{title}")
 }
 
 fn current_account(provider: &str) -> Option<String> {
@@ -604,6 +609,13 @@ mod tests {
         assert_ne!(a, key("claude", "Weekly", "b", 604800, "prices1"));
         assert_ne!(a, key("claude", "Weekly", "a", 604800, "prices2"));
         assert_ne!(a, key("claude", "Weekly", "a", 18000, "prices1"));
+        // Preserve existing Claude observations, but never fit recovered
+        // Codex request costs against pre-fix counter-only observations.
+        assert_eq!(a, "v4/claude/a/604800/prices1/Weekly");
+        assert_ne!(
+            key("codex", "Weekly", "a", 604800, "prices1"),
+            "v4/codex/a/604800/prices1/Weekly"
+        );
     }
 
     #[test]

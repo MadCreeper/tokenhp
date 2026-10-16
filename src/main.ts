@@ -1,5 +1,5 @@
 import { TeamReports } from "./team-data";
-import { calendarHTML, installCalendarTooltip, type CalendarScale } from "./calendar";
+import { calendarHTML, installCalendarTooltip, type CalendarScale, type CalendarMetric } from "./calendar";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -121,6 +121,7 @@ interface SavedView {
   localUsageView?: "bars" | "calendar";
   teamUsageView?: "bars" | "calendar";
   calendarScale?: CalendarScale;
+  calendarMetric?: CalendarMetric;
 }
 function loadView(): SavedView {
   try {
@@ -141,6 +142,7 @@ function saveView(): void {
       localUsageView: calendars.local.view,
       teamUsageView: calendars.team.view,
       calendarScale: calendars[state.source === "team" ? "team" : "local"].scale,
+      calendarMetric,
     };
     localStorage.setItem(VIEW_KEY, JSON.stringify(v));
   } catch {
@@ -262,6 +264,8 @@ const calendarState = (view: unknown): CalendarState => ({
   report: null, error: "", loading: false, model: "all", account: "all",
 });
 const calendars = { local: calendarState(savedView.localUsageView), team: calendarState(savedView.teamUsageView) };
+// One heatmap unit across both tabs, remembered between launches.
+let calendarMetric: CalendarMetric = savedView.calendarMetric === "cost" ? "cost" : "tokens";
 function activeCalendar(): CalendarState | null {
   return state.source === "live" ? null : calendars[state.source];
 }
@@ -777,7 +781,7 @@ function usageViewSwitchHTML(): string {
 function contentHTML(): string {
   const c = activeCalendar();
   if (c?.view === "calendar" && state.source !== "live") return calendarHTML({
-    ...c, source: state.source,
+    ...c, source: state.source, metric: calendarMetric,
     filters: { tool: state.source === "local" ? state.localTool : "all",
       model: state.source === "team" ? state.teamModel : c.model, account: c.account },
   });
@@ -1600,6 +1604,11 @@ app.addEventListener("click", (e) => {
 
 app.addEventListener("change", (e) => {
   const el = e.target as HTMLSelectElement;
+  if (el.hasAttribute("data-calendar-metric") && (el.value === "tokens" || el.value === "cost")) {
+    calendarMetric = el.value;
+    saveView(); render();
+    return;
+  }
   const field = el.dataset.calendarFilter;
   const c = activeCalendar();
   if (!c || !field) return;

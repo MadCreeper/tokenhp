@@ -2,26 +2,25 @@
 //! session rollouts (`~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`).
 //!
 //! Codex's rollout is event-shaped (unlike Claude Code's `message.usage` rows).
-//! The two events we care about:
-//!   - `turn_context` carries `model` — we track it as the "current model".
-//!   - `event_msg` of type `token_count` carries, per turn:
-//!     payload.info.last_token_usage  — that turn's token delta
-//!     payload.rate_limits            — a quota snapshot (used_percent, etc.)
-//!
-//! Local usage takes cumulative-counter deltas per model, ignoring repeated
-//! quota events. Older logs without counters fall back to `last_token_usage`. Live
-//! quota reads the most recent non-null `rate_limits` across all sessions — no
-//! network call, we just read what Codex already wrote.
+//! Usage comes from request-level `token_usage_record` events in newer logs,
+//! or cumulative `token_count` deltas in older logs. Both can describe the same
+//! request, so they must be reconciled before aggregating. Model attribution
+//! follows both turn contexts and thread settings, without a model allowlist.
+//! Live quota reads the most recent non-null `rate_limits` snapshot.
 
 use crate::localstats::{ModelCostDTO, ModelUsageDTO, UsageRow};
 use crate::pricing::{ModelCost, Pricing};
 use crate::usage::{UsageDetail, UsageReport, UsageWindow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const TOKEN_COUNT_MARKER: &str = "token_count";
+
+/// Bump when accounting changes, so device-share fitting cannot mix costs
+/// collected by incompatible parsers within the same quota window.
+pub(crate) const PARSER_REVISION: u32 = 2;
 
 /// How stale a local rollout snapshot may be before [`fetch_quota`] rejects it.
 pub const SNAPSHOT_MAX_AGE_SECS: i64 = 24 * 3600;
@@ -50,68 +49,25 @@ pub fn collect_local_range_for_account(
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
     let pricing = Pricing::loaded();
-    for file in &session_files() {
-        let Ok(text) = std::fs::read_to_string(file) else {
+    for event in collect_events(&session_files()) {
+        if event.ts < start || event.ts >= end {
             continue;
-        };
-        // Model is announced in `turn_context` and applies to the token_count
-        // events that follow it, within the same session file.
-        let mut current_model: Option<String> = None;
-        let mut counter = UsageCounter::default();
-        for line in text.lines() {
-            let Ok(row) = serde_json::from_str::<Row>(line) else {
+        }
+        if let (Some(key), Some(snapshot)) = (account, &attribution) {
+            let identity = snapshot.attribution("codex", event.ts);
+            if identity.status != "exact" {
+                return None;
+            }
+            if identity.account_key != key {
                 continue;
-            };
-            match row.r#type.as_deref() {
-                Some("turn_context") => {
-                    if let Some(m) = row.payload.as_ref().and_then(|p| p.model.clone()) {
-                        current_model = Some(m);
-                    }
-                }
-                Some("event_msg") => {
-                    // Cheap guard before trusting the parsed payload.
-                    if !line.contains(TOKEN_COUNT_MARKER) {
-                        continue;
-                    }
-                    let Some(payload) = row.payload.as_ref() else {
-                        continue;
-                    };
-                    if payload.r#type.as_deref() != Some("token_count") {
-                        continue;
-                    }
-                    // Advance counters even outside the requested range: otherwise
-                    // its first event would include earlier turns again.
-                    let Some(usage) = payload.info.as_ref().and_then(|i| counter.delta(i)) else {
-                        continue;
-                    };
-                    let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
-                        continue;
-                    };
-                    if ts < start || ts >= end {
-                        continue;
-                    }
-                    // Drop usage we can't attribute to a model (a token_count
-                    // before any turn_context) rather than inventing an "unknown".
-                    let Some(model) = current_model.clone() else {
-                        continue;
-                    };
-                    if let (Some(key), Some(snapshot)) = (account, &attribution) {
-                        let identity = snapshot.attribution("codex", ts);
-                        if identity.status != "exact" {
-                            return None;
-                        }
-                        if identity.account_key != key {
-                            continue;
-                        }
-                    }
-                    totals
-                        .entry(model.clone())
-                        .or_default()
-                        .add_priced(&usage, &model, &pricing, ts);
-                }
-                _ => {}
             }
         }
+        totals.entry(event.model.clone()).or_default().add_priced(
+            &event.usage,
+            &event.model,
+            &pricing,
+            event.ts,
+        );
     }
 
     let mut models: Vec<ModelUsageDTO> = totals
@@ -158,79 +114,37 @@ pub fn collect_local_range_for_account(
 }
 
 /// Exact per-(UTC day, account, project, model) Codex usage for Team sharing.
-/// Session metadata supplies the working directory; token_count events supply
-/// the per-turn delta and timestamp.
+/// Uses the same normalized requests as local bars and device-share fitting.
 pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
     type Key = (String, String, String, String, String, String, String);
     let mut acc: HashMap<Key, (Totals, i64)> = HashMap::new();
     let attributions = crate::account::attribution_snapshot();
 
     let pricing = Pricing::loaded();
-    for file in &session_files() {
-        let Ok(text) = std::fs::read_to_string(file) else {
+    for event in collect_events(&session_files()) {
+        let Some(day) = DateTime::<Utc>::from_timestamp(event.ts, 0)
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+        else {
             continue;
         };
-        let mut current_model: Option<String> = None;
-        let mut counter = UsageCounter::default();
-        let mut current_project = "unknown".to_string();
-        for line in text.lines() {
-            let Ok(row) = serde_json::from_str::<Row>(line) else {
-                continue;
-            };
-            match row.r#type.as_deref() {
-                Some("session_meta") => {
-                    if let Some(cwd) = row.payload.as_ref().and_then(|p| p.cwd.as_deref()) {
-                        current_project = crate::localstats::project_name(cwd);
-                    }
-                }
-                Some("turn_context") => {
-                    if let Some(model) = row.payload.as_ref().and_then(|p| p.model.clone()) {
-                        current_model = Some(model);
-                    }
-                }
-                Some("event_msg") if line.contains(TOKEN_COUNT_MARKER) => {
-                    let Some(payload) = row.payload.as_ref() else {
-                        continue;
-                    };
-                    if payload.r#type.as_deref() != Some("token_count") {
-                        continue;
-                    }
-                    // Advance counters even outside the requested range: otherwise
-                    // its first event would include earlier turns again.
-                    let Some(usage) = payload.info.as_ref().and_then(|i| counter.delta(i)) else {
-                        continue;
-                    };
-                    let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
-                        continue;
-                    };
-                    let Some(day) = DateTime::<Utc>::from_timestamp(ts, 0)
-                        .map(|dt| dt.format("%Y-%m-%d").to_string())
-                    else {
-                        continue;
-                    };
-                    if day.as_str() < start_day || day.as_str() > end_day {
-                        continue;
-                    }
-                    let Some(model) = current_model.clone() else {
-                        continue;
-                    };
-                    let attribution = attributions.attribution("codex", ts);
-                    let key = (
-                        day,
-                        current_project.clone(),
-                        model.clone(),
-                        attribution.account_key,
-                        attribution.billing_key,
-                        attribution.account_label,
-                        attribution.status,
-                    );
-                    let entry = acc.entry(key).or_insert_with(|| (Totals::default(), 0));
-                    entry.0.add_priced(&usage, &model, &pricing, ts);
-                    entry.1 = entry.1.max(ts);
-                }
-                _ => {}
-            }
+        if day.as_str() < start_day || day.as_str() > end_day {
+            continue;
         }
+        let attribution = attributions.attribution("codex", event.ts);
+        let key = (
+            day,
+            event.project,
+            event.model.clone(),
+            attribution.account_key,
+            attribution.billing_key,
+            attribution.account_label,
+            attribution.status,
+        );
+        let entry = acc.entry(key).or_insert_with(|| (Totals::default(), 0));
+        entry
+            .0
+            .add_priced(&event.usage, &event.model, &pricing, event.ts);
+        entry.1 = entry.1.max(event.ts);
     }
 
     let mut rows = Vec::new();
@@ -310,6 +224,11 @@ pub fn fetch_quota_with_ts(max_age_secs: i64) -> Result<(i64, UsageReport), Stri
             let Ok(row) = serde_json::from_str::<Row>(line) else {
                 continue;
             };
+            if row.r#type.as_deref() != Some("event_msg")
+                || row.payload.as_ref().and_then(|p| p.r#type.as_deref()) != Some("token_count")
+            {
+                continue;
+            }
             let Some(limits) = row.payload.as_ref().and_then(|p| p.rate_limits.clone()) else {
                 continue;
             };
@@ -403,6 +322,8 @@ impl Totals {
         self.add(u);
         let mut t = Totals::default();
         t.add(u);
+        // A total without its input/output split cannot be priced accurately.
+        self.unpriced |= t.total > t.input + t.output;
         match pricing.cost_request(
             model,
             [
@@ -434,6 +355,203 @@ impl Totals {
     }
 }
 
+#[derive(Debug)]
+struct CodexEvent {
+    ts: i64,
+    project: String,
+    model: String,
+    usage: TokenUsage,
+    request_id: Option<(String, String)>,
+}
+
+fn collect_events(files: &[PathBuf]) -> Vec<CodexEvent> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for file in files {
+        let Ok(bytes) = std::fs::read(file) else {
+            continue;
+        };
+        // A partially written UTF-8 tail must not hide the complete history.
+        let text = String::from_utf8_lossy(&bytes);
+        for event in parse_events(&text) {
+            // Resumed/forked rollouts can carry an already recorded response.
+            if let Some(id) = &event.request_id {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+            }
+            out.push(event);
+        }
+    }
+    out
+}
+
+/// Parse the entire rollout before applying a date/account filter: cumulative
+/// baselines and model settings often precede the requested range by days.
+fn parse_events(text: &str) -> Vec<CodexEvent> {
+    let mut out = Vec::new();
+    let mut model = "unknown".to_string();
+    let mut project = "unknown".to_string();
+    let mut thread_id = String::new();
+    let mut counter = UsageCounter::default();
+    let mut seen = HashSet::new();
+    let mut pending: Vec<TokenUsage> = Vec::new();
+    let mut compacted = false;
+    for line in text.lines() {
+        // Decode usage separately from quota. An unrelated rate-limit schema
+        // change must not discard a perfectly valid request's token counts.
+        let Ok(row) = serde_json::from_str::<UsageLogRow>(line) else {
+            continue;
+        };
+        let p = &row.payload;
+        match row.r#type.as_str() {
+            "session_meta" | "turn_context" => {
+                if let Some(m) = settings_model(p) {
+                    model = m.to_string();
+                }
+                if let Some(cwd) = nonempty_string(p.get("cwd")) {
+                    project = crate::localstats::project_name(cwd);
+                }
+                if row.r#type == "session_meta" {
+                    thread_id = nonempty_string(p.get("id")).unwrap_or("").to_string();
+                }
+            }
+            "compacted" => compacted = true,
+            "thread_settings_applied" | "event_msg"
+                if row.r#type == "thread_settings_applied"
+                    || p.get("type").and_then(|v| v.as_str())
+                        == Some("thread_settings_applied") =>
+            {
+                if let Some(m) = p.get("thread_settings").and_then(settings_model) {
+                    model = m.to_string();
+                }
+            }
+            "token_usage_record" | "event_msg" => {
+                let detailed = row.r#type == "token_usage_record"
+                    || p.get("type").and_then(|v| v.as_str()) == Some("token_usage_record");
+                let (usage, request_id) = if detailed {
+                    // Leave the legacy counter available as fallback if this
+                    // record cannot be placed in time.
+                    if row.timestamp.as_deref().and_then(parse_ts).is_none() {
+                        continue;
+                    }
+                    let Some(usage) = p.get("usage").and_then(decode_usage) else {
+                        continue;
+                    };
+                    if !usage.has_tokens() {
+                        continue;
+                    }
+                    let id = nonempty_string(p.get("response_id")).map(|id| {
+                        (
+                            nonempty_string(p.get("thread_id"))
+                                .unwrap_or(&thread_id)
+                                .to_string(),
+                            id.to_string(),
+                        )
+                    });
+                    // A duplicate detail can also be followed by a mirrored
+                    // counter, so reconcile it even when already emitted.
+                    pending.push(usage.clone());
+                    if let Some(id) = &id {
+                        if !seen.insert(id.clone()) {
+                            continue;
+                        }
+                    }
+                    (usage, id)
+                } else {
+                    if p.get("type").and_then(|v| v.as_str()) != Some("token_count") {
+                        continue;
+                    }
+                    let Some(info) = p.get("info").filter(|v| v.is_object()) else {
+                        continue;
+                    };
+                    let info = Info {
+                        total_token_usage: info.get("total_token_usage").and_then(decode_usage),
+                        last_token_usage: info.get("last_token_usage").and_then(decode_usage),
+                    };
+                    let delta = counter.delta(&info);
+                    let covered = std::mem::take(&mut pending);
+                    let was_compacted = std::mem::take(&mut compacted);
+                    let Some(mut usage) = delta else { continue };
+                    // Compaction's residual context size is not a new API
+                    // request. Its actual cost is in the detailed record.
+                    if was_compacted && !usage.has_components() {
+                        continue;
+                    }
+                    let sum = covered
+                        .iter()
+                        .fold(TokenUsage::default(), |sum, u| sum.plus(u));
+                    if !covered.is_empty() && usage.same_counts(&sum) {
+                        continue;
+                    }
+                    // Mixed-version/incomplete logs may have a cumulative
+                    // delta containing both a detail and older counter-only
+                    // requests. Retain the uncovered remainder.
+                    if let Some(mirrored) = covered.iter().rev().find(|u| {
+                        info.last_token_usage
+                            .as_ref()
+                            .is_some_and(|last| u.same_counts(last))
+                            || u.same_counts(&usage)
+                    }) {
+                        let all_covered = !was_compacted
+                            && usage
+                                .counts()
+                                .iter()
+                                .zip(sum.counts())
+                                .all(|(a, b)| *a >= b);
+                        usage = usage.minus(if all_covered { &sum } else { mirrored });
+                    }
+                    if !usage.has_tokens() {
+                        continue;
+                    }
+                    (usage, None)
+                };
+                let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
+                    continue;
+                };
+                out.push(CodexEvent {
+                    ts,
+                    project: project.clone(),
+                    // Use an explicit request model when supplied, otherwise
+                    // the most recent settings. Preserve unfamiliar model ids.
+                    model: settings_model(p).unwrap_or(&model).to_string(),
+                    usage,
+                    request_id,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+struct UsageLogRow {
+    r#type: String,
+    timestamp: Option<String>,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+fn nonempty_string(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn settings_model(value: &serde_json::Value) -> Option<&str> {
+    nonempty_string(value.get("model"))
+        .or_else(|| nonempty_string(value.pointer("/collaboration_mode/settings/model")))
+}
+
+fn decode_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let usage: TokenUsage = serde_json::from_value(value.clone()).ok()?;
+    // An empty/unrecognized object is not an explicit zero counter reset.
+    (usage.input_tokens.is_some() || usage.output_tokens.is_some() || usage.total_tokens.is_some())
+        .then_some(usage)
+}
+
 /// Quota-only events repeat last_token_usage. Session counters distinguish
 /// these from new turns (including equally-sized consecutive turns).
 #[derive(Default)]
@@ -447,6 +565,11 @@ impl UsageCounter {
             return info.last_token_usage.clone();
         };
         let previous = self.previous.replace(total.clone());
+        // A zeroed cumulative counter plus a nonzero last total is a context
+        // reset notification, not billable usage (observed after compaction).
+        if !total.has_tokens() {
+            return None;
+        }
         let Some(previous) = previous else {
             return info
                 .last_token_usage
@@ -496,12 +619,6 @@ struct Row {
 #[derive(Deserialize)]
 struct Payload {
     r#type: Option<String>,
-    /// Present on `turn_context`.
-    model: Option<String>,
-    /// Present on session_meta.
-    cwd: Option<String>,
-    /// Present on `token_count` events.
-    info: Option<Info>,
     rate_limits: Option<RateLimits>,
 }
 
@@ -511,17 +628,84 @@ struct Info {
     last_token_usage: Option<TokenUsage>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 struct TokenUsage {
+    #[serde(default, deserialize_with = "optional_token_count")]
     cache_write_input_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "optional_token_count")]
     input_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "optional_token_count")]
     cached_input_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "optional_token_count")]
     output_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "optional_token_count")]
     total_tokens: Option<i64>,
     // Parsed for forward compatibility/documentation. This is a subset of
     // output_tokens and must never be added to the total a second time.
     #[allow(dead_code)]
+    #[serde(default, deserialize_with = "optional_token_count")]
     reasoning_output_tokens: Option<i64>,
+}
+
+impl TokenUsage {
+    fn counts(&self) -> [i64; 5] {
+        let input = self.input_tokens.unwrap_or(0).max(0);
+        let output = self.output_tokens.unwrap_or(0).max(0);
+        [
+            input,
+            output,
+            self.cached_input_tokens.unwrap_or(0).max(0),
+            self.cache_write_input_tokens.unwrap_or(0).max(0),
+            self.total_tokens.unwrap_or(0).max(input + output),
+        ]
+    }
+
+    fn from_counts([input, output, cached, written, total]: [i64; 5]) -> Self {
+        Self {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            cached_input_tokens: Some(cached),
+            cache_write_input_tokens: Some(written),
+            total_tokens: Some(total),
+            reasoning_output_tokens: None,
+        }
+    }
+
+    fn has_components(&self) -> bool {
+        self.input_tokens.unwrap_or(0) > 0 || self.output_tokens.unwrap_or(0) > 0
+    }
+
+    fn has_tokens(&self) -> bool {
+        self.counts()[4] > 0
+    }
+
+    fn same_counts(&self, other: &Self) -> bool {
+        self.counts() == other.counts()
+    }
+
+    fn plus(&self, other: &Self) -> Self {
+        let a = self.counts();
+        let b = other.counts();
+        Self::from_counts(std::array::from_fn(|i| a[i].saturating_add(b[i])))
+    }
+
+    fn minus(&self, other: &Self) -> Self {
+        let a = self.counts();
+        let b = other.counts();
+        Self::from_counts(std::array::from_fn(|i| (a[i] - b[i]).max(0)))
+    }
+}
+
+/// Tolerate numeric strings and independently missing/malformed components;
+/// one changed field must not hide the other counters or the model entirely.
+fn optional_token_count<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok())))
 }
 
 #[derive(Deserialize, Clone)]
@@ -661,6 +845,413 @@ fn clamp01(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    fn row(kind: &str, payload: Value) -> Value {
+        json!({"type":kind,"timestamp":"2026-09-07T02:28:21Z","payload":payload})
+    }
+
+    fn counts(input: i64, output: i64) -> Value {
+        json!({"input_tokens":input,"output_tokens":output,"total_tokens":input+output})
+    }
+
+    fn detail(id: &str, usage: Value) -> Value {
+        row(
+            "token_usage_record",
+            json!({"response_id":id,"usage":usage}),
+        )
+    }
+
+    fn token_count(total: Value, last: Value) -> Value {
+        row(
+            "event_msg",
+            json!({"type":"token_count","info":{
+                "total_token_usage":total,"last_token_usage":last
+            }}),
+        )
+    }
+
+    fn parse(rows: &[Value]) -> Vec<CodexEvent> {
+        parse_events(
+            &rows
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    fn token_sum(events: &[CodexEvent]) -> i64 {
+        events.iter().map(|e| e.usage.counts()[4]).sum()
+    }
+
+    #[test]
+    fn september_compaction_uses_request_breakdown_and_updated_model() {
+        // Sanitized metadata from the affected September 7 rollout. The last
+        // turn context was September 1; settings changed without a new context.
+        let events = parse(&[
+            json!({"type":"turn_context","timestamp":"2026-09-01T09:30:14Z",
+                "payload":{"model":"gpt-5.6-sol","cwd":"/work/project"}}),
+            json!({"type":"event_msg","timestamp":"2026-09-01T09:31:00Z",
+                "payload":{"type":"token_count","info":{
+                    "total_token_usage":counts(175022424,524597),
+                    "last_token_usage":counts(238266,468)}}}),
+            row(
+                "event_msg",
+                json!({"type":"thread_settings_applied",
+                "thread_settings":{"model":"gpt-6-astra"}}),
+            ),
+            detail(
+                "response-1",
+                json!({"input_tokens":238841,"cached_input_tokens":11136,
+                "cache_write_input_tokens":0,"output_tokens":2634,"total_tokens":241475}),
+            ),
+            row("compacted", json!({})),
+            token_count(
+                counts(0, 0),
+                json!({"input_tokens":0,"output_tokens":0,"total_tokens":9336}),
+            ),
+        ]);
+        assert_eq!(events.len(), 2);
+        let start = parse_ts("2026-09-07T00:00:00Z").unwrap();
+        let inside: Vec<_> = events.iter().filter(|e| e.ts >= start).collect();
+        assert_eq!(inside.len(), 1);
+        let e = inside[0];
+        assert_eq!(e.model, "gpt-6-astra");
+        assert_eq!(e.project, "project");
+        assert_eq!(e.usage.counts(), [238841, 2634, 11136, 0, 241475]);
+        let mut t = Totals::default();
+        t.add_priced(&e.usage, &e.model, &Pricing::bundled(), e.ts);
+        assert!(t.cost().unwrap().total() > 0.0);
+        assert_eq!(t.total, t.input + t.output);
+    }
+
+    #[test]
+    fn mixed_formats_equal_requests_and_quota_repeats_count_once() {
+        let events = parse(&[
+            row("turn_context", json!({"model":"gpt-5.6-sol"})),
+            token_count(counts(100, 10), counts(100, 10)),
+            token_count(counts(100, 10), counts(100, 10)),
+            row(
+                "event_msg",
+                json!({"type":"thread_settings_applied",
+                "thread_settings":{"model":"gpt-6.1-sol"}}),
+            ),
+            detail("a", counts(100, 10)),
+            token_count(counts(200, 20), counts(100, 10)),
+            detail("b", counts(100, 10)),
+            token_count(counts(300, 30), counts(100, 10)),
+            detail("b", counts(100, 10)), // replay of the same response
+            token_count(counts(300, 30), counts(100, 10)),
+            row("turn_context", json!({"model":"provider/new-open-model"})),
+            token_count(counts(400, 40), counts(100, 10)), // counter-only fallback
+            detail("tail", counts(100, 10)),               // active file: no counter written yet
+        ]);
+        assert_eq!(events.len(), 5);
+        assert_eq!(token_sum(&events), 550);
+        assert_eq!(
+            events.iter().map(|e| e.model.as_str()).collect::<Vec<_>>(),
+            [
+                "gpt-5.6-sol",
+                "gpt-6.1-sol",
+                "gpt-6.1-sol",
+                "provider/new-open-model",
+                "provider/new-open-model"
+            ]
+        );
+    }
+
+    #[test]
+    fn compaction_request_is_not_lost_when_legacy_totals_exclude_it() {
+        let events = parse(&[
+            token_count(counts(100, 10), counts(100, 10)),
+            detail("compaction", counts(200, 20)),
+            row("compacted", json!({})),
+            token_count(counts(100, 10), json!({"total_tokens":90})),
+            detail("next", counts(50, 5)),
+            token_count(counts(150, 15), counts(50, 5)),
+        ]);
+        assert_eq!(events.len(), 3);
+        assert_eq!(token_sum(&events), 385);
+    }
+
+    #[test]
+    fn multiple_details_and_counter_only_gaps_are_reconciled() {
+        let events = parse(&[
+            token_count(counts(100, 10), counts(100, 10)),
+            detail("a", counts(50, 5)),
+            detail("b", counts(50, 5)),
+            token_count(counts(200, 20), counts(50, 5)),
+            detail("d", counts(50, 5)),
+            detail("e", counts(50, 5)),
+            // The delta includes another 50+5 request without a detail.
+            token_count(counts(350, 35), counts(50, 5)),
+        ]);
+        assert_eq!(events.len(), 6);
+        assert_eq!(token_sum(&events), 385);
+    }
+
+    #[test]
+    fn models_are_preserved_without_an_allowlist_or_invented_attribution() {
+        let events = parse(&[
+            detail("unknown", counts(10, 1)),
+            row(
+                "turn_context",
+                json!({"collaboration_mode":{"settings":{"model":"custom/model"}},
+                "cwd":"/work/first"}),
+            ),
+            detail("custom", counts(10, 1)),
+            row(
+                "thread_settings_applied",
+                json!({"thread_settings":{
+                "collaboration_mode":{"settings":{"model":"ATXC44Y9/gpt-6-astra"}}}}),
+            ),
+            detail("prefixed", counts(10, 1)),
+            row(
+                "token_usage_record",
+                json!({"model":"codex-auto-review","usage":counts(10,1)}),
+            ),
+            row("turn_context", json!({"model":" ","cwd":"/work/second"})),
+            detail("inherited", counts(10, 1)),
+        ]);
+        assert_eq!(
+            events.iter().map(|e| e.model.as_str()).collect::<Vec<_>>(),
+            [
+                "unknown",
+                "custom/model",
+                "ATXC44Y9/gpt-6-astra",
+                "codex-auto-review",
+                "ATXC44Y9/gpt-6-astra"
+            ]
+        );
+        assert_eq!(events[4].project, "second");
+        let mut t = Totals::default();
+        t.add_priced(&events[3].usage, &events[3].model, &Pricing::bundled(), 0);
+        assert!(t.cost().is_none());
+    }
+
+    #[test]
+    fn malformed_quota_and_partial_lines_do_not_hide_usage() {
+        let mut counter = token_count(counts(100, 10), counts(100, 10));
+        counter["payload"]["rate_limits"] =
+            json!({"primary":"new schema","credits":{"balance":{}}});
+        let mut text = counter.to_string();
+        text.push_str("\n{broken json}\n");
+        text.push_str(
+            &detail(
+                "numeric",
+                json!({"input_tokens":"12","output_tokens":"3",
+            "cached_input_tokens":"4","cache_write_input_tokens":{},"reasoning_output_tokens":[]}),
+            )
+            .to_string(),
+        );
+        text.push_str("\n{\"type\":\"token_usage_record\"");
+        let events = parse_events(&text);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].usage.counts(), [12, 3, 4, 0, 15]);
+        assert_eq!(token_sum(&events), 125);
+    }
+
+    #[test]
+    fn malformed_detail_leaves_legacy_fallback_available() {
+        let mut bad_time = detail("a", counts(100, 10));
+        bad_time["timestamp"] = json!("bad timestamp");
+        let events = parse(&[
+            bad_time,
+            detail("b", json!("changed shape")),
+            token_count(counts(100, 10), counts(100, 10)),
+        ]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(token_sum(&events), 110);
+    }
+
+    #[test]
+    fn empty_counter_does_not_reset_the_cumulative_baseline() {
+        let events = parse(&[
+            token_count(counts(100, 10), counts(100, 10)),
+            token_count(json!({}), json!({})),
+            token_count(counts(200, 20), counts(100, 10)),
+        ]);
+        assert_eq!(token_sum(&events), 220);
+    }
+
+    #[test]
+    fn real_total_only_usage_is_retained_without_a_fabricated_price() {
+        let events = parse(&[
+            row("turn_context", json!({"model":"gpt-6-astra"})),
+            token_count(json!({"total_tokens":8033}), json!({"total_tokens":8033})),
+        ]);
+        assert_eq!(events.len(), 1);
+        let mut total = Totals::default();
+        total.add_priced(&events[0].usage, &events[0].model, &Pricing::bundled(), 0);
+        assert_eq!(total.total, 8033);
+        assert!(total.cost().is_none());
+    }
+
+    /// Read-only diagnostic: no transcript contents, account identifiers, or
+    /// database writes. Checks request preservation against actual local logs.
+    #[test]
+    #[ignore = "reads local Codex rollouts"]
+    fn local_rollout_parser_audit() {
+        let files = session_files();
+        let mut details = 0;
+        let mut legacy_tokens = 0;
+        let mut inventory: std::collections::BTreeMap<String, Totals> = Default::default();
+        let mut token_only: std::collections::BTreeMap<String, i64> = Default::default();
+        let pricing = Pricing::bundled();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            let events = parse_events(&text);
+            let actual: HashMap<_, _> = events
+                .iter()
+                .filter_map(|e| {
+                    e.request_id
+                        .as_ref()
+                        .map(|id| (id.1.clone(), e.usage.counts()))
+                })
+                .collect();
+            let mut expected = HashMap::new();
+            let mut counter = UsageCounter::default();
+            for line in text.lines() {
+                let Ok(r) = serde_json::from_str::<UsageLogRow>(line) else {
+                    continue;
+                };
+                if r.r#type == "token_usage_record"
+                    && r.timestamp.as_deref().and_then(parse_ts).is_some()
+                {
+                    if let (Some(id), Some(u)) = (
+                        nonempty_string(r.payload.get("response_id")),
+                        r.payload.get("usage").and_then(decode_usage),
+                    ) {
+                        if u.has_tokens() {
+                            expected.entry(id.to_string()).or_insert(u.counts());
+                        }
+                    }
+                }
+                if r.payload.get("type").and_then(Value::as_str) == Some("token_count") {
+                    if let Some(v) = r.payload.get("info") {
+                        let i = Info {
+                            total_token_usage: v.get("total_token_usage").and_then(decode_usage),
+                            last_token_usage: v.get("last_token_usage").and_then(decode_usage),
+                        };
+                        if let Some(delta) = counter.delta(&i) {
+                            legacy_tokens += delta.counts()[4];
+                        }
+                    }
+                }
+            }
+            assert_eq!(actual, expected, "detailed request coverage differs");
+            details += actual.len();
+            for e in events {
+                if e.usage.counts()[4] > e.usage.counts()[0] + e.usage.counts()[1] {
+                    let day = DateTime::from_timestamp(e.ts, 0)
+                        .unwrap()
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    *token_only.entry(day).or_default() += 1;
+                }
+                inventory
+                    .entry(e.model.clone())
+                    .or_default()
+                    .add_priced(&e.usage, &e.model, &pricing, e.ts);
+            }
+        }
+        let parsed_tokens: i64 = inventory.values().map(|t| t.total).sum();
+        println!("files={} unique_detailed_requests={} legacy_tokens={} parsed_tokens={} recovered_tokens={}",
+            files.len(),details,legacy_tokens,parsed_tokens,parsed_tokens-legacy_tokens);
+        for (model, t) in inventory {
+            println!(
+                "model={model} tokens={} token_only={} cost={:?}",
+                t.total,
+                t.total - t.input - t.output,
+                t.cost().map(|c| c.total())
+            );
+        }
+        println!("token_only_events_by_date={token_only:?}");
+
+        // Exclude the active day so concurrent appends cannot make the two
+        // independent scans disagree. Team sync consumes the calendar rows.
+        let end = Utc::now().date_naive();
+        let start = end - chrono::Duration::days(90);
+        let local = collect_local_range(
+            start.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp(),
+            end.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp(),
+        );
+        let daily = collect_rows(
+            &start.to_string(),
+            &(end - chrono::Duration::days(1)).to_string(),
+        );
+        let mut by_model: HashMap<String, ([i64; 6], f64)> = HashMap::new();
+        for r in daily {
+            let entry = by_model.entry(r.model).or_default();
+            for (sum, value) in entry.0.iter_mut().zip([
+                r.input,
+                r.output,
+                r.cache_read,
+                r.cache_create,
+                r.unattributed,
+                r.tokens,
+            ]) {
+                *sum += value;
+            }
+            entry.1 += r.cost;
+        }
+        assert_eq!(local.len(), by_model.len());
+        for m in &local {
+            let (counts, cost) = &by_model[&m.id];
+            assert_eq!(
+                *counts,
+                [
+                    m.input,
+                    m.output,
+                    m.cache_read,
+                    m.cache_create,
+                    m.unattributed,
+                    m.total
+                ]
+            );
+            if let Some(c) = &m.cost {
+                assert!((c.total - cost).abs() < 1e-6);
+            }
+        }
+        println!(
+            "local/calendar/team component and price agreement: {} models, 90 completed days",
+            local.len()
+        );
+    }
+
+    #[test]
+    fn copied_detailed_requests_are_deduplicated_across_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "hpbar-codex-parser-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let files = [dir.join("one.jsonl"), dir.join("two.jsonl")];
+        let text = [
+            detail("shared", counts(100, 10)),
+            token_count(counts(100, 10), counts(100, 10)),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+        for file in &files {
+            std::fs::write(file, &text).unwrap();
+        }
+        let mut partial = text.as_bytes().to_vec();
+        partial.extend_from_slice(b"\n{\"type\":\"");
+        partial.push(0xf0); // incomplete UTF-8 character in an active append
+        std::fs::write(&files[1], partial).unwrap();
+        let events = collect_events(&files);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(token_sum(&events), 110);
+    }
 
     fn info(input: i64, output: i64) -> Info {
         Info {
