@@ -69,7 +69,8 @@ jobs:
           # Tags can restore main's cache, but cannot restore other tags' caches.
           # Build the same targets/profile on main so future releases start warm.
           # rust-cache also keys by compiler, environment and dependency inputs.
-          shared-key: release-${{ matrix.platform }}-${{ matrix.rust_targets }}
+          # Cache keys reject commas, so label the universal target set explicitly.
+          shared-key: release-${{ matrix.platform }}-${{ matrix.platform == 'macos-latest' && 'universal' || '' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Linux dependencies
