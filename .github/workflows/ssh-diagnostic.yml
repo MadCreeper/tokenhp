@@ -1,0 +1,88 @@
+name: Windows SSH diagnostic
+on: workflow_dispatch
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install paramiko==4.0.0
+      - name: Download existing native executable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh run download 38881625493 --repo MadCreeper/tokenhp --name HPBar-windows-latest --dir "$env:RUNNER_TEMP/ssh-artifact"
+          $setup = Get-ChildItem "$env:RUNNER_TEMP/ssh-artifact" -Recurse -Filter '*-setup.exe' | Select-Object -First 1
+          7z x $setup.FullName "-o$env:RUNNER_TEMP/ssh-app" -y
+      - name: Exercise path and password encodings
+        shell: python
+        run: |
+          import os, pathlib, subprocess, socket, threading, time, shutil, tempfile
+          import paramiko
+          root = pathlib.Path(tempfile.mkdtemp(prefix='hpbar-ssh-diagnostic-'))
+          exe = next(p for p in pathlib.Path(os.environ['RUNNER_TEMP']).joinpath('ssh-app').rglob('*.exe') if p.name.lower() == 'hpbar.exe')
+          key = paramiko.RSAKey.generate(2048)
+          good = {'value': ''}
+          class Server(paramiko.ServerInterface):
+              def check_auth_password(self, user, password):
+                  matched = password == good['value']
+                  print('password reached server; matches:', matched, 'length:', len(password), flush=True)
+                  return paramiko.AUTH_SUCCESSFUL if matched else paramiko.AUTH_FAILED
+              def get_allowed_auths(self, user): return 'password'
+              def check_channel_direct_tcpip_request(self, *args): return paramiko.OPEN_SUCCEEDED
+              def check_channel_request(self, *args): return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+          def serve(client):
+              t = paramiko.Transport(client)
+              try:
+                  t.add_server_key(key); t.start_server(server=Server())
+                  c = t.accept(10)
+                  if c is not None:
+                      data = c.recv(1024)
+                      if data: c.sendall(data)
+                      c.close()
+              except Exception as e: print('server:', type(e).__name__, str(e), flush=True)
+              finally: t.close()
+          listener = socket.socket(); listener.bind(('127.0.0.1',0)); listener.listen(10)
+          def accept():
+              while True:
+                  c,_ = listener.accept(); threading.Thread(target=serve,args=(c,),daemon=True).start()
+          threading.Thread(target=accept,daemon=True).start()
+          ssh = str(pathlib.Path(os.environ['SystemRoot'])/'System32/OpenSSH/ssh.exe')
+          subprocess.run([ssh,'-V'])
+          config = root/'config';config.write_text('')
+          known = (root/'known_hosts').as_posix()
+          failures = 0
+          for special_path in [False,True]:
+              folder = root/('spaces & 测试' if special_path else 'ascii');folder.mkdir()
+              helper = folder/'HPBar.exe';shutil.copy2(exe,helper)
+              for unicode_password in [False,True]:
+                  good['value'] = 'test-password-!%&^' + (' 密码🔑' if unicode_password else '')
+                  env = os.environ.copy();env.update({'HPBAR_SSH_ASKPASS':'1','HPBAR_TUNNEL_PW':good['value'],'SSH_ASKPASS':str(helper),'SSH_ASKPASS_REQUIRE':'force','DISPLAY':':0'})
+                  helper_result = subprocess.run([str(helper)],env=env,capture_output=True,timeout=10)
+                  print('CASE special_path=',special_path,'unicode_password=',unicode_password,'helper_status=',helper_result.returncode,'helper_correct=',helper_result.stdout==good['value'].encode()+b'\n',flush=True)
+                  s=socket.socket();s.bind(('127.0.0.1',0));local=s.getsockname()[1];s.close()
+                  cmd = [ssh,'-vv','-N','-T','-F',str(config),'-o',f'UserKnownHostsFile="{known}"','-o','StrictHostKeyChecking=accept-new','-o','BatchMode=no','-o','NumberOfPasswordPrompts=1','-o','PreferredAuthentications=password,keyboard-interactive','-p',str(listener.getsockname()[1]),'-L',f'127.0.0.1:{local}:127.0.0.1:5432','hpbar-smoke@127.0.0.1']
+                  child = subprocess.Popen(cmd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW)
+                  success=False
+                  try:
+                      deadline=time.time()+12
+                      while time.time()<deadline and child.poll() is None:
+                          try:
+                              with socket.create_connection(('127.0.0.1',local),timeout=1) as c:
+                                  c.sendall(b'hello');success=c.recv(5)==b'hello'
+                              break
+                          except OSError:time.sleep(.1)
+                  finally:
+                      if child.poll() is None:child.terminate()
+                      _,err=child.communicate(timeout=5)
+                  print('TUNNEL_SUCCESS=',success,flush=True)
+                  if not success:
+                      failures+=1;print(err.decode('utf-8',errors='replace'),flush=True)
+          print('TOTAL_FAILURES=',failures,flush=True)
