@@ -3,7 +3,7 @@
 // and both tabs — with no Keychain read, no network, and no Tauri runtime.
 // Run `npm run dev` and open http://localhost:1420/?mock=1 (or /showcase.html).
 
-import type { LocalReport, TeamConfig, TeamReport, UsageReport } from "./types";
+import type { CalendarReport, LocalReport, TeamConfig, TeamReport, UsageReport } from "./types";
 
 export function mockLive(): UsageReport {
   const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
@@ -261,3 +261,62 @@ export const MOCK_TEAM: TeamReport = {
     },
   ],
 };
+
+// Keep each mock member's model/project totals consistent for filter previews.
+for (const member of MOCK_TEAM.members) {
+  member.by_project = [{
+    project: member.current_project ?? "Other projects",
+    tokens: member.tokens,
+    cost: member.cost,
+    by_model: member.by_model.map((m) => ({ ...m, cost_complete: true })),
+  }];
+}
+
+
+export function mockCalendar(source: "local" | "team", year: number): CalendarReport {
+  const entries: CalendarReport["entries"] = [];
+  const today = new Date().toISOString().slice(0, 10);
+  for (let month = 0; month < 12; month++) {
+    const days = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    for (let day = 1; day <= days; day++) {
+      const date = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      if (date > today || day % 6 === 0) continue;
+      const weight = ((day * 7 + month * 11) % 17 + 1) / 100;
+      if (source === "local") {
+        for (const app of MOCK_LOCAL.apps) for (const m of app.models) entries.push({
+          day: date, model: m.id, display_name: m.display_name, tool: app.id,
+          member: "", member_id: "", account_key: "", account_label: "",
+          tokens: Math.round(m.total * weight), cost: m.cost ? m.cost.total * weight : null,
+        });
+      } else {
+        for (const member of MOCK_TEAM.members) for (const a of member.by_account) for (const m of a.by_model) entries.push({
+          day: date, model: m.model, display_name: m.display_name, tool: "",
+          member: member.display_name, member_id: member.member_id, account_key: a.account_key, account_label: a.account_label,
+          tokens: Math.round(m.tokens * weight), cost: m.cost * weight,
+        });
+      }
+    }
+  }
+  return { year, entries };
+}
+
+
+// Distinct ranges exercise the same interactions as real Team reads.
+export function mockTeam(range: "day" | "week" | "month"): TeamReport {
+  const report = structuredClone(MOCK_TEAM);
+  report.range = range;
+  const factor = range === "day" ? 1 : range === "week" ? 4 : 12;
+  const scale = (value: { tokens: number; cost?: number }) => {
+    value.tokens *= factor;
+    if (value.cost !== undefined) value.cost *= factor;
+  };
+  for (const member of report.members) {
+    scale(member);
+    member.by_model.forEach(scale);
+    member.by_project.forEach(p => { scale(p); p.by_model?.forEach(scale); });
+    member.by_account.forEach(a => { scale(a); a.by_model.forEach(scale); });
+  }
+  report.models.forEach(scale);
+  report.accounts.forEach(scale);
+  return report;
+}

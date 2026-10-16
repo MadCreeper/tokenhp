@@ -3,7 +3,6 @@
 export interface AppControls {
   autostart: boolean;
   alerts: boolean;
-  calibrate: boolean;
 }
 
 /** Mirrors the Rust `usage::UsageWindow`. */
@@ -120,6 +119,7 @@ export interface TeamConfig {
 
 /** Mirrors `team::db::ModelUsage` — one model's usage for a member. */
 export interface TeamModelUsage {
+  cost_complete?: boolean;
   model: string;
   display_name: string;
   tokens: number;
@@ -128,6 +128,7 @@ export interface TeamModelUsage {
 
 /** Mirrors `team::db::ProjectUsage` — one project's usage for a member. */
 export interface TeamProjectUsage {
+  by_model?: TeamModelUsage[];
   project: string;
   tokens: number;
   cost: number;
@@ -201,6 +202,7 @@ export interface UpdateInfo {
   asset_name: string; // installer asset for this platform, or ""
   asset_url: string;
   asset_size: number;
+  asset_digest: string | null;
   has_asset: boolean; // false when an update exists but ships no installer here
 }
 
@@ -210,4 +212,21 @@ export interface TeamHandshake {
   team_name: string;
   member_count: number;
   members: string[];
+}
+
+export interface CalendarEntry {
+  day: string;
+  model: string;
+  display_name: string;
+  tool: string;
+  member: string;
+  member_id: string;
+  account_key: string;
+  account_label: string;
+  tokens: number;
+  cost: number | null;
+}
+export interface CalendarReport {
+  year: number;
+  entries: CalendarEntry[];
 }

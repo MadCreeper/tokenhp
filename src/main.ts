@@ -1,8 +1,11 @@
+import { TeamReports } from "./team-data";
+import { calendarHTML, installCalendarTooltip, type CalendarScale } from "./calendar";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import type {
+  CalendarReport,
   Account,
   AppControls,
   LocalReport,
@@ -30,7 +33,7 @@ import { installStoneTexture } from "./texture";
 import { applyTheme, cycleTheme, getTheme, isTheme, setThemeOverride, themeLabel } from "./theme";
 import { classicNeutralBar, classicQuotaBar, classicRefillBar } from "./classicbar";
 import { akBar, akResource, akRefillBar } from "./arknights";
-import { mockCodexLive, mockLive, MOCK_LOCAL, MOCK_TEAM, MOCK_TEAM_CONFIG } from "./mock";
+import { mockTeam, mockCalendar, mockCodexLive, mockLive, MOCK_LOCAL, MOCK_TEAM_CONFIG } from "./mock";
 import "./styles.css";
 
 // Showcase / test mode: `?mock=1` feeds the UI canned data (no Keychain, no
@@ -115,6 +118,9 @@ interface SavedView {
   window?: WindowKey;
   localTool?: string;
   teamRange?: WindowKey;
+  localUsageView?: "bars" | "calendar";
+  teamUsageView?: "bars" | "calendar";
+  calendarScale?: CalendarScale;
 }
 function loadView(): SavedView {
   try {
@@ -132,6 +138,9 @@ function saveView(): void {
       window: state.window,
       localTool: state.localTool,
       teamRange: state.teamRange,
+      localUsageView: calendars.local.view,
+      teamUsageView: calendars.team.view,
+      calendarScale: calendars[state.source === "team" ? "team" : "local"].scale,
     };
     localStorage.setItem(VIEW_KEY, JSON.stringify(v));
   } catch {
@@ -173,7 +182,7 @@ interface State {
   teamRange: WindowKey;
   teamModel: string; // "all" or a model id, for the per-model leaderboard
   teamDropdownOpen: boolean;
-  teamCrimeMode: boolean;
+  teamBreakdownMode: boolean;
   teamAccountKey: string; // "all" or a stable account key for bill splitting
   teamExpanded: Set<string>; // member ids whose top-projects are expanded
   teamDraft: TeamConfig | null; // edit buffer for the settings form
@@ -216,7 +225,7 @@ const state: State = {
   teamRange: isWindowKey(savedView.teamRange) ? savedView.teamRange : "day",
   teamModel: "all",
   teamDropdownOpen: false,
-  teamCrimeMode: params.get("crime") === "1",
+  teamBreakdownMode: params.get("breakdown") === "1" || params.get("crime") === "1",
   teamAccountKey: "all",
   teamExpanded: new Set(),
   teamDraft: null,
@@ -235,6 +244,33 @@ const state: State = {
   updateStatusOk: false,
 };
 
+interface CalendarState {
+  view: "bars" | "calendar";
+  scale: CalendarScale;
+  year: number;
+  month: number;
+  report: CalendarReport | null;
+  error: string;
+  loading: boolean;
+  model: string;
+  account: string;
+}
+const calendarState = (view: unknown): CalendarState => ({
+  view: view === "calendar" || params.get("usageView") === "calendar" ? "calendar" : "bars",
+  scale: savedView.calendarScale === "months" ? "months" : "days",
+  year: new Date().getUTCFullYear(), month: new Date().getUTCMonth(),
+  report: null, error: "", loading: false, model: "all", account: "all",
+});
+const calendars = { local: calendarState(savedView.localUsageView), team: calendarState(savedView.teamUsageView) };
+function activeCalendar(): CalendarState | null {
+  return state.source === "live" ? null : calendars[state.source];
+}
+function calendarTools(): { id: string; display_name: string }[] {
+  const names: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", openclaw: "OpenClaw" };
+  return [...new Set(calendars.local.report?.entries.map(e => e.tool) ?? [])]
+    .sort().map(id => ({ id, display_name: names[id] ?? id }));
+}
+
 // Re-arm the backend's don't-hide-on-blur behaviour from the stored preference
 // (the Rust flag resets to false on every launch).
 if (!MOCK && state.pinned) {
@@ -242,6 +278,7 @@ if (!MOCK && state.pinned) {
 }
 
 const app = document.getElementById("app")!;
+const hideCalendarTooltip = installCalendarTooltip(app);
 if (!MOCK && typeof ResizeObserver !== "undefined") {
   // Provider switches, async fonts and expanded Team rows can all change the
   // natural panel height outside the exact render frame. Keep the native
@@ -274,8 +311,6 @@ let refreshGeneration = 0;
 // switches) can't spam SSH tunnels / the DB: at most one in flight, and no more
 // than once per minute. The 30-min background uploader is separate/unaffected.
 let teamUploadInFlight: Promise<string | null> | null = null;
-let teamFetchInFlight: Promise<TeamReport> | null = null;
-let teamFetchRange: WindowKey | null = null;
 let lastTeamUploadAt = 0;
 const TEAM_UPLOAD_MIN_MS = 60_000;
 // Includes the local 90-day log scan that happens before the DB's own 60s
@@ -316,22 +351,30 @@ function maybeUploadTeam(force = false): Promise<string | null> {
   return upload;
 }
 
-/** Coalesce the startup/config-load double refresh onto one DB read. A range
- * change may start its own request, but every request still has a deadline. */
-function fetchTeamReport(range: WindowKey): Promise<TeamReport> {
-  if (teamFetchInFlight && teamFetchRange === range) return teamFetchInFlight;
-  const request = withDeadline(
-    invoke<TeamReport>("fetch_team", { range }),
-    TEAM_FETCH_DEADLINE_MS,
-    "Team refresh timed out after 35s.",
-  ).finally(() => {
-    if (teamFetchInFlight === request) {
-      teamFetchInFlight = null;
-      teamFetchRange = null;
-    }
-  });
-  teamFetchInFlight = request;
-  teamFetchRange = range;
+const teamReports = new TeamReports(range => withDeadline(
+  invoke<TeamReport>("fetch_team", { range }), TEAM_FETCH_DEADLINE_MS,
+  "Team refresh timed out after 35s.",
+));
+function fetchTeamReport(range: WindowKey): Promise<TeamReport> { return teamReports.fetch(range); }
+
+function acceptTeamReport(team: TeamReport): void {
+  state.team = team;
+  if (state.teamModel !== "all" && !team.models.some(m => m.id === state.teamModel)) state.teamModel = "all";
+  if (state.teamAccountKey !== "all" && !team.accounts.some(a => a.account_key === state.teamAccountKey)) state.teamAccountKey = "all";
+}
+
+// Switching views or startup config may request the same history concurrently.
+// Share that scan/query so reopening the panel does not duplicate expensive IO.
+const calendarFetches = new Map<string, Promise<CalendarReport>>();
+function fetchCalendarReport(source: Source, year: number): Promise<CalendarReport> {
+  const key = `${source}/${year}`;
+  const pending = calendarFetches.get(key);
+  if (pending) return pending;
+  const request = withDeadline(invoke<CalendarReport>("fetch_calendar", { source, year }),
+    TEAM_FETCH_DEADLINE_MS, "Calendar refresh timed out.").finally(() => {
+      if (calendarFetches.get(key) === request) calendarFetches.delete(key);
+    });
+  calendarFetches.set(key, request);
   return request;
 }
 
@@ -358,9 +401,12 @@ async function refresh(): Promise<void> {
         }
       });
     }
+    for (const source of ["local", "team"] as const) {
+      calendars[source].report = mockCalendar(source, calendars[source].year);
+    }
     state.local = MOCK_LOCAL;
     state.teamConfig = MOCK_TEAM_CONFIG;
-    state.team = MOCK_TEAM;
+    state.team = mockTeam(state.teamRange);
     state.account =
       state.provider === "codex"
         ? { email: "codex-team@example.com", plan: "Pro Lite" }
@@ -381,9 +427,8 @@ async function refresh(): Promise<void> {
   const source = state.source;
   const teamRange = state.teamRange;
   const windowSecs = WINDOW_SECS[state.window];
-  // Keep the last good Team report stable during a background refresh. The
-  // header does not need an endless spinner while usable cached data exists.
-  state.loading = source !== "team" || state.team === null;
+  state.loading = true;
+  state.error = "";
   render();
   const codex = provider === "codex";
   // Refetch identity on every poll: it's a cheap local-file read, and the plan
@@ -402,7 +447,29 @@ async function refresh(): Promise<void> {
     })
     .catch(() => {});
   try {
-    if (source === "live") {
+    const calendar = source === "live" ? null : calendars[source];
+    if (calendar?.view === "calendar") {
+      calendar.loading = true;
+      calendar.error = "";
+      render();
+      const year = calendar.year;
+      try {
+        const report = await fetchCalendarReport(source, year);
+        if (generation !== refreshGeneration) return;
+        calendar.report = report;
+        const model = source === "team" ? state.teamModel : calendar.model;
+        if (model !== "all" && !report.entries.some(e => e.model === model)) {
+          if (source === "team") state.teamModel = "all"; else calendar.model = "all";
+        }
+        if (calendar.account !== "all" && !report.entries.some(e => e.account_key === calendar.account)) calendar.account = "all";
+        if (source === "local" && state.localTool !== "all" && !report.entries.some(e => e.tool === state.localTool)) state.localTool = "all";
+      } catch (err) {
+        if (generation === refreshGeneration) calendar.error = String(err);
+        throw err;
+      } finally {
+        if (generation === refreshGeneration) calendar.loading = false;
+      }
+    } else if (source === "live") {
       // Subscription axis: the selected provider's quota.
       const live = await invoke<UsageReport>(codex ? "fetch_codex_quota" : "fetch_usage");
       if (generation !== refreshGeneration) return;
@@ -418,20 +485,26 @@ async function refresh(): Promise<void> {
       // Uploading a 90-day snapshot can take longer than reading the roster,
       // especially over a high-latency SSH tunnel. It is best-effort and must
       // never hold the Team tab hostage; the next refresh picks up the result.
-      void maybeUploadTeam();
+      const upload = maybeUploadTeam();
+      const uploadStarted = teamUploadInFlight !== null;
       const team = await fetchTeamReport(teamRange);
       if (generation !== refreshGeneration) return;
-      state.team = team;
-      // Keep the model selection valid as the range/data changes.
-      if (state.teamModel !== "all" && !state.team.models.some((m) => m.id === state.teamModel)) {
-        state.teamModel = "all";
-      }
-      if (
-        state.teamAccountKey !== "all" &&
-        !state.team.accounts.some((a) => a.account_key === state.teamAccountKey)
-      ) {
-        state.teamAccountKey = "all";
-      }
+      acceptTeamReport(team);
+      // Once our upload commits, read once more so Refresh includes newly
+      // synced local usage without requiring another click or a 30-minute wait.
+      if (uploadStarted) void upload.then(async error => {
+        if (generation !== refreshGeneration) return;
+        if (error) { state.error = error; render(); return; }
+        const updated = await fetchTeamReport(teamRange);
+        if (generation !== refreshGeneration) return;
+        acceptTeamReport(updated);
+        state.error = "";
+        state.updatedAt = nowTime();
+        render();
+      }).catch(error => {
+        if (generation !== refreshGeneration) return;
+        state.error = String(error); render();
+      });
     } else {
       // API axis: every local tool at once (not provider-scoped).
       const local = await invoke<LocalReport>("fetch_local", { windowSecs });
@@ -477,12 +550,13 @@ let windowSizeGeneration = 0;
 let lastRequestedHeight = 0;
 
 function render(): void {
+  hideCalendarTooltip();
   app.innerHTML =
     state.view === "settings"
       ? `<main class="panel">${settingsHeaderHTML()}${settingsSectionSegHTML()}<section class="content">${settingsBodyHTML()}</section></main>`
       : `<main class="panel">
       ${headerHTML()}
-      ${sourceSegHTML()}
+      <div class="source-line">${sourceSegHTML()}${usageViewSwitchHTML()}</div>
       ${filterLineHTML()}
       <section class="content">${contentHTML()}</section>
       ${footerHTML()}
@@ -503,7 +577,7 @@ function filterLineHTML(): string {
 // Local: the tool as a click-to-cycle chip (advances All → Claude Code → … on
 // click) on the left; the window range (segment — toggled often) on the right.
 function localFilterHTML(): string {
-  const apps = state.local?.apps ?? [];
+  const apps = calendars.local.view === "calendar" ? calendarTools() : state.local?.apps ?? [];
   const opts = [{ id: "all", name: "All tools" }, ...apps.map((a) => ({ id: a.id, name: a.display_name }))];
   const current = opts.find((o) => o.id === state.localTool) ?? opts[0];
   const chip = `<button class="mc-btn tool-cycle" data-action="tool-cycle" title="Switch tool">${escapeHTML(
@@ -512,13 +586,13 @@ function localFilterHTML(): string {
   const windowSeg = `<div class="seg">${(["day", "week", "month"] as WindowKey[])
     .map((w) => segButton("window", w, WINDOW_TITLE[w], state.window === w))
     .join("")}</div>`;
-  return `<div class="filter-line">${chip}${windowSeg}</div>`;
+  return `<div class="filter-line">${chip}${calendars.local.view === "calendar" ? "" : windowSeg}</div>`;
 }
 
 // Team: the date range as a segment (toggled often). The model selector stays
 // in the content, next to the leaderboard it filters.
 function teamFilterHTML(): string {
-  if (!state.teamConfig?.enabled) return "";
+  if (!state.teamConfig?.enabled || calendars.team.view === "calendar") return "";
   const seg = (["day", "week", "month"] as WindowKey[])
     .map((r) => segButton("team-range", r, TEAM_RANGE_LABEL[r], state.teamRange === r))
     .join("");
@@ -586,7 +660,7 @@ async function syncWindowSize(generation: number): Promise<void> {
 function headerHTML(): string {
   const title =
     state.source === "team"
-      ? (state.team?.team_name ?? "Team")
+      ? (state.team?.team_name ?? state.teamConfig?.team_name ?? "Team")
       : state.source === "live"
         ? state.provider === "codex"
           ? "Codex Quota"
@@ -609,7 +683,7 @@ function headerHTML(): string {
       }">${pinIcon(getTheme())}</button>
       <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings" title="Settings">${settingsIcon(getTheme())}</button>
-      <button class="mc-btn icon" data-action="refresh" title="Refresh">${refreshIcon(getTheme())}</button>
+      <button class="mc-btn icon ${state.error ? "refresh-error" : ""}" data-action="refresh" aria-label="${state.error ? "Refresh failed. Retry" : "Refresh"}" title="${state.error ? escapeHTML(state.error) : "Refresh"}">${refreshIcon(getTheme())}</button>
     </header>`;
 }
 
@@ -682,8 +756,8 @@ function sourceSegHTML(): string {
   // The Team tab only appears once the user has opted in (config.enabled).
   const teamOn = !!state.teamConfig?.enabled;
   // Shorten the first two labels when a third button has to share the row.
-  const live = teamOn ? "Live" : "Live quota";
-  const local = teamOn ? "Local" : "Local activity";
+  const live = teamOn || state.source !== "live" ? "Live" : "Live quota";
+  const local = teamOn || state.source !== "live" ? "Local" : "Local activity";
   return `
     <div class="seg">
       ${segButton("source", "live", live, state.source === "live")}
@@ -693,13 +767,26 @@ function sourceSegHTML(): string {
 }
 
 
+function usageViewSwitchHTML(): string {
+  const c = activeCalendar();
+  if (!c) return "";
+  return `<div class="usage-view-switch" role="group" aria-label="Usage view">${(["bars", "calendar"] as const).map(view =>
+    `<button data-action="usage-view" data-value="${view}" aria-pressed="${c.view === view}">${view === "bars" ? "Bars" : "Calendar"}</button>`).join("")}</div>`;
+}
+
 function contentHTML(): string {
+  const c = activeCalendar();
+  if (c?.view === "calendar" && state.source !== "live") return calendarHTML({
+    ...c, source: state.source,
+    filters: { tool: state.source === "local" ? state.localTool : "all",
+      model: state.source === "team" ? state.teamModel : c.model, account: c.account },
+  });
   if (state.source === "team")
     return teamContentHTML({
-      report: state.team,
+      report: state.team?.range === state.teamRange ? state.team : null,
       model: state.teamModel,
       dropdownOpen: state.teamDropdownOpen,
-      crimeMode: state.teamCrimeMode,
+      breakdownMode: state.teamBreakdownMode,
       accountKey: state.teamAccountKey,
       selfName: state.teamConfig?.display_name ?? "",
       expanded: state.teamExpanded,
@@ -1039,15 +1126,20 @@ function shareInfo(w: UsageWindow): { text: string; faint: boolean; title: strin
   const m = w.machine_share;
   const o = w.others_share;
   const conf = w.share_confidence;
-  if (m == null || o == null || conf == null) return { text: "", faint: false, title: "" };
+  if (m == null || o == null || conf == null) return {
+    text: "split unavailable", faint: true,
+    title: "Device split needs fresh quota, complete priced usage for this account, and an active reset window.",
+  };
   if (conf < SHARE_MIN_CONF) {
-    return { text: "estimating…", faint: true, title: "Device split: collecting data" };
+    return { text: "learning device split", faint: true,
+      title: 'Learns automatically from changing local activity and idle periods. Waiting for enough consistent evidence to separate this machine from other usage.',
+    };
   }
   const pct = (x: number) => Math.round(x * 100);
   const title =
     w.window_budget != null && w.window_budget > 0
-      ? `≈ ${formatDollars(w.window_budget)} = 100% of this ${w.title} window (estimated)`
-      : "estimated device split";
+      ? `≈ ${formatDollars(w.window_budget)} = 100% of this ${w.title} window (automatically estimated; other usage is inferred)`
+      : "automatically estimated device split";
   return { text: `This machine ~${pct(m)}% · Others ~${pct(o)}%`, faint: conf < 0.6, title };
 }
 
@@ -1125,14 +1217,13 @@ function localHTML(): string {
       : `<div class="msg">Loading…</div>`;
   }
 
-  const { models, kind } = localModels();
+  const { models } = localModels();
   const current = models.find((m) => m.id === state.selectedModelId) ?? models[0];
   if (!current) {
     return `<div class="msg">No usage for this tool in this window.</div>`;
   }
 
   return (
-    kindTagHTML(kind) +
     dropdownHTML(models, current) +
     costLineHTML(current) +
     xpBarsHTML(current) +
@@ -1188,14 +1279,6 @@ function themeBar(): (label: string, frac: number, trailing: string) => string {
   return theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
 }
 
-// Tag a single tool as a flat-rate subscription (cost is an API-rate estimate)
-// or real metered API spend. Hidden on the pooled "All" view.
-function kindTagHTML(kind: string | null): string {
-  if (!kind) return "";
-  const label = kind === "real" ? "real API spend" : "subscription · est. at API rates";
-  return `<div class="kind-tag kind-${escapeHTML(kind)}">${label}</div>`;
-}
-
 function dropdownHTML(models: ModelUsage[], current: ModelUsage): string {
   const list = state.dropdownOpen
     ? `<div class="dd-list">${models
@@ -1221,7 +1304,7 @@ function costLineHTML(m: ModelUsage): string {
   return `
     <div class="cost-line">
       <span class="model-id">${escapeHTML(m.id)}</span>
-      ${m.cost ? `<span class="cost-total">${formatDollars(m.cost.total)}</span>` : ""}
+      ${m.cost ? `<span class="cost-total" title="Estimated at API rates">${formatDollars(m.cost.total)}</span>` : ""}
     </div>`;
 }
 
@@ -1245,12 +1328,16 @@ function xpBarsHTML(m: ModelUsage): string {
 
 function footerHTML(): string {
   const label =
+    activeCalendar()?.view === "calendar" ? `${state.source === "team" ? "Team" : "Local"} usage · calendar` :
     state.source === "team"
       ? "Team usage · shared DB"
       : state.source === "live"
         ? (state.live?.source_label ?? "Live quota")
         : (state.local?.source_label ?? "Local activity");
   const updated = state.updatedAt ? `Updated ${state.updatedAt}` : "";
+  const refreshStatus = state.error && state.source === "team"
+    ? `<button class="detail-link refresh-error" data-action="refresh" title="${escapeHTML(state.error)}">Refresh failed · Retry</button>`
+    : state.loading && state.source === "team" ? "…" : escapeHTML(updated);
   // The footer's middle line: account identity on Live (revealed via the footer
   // "detail" toggle), member count on Team. When detail is off, omit the line
   // entirely and use the compact one-row footer; content-driven window sizing
@@ -1280,7 +1367,7 @@ function footerHTML(): string {
     <footer class="footer ${compact ? "footer-compact" : ""}">
       <div class="src-label">${escapeHTML(label)}${detail}</div>
       ${midLine}
-      <div class="updated">${escapeHTML(updated)}</div>
+      <div class="updated">${refreshStatus}</div>
     </footer>`;
 }
 
@@ -1294,6 +1381,42 @@ app.addEventListener("click", (e) => {
   cancelCelebration(); // a click ends the refill show; the action re-renders below
 
   switch (action) {
+    case "usage-view": {
+      const c = activeCalendar();
+      if (!c || (value !== "calendar" && value !== "bars") || value === c.view) break;
+      c.view = value;
+      if (state.source === "team" && value === "calendar") c.account = state.teamBreakdownMode ? state.teamAccountKey : "all";
+      saveView(); render(); void refresh();
+      break;
+    }
+    case "calendar-month": {
+      const c = activeCalendar();
+      const month = Number(value);
+      if (c && Number.isInteger(month) && month >= 0 && month < 12) {
+        c.month = month; c.scale = "days"; saveView(); render();
+      }
+      break;
+    }
+    case "calendar-scale": {
+      const c = activeCalendar();
+      if (c && (value === "days" || value === "months")) { c.scale = value; saveView(); render(); }
+      break;
+    }
+    case "calendar-prev":
+    case "calendar-next": {
+      const c = activeCalendar();
+      if (!c) break;
+      const direction = action === "calendar-prev" ? -1 : 1;
+      const date = new Date(Date.UTC(c.year + (c.scale === "months" ? direction : 0), c.month + (c.scale === "days" ? direction : 0), 1));
+      const now = new Date();
+      if (date.getUTCFullYear() < 2000 || date.getUTCFullYear() > now.getUTCFullYear()) break;
+      c.year = date.getUTCFullYear();
+      c.month = c.year === now.getUTCFullYear() ? Math.min(date.getUTCMonth(), now.getUTCMonth()) : date.getUTCMonth();
+      c.error = "";
+      render();
+      if (c.report?.year !== c.year) void refresh();
+      break;
+    }
     case "refresh":
       // An explicit click is the one moment we're allowed to look at Claude
       // Code's credential storage again even if it appears unchanged — a
@@ -1319,10 +1442,11 @@ app.addEventListener("click", (e) => {
       break;
     case "tool-cycle": {
       // Tool chip click: advance to the next tool (wraps), no refetch.
-      const ids = ["all", ...(state.local?.apps ?? []).map((a) => a.id)];
+      const ids = ["all", ...(calendars.local.view === "calendar" ? calendarTools() : state.local?.apps ?? []).map((a) => a.id)];
       const i = ids.indexOf(state.localTool);
       state.localTool = ids[(i + 1) % ids.length] ?? "all";
       state.dropdownOpen = false;
+      if (calendars.local.view === "calendar") calendars.local.model = "all";
       snapSelectedModel(); // re-render from already-loaded data
       saveView();
       render();
@@ -1381,8 +1505,12 @@ app.addEventListener("click", (e) => {
       }
       break;
     case "team-range":
-      if (value && value !== state.teamRange) {
-        state.teamRange = value as WindowKey;
+      if (isWindowKey(value) && value !== state.teamRange) {
+        state.teamRange = value;
+        state.team = teamReports.get(value);
+        state.error = "";
+        state.updatedAt = "";
+        state.loading = true;
         state.teamDropdownOpen = false;
         saveView();
         render();
@@ -1393,8 +1521,8 @@ app.addEventListener("click", (e) => {
       state.teamDropdownOpen = !state.teamDropdownOpen;
       render();
       break;
-    case "team-crime-toggle":
-      state.teamCrimeMode = !state.teamCrimeMode;
+    case "team-breakdown-toggle":
+      state.teamBreakdownMode = !state.teamBreakdownMode;
       state.teamDropdownOpen = false;
       render();
       break;
@@ -1439,6 +1567,7 @@ app.addEventListener("click", (e) => {
       }
       break;
     case "update-channel":
+      if (state.updateDownloading) break;
       if (value && value !== state.updateChannel) {
         state.updateChannel = value as UpdateChannel;
         saveChannel(state.updateChannel);
@@ -1467,6 +1596,18 @@ app.addEventListener("click", (e) => {
       void saveTeam();
       break;
   }
+});
+
+app.addEventListener("change", (e) => {
+  const el = e.target as HTMLSelectElement;
+  const field = el.dataset.calendarFilter;
+  const c = activeCalendar();
+  if (!c || !field) return;
+  if (field === "model") {
+    if (state.source === "team") state.teamModel = el.value;
+    else c.model = el.value;
+  } else if (field === "account") c.account = el.value;
+  render();
 });
 
 // The settings form binds inputs to a draft buffer so typed values survive the
@@ -1524,7 +1665,7 @@ function openSettings(): void {
 // opens so the General section reflects the real backend values.
 async function loadAppControls(): Promise<void> {
   if (MOCK) {
-    state.appControls = { autostart: false, alerts: true, calibrate: false };
+    state.appControls = { autostart: false, alerts: true };
     render();
     return;
   }
@@ -1542,7 +1683,7 @@ async function applyControl(key: keyof AppControls, on: boolean): Promise<void> 
   if (state.appControls) state.appControls[key] = on;
   if (MOCK) return;
   const cmd =
-    key === "autostart" ? "set_autostart" : key === "alerts" ? "set_alerts_enabled" : "set_calibrate";
+    key === "autostart" ? "set_autostart" : "set_alerts_enabled";
   try {
     await invoke(cmd, { enabled: on });
   } catch {
@@ -1565,38 +1706,50 @@ async function loadAppVersion(): Promise<void> {
   }
 }
 
+let updateCheckGeneration = 0;
 async function checkUpdate(): Promise<void> {
-  if (MOCK || state.updateChecking) return;
+  if (MOCK || state.updateDownloading) return;
+  const generation = ++updateCheckGeneration;
+  const channel = state.updateChannel;
+  state.updateInfo = null;
   state.updateChecking = true;
   state.updateStatus = "";
   render();
   try {
-    state.updateInfo = await invoke<UpdateInfo>("check_update", { channel: state.updateChannel });
+    const info = await invoke<UpdateInfo>("check_update", { channel });
+    if (generation !== updateCheckGeneration) return;
+    if (info.channel !== channel) throw new Error("Update channel mismatch. Please retry.");
+    state.updateInfo = info;
     state.updateStatusOk = true;
     state.updateStatus = ""; // the result block conveys latest/running/count
   } catch (err) {
+    if (generation !== updateCheckGeneration) return;
     state.updateInfo = null;
     state.updateStatusOk = false;
     state.updateStatus = String(err);
   } finally {
-    state.updateChecking = false;
-    render();
+    if (generation === updateCheckGeneration) {
+      state.updateChecking = false;
+      render();
+    }
   }
 }
 
 async function installUpdate(): Promise<void> {
   const info = state.updateInfo;
-  if (MOCK || !info || !info.has_asset || state.updateDownloading) return;
+  if (MOCK || !info || !info.available || !info.has_asset || info.channel !== state.updateChannel || state.updateChecking || state.updateDownloading) return;
   state.updateDownloading = true;
   state.updateStatus = "";
   render();
   try {
-    const path = await invoke<string>("download_and_install_update", {
+    await invoke<string>("download_and_install_update", {
       url: info.asset_url,
       name: info.asset_name,
+      size: info.asset_size,
+      digest: info.asset_digest,
     });
     state.updateStatusOk = true;
-    state.updateStatus = `Opened the installer (saved to ${path}).`;
+    state.updateStatus = "Installer opened.";
   } catch (err) {
     state.updateStatusOk = false;
     state.updateStatus = String(err);
@@ -1651,6 +1804,8 @@ async function saveTeam(): Promise<void> {
     // If sharing was turned off while the Team tab was open, fall back to Live.
     if (!state.teamConfig.enabled && state.source === "team") state.source = "live";
     state.view = "main";
+    teamReports.clear();
+    refreshGeneration++;
     state.team = null; // force a fresh fetch the next time Team is opened
     render();
     if (state.source === "team") void refresh();

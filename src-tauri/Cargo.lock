@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "hpbar"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -1634,6 +1634,7 @@ dependencies = [
  "objc2-foundation 0.2.2",
  "reqwest 0.12.28",
  "security-framework 3.7.0",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -8,19 +8,20 @@
 //!     payload.info.last_token_usage  — that turn's token delta
 //!     payload.rate_limits            — a quota snapshot (used_percent, etc.)
 //!
-//! Local usage sums `last_token_usage` per model within the time window. Live
+//! Local usage takes cumulative-counter deltas per model, ignoring repeated
+//! quota events. Older logs without counters fall back to `last_token_usage`. Live
 //! quota reads the most recent non-null `rate_limits` across all sessions — no
 //! network call, we just read what Codex already wrote.
 
 use crate::localstats::{ModelCostDTO, ModelUsageDTO, UsageRow};
-use crate::pricing::Pricing;
+use crate::pricing::{ModelCost, Pricing};
 use crate::usage::{UsageDetail, UsageReport, UsageWindow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const TOKEN_COUNT_MARKER: &str = "\"type\":\"token_count\"";
+const TOKEN_COUNT_MARKER: &str = "token_count";
 
 /// How stale a local rollout snapshot may be before [`fetch_quota`] rejects it.
 pub const SNAPSHOT_MAX_AGE_SECS: i64 = 24 * 3600;
@@ -37,8 +38,18 @@ pub fn collect_local(window_secs: i64) -> Vec<ModelUsageDTO> {
 /// seconds). The device-share fit uses this to price the span a provider
 /// window covered *as of* an observation, which need not end now.
 pub fn collect_local_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
+    collect_local_range_for_account(start, end, None).unwrap_or_default()
+}
+
+pub fn collect_local_range_for_account(
+    start: i64,
+    end: i64,
+    account: Option<&str>,
+) -> Option<Vec<ModelUsageDTO>> {
+    let attribution = account.map(|_| crate::account::attribution_snapshot());
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
+    let pricing = Pricing::loaded();
     for file in &session_files() {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
@@ -46,6 +57,7 @@ pub fn collect_local_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
         // Model is announced in `turn_context` and applies to the token_count
         // events that follow it, within the same session file.
         let mut current_model: Option<String> = None;
+        let mut counter = UsageCounter::default();
         for line in text.lines() {
             let Ok(row) = serde_json::from_str::<Row>(line) else {
                 continue;
@@ -67,60 +79,71 @@ pub fn collect_local_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
                     if payload.r#type.as_deref() != Some("token_count") {
                         continue;
                     }
+                    // Advance counters even outside the requested range: otherwise
+                    // its first event would include earlier turns again.
+                    let Some(usage) = payload.info.as_ref().and_then(|i| counter.delta(i)) else {
+                        continue;
+                    };
                     let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
                         continue;
                     };
                     if ts < start || ts >= end {
                         continue;
                     }
-                    let Some(usage) = payload
-                        .info
-                        .as_ref()
-                        .and_then(|i| i.last_token_usage.as_ref())
-                    else {
-                        continue;
-                    };
                     // Drop usage we can't attribute to a model (a token_count
                     // before any turn_context) rather than inventing an "unknown".
                     let Some(model) = current_model.clone() else {
                         continue;
                     };
-                    totals.entry(model).or_default().add(usage);
+                    if let (Some(key), Some(snapshot)) = (account, &attribution) {
+                        let identity = snapshot.attribution("codex", ts);
+                        if identity.status != "exact" {
+                            return None;
+                        }
+                        if identity.account_key != key {
+                            continue;
+                        }
+                    }
+                    totals
+                        .entry(model.clone())
+                        .or_default()
+                        .add_priced(&usage, &model, &pricing, ts);
                 }
                 _ => {}
             }
         }
     }
 
-    let pricing = Pricing::loaded();
     let mut models: Vec<ModelUsageDTO> = totals
         .into_iter()
         .map(|(id, t)| {
             // `input_tokens` is the full input, of which cached input is a
             // subset. `reasoning_output_tokens` is likewise already included
             // in `output_tokens`; adding it again inflates every reasoning turn.
-            let input = (t.input - t.cached).max(0);
+            let input = (t.input - t.cached - t.written).max(0);
             let cache_read = t.cached;
             let output = t.output;
-            let cost = pricing
-                .cost(&id, input, output, cache_read, 0, 0)
-                .map(|c| ModelCostDTO {
-                    input: c.input,
-                    output: c.output,
-                    cache_read: c.cache_read,
-                    cache_create: c.cache_create,
-                    total: c.total(),
-                });
-            let total = t.total.max(input + output + cache_read);
-            let unattributed = (total - input - output - cache_read).max(0);
-            let max_component = input.max(output).max(cache_read).max(unattributed);
+            let cost = t.cost().map(|c| ModelCostDTO {
+                input: c.input,
+                output: c.output,
+                cache_read: c.cache_read,
+                cache_create: c.cache_create,
+                total: c.total(),
+            });
+            let total = t.total.max(input + output + cache_read + t.written);
+            let unattributed = (total - input - output - cache_read - t.written).max(0);
+            let max_component = input
+                .max(output)
+                .max(cache_read)
+                .max(t.written)
+                .max(unattributed);
             ModelUsageDTO {
                 display_name: display_name(&id),
                 id,
                 input,
                 output,
                 cache_read,
-                cache_create: 0,
+                cache_create: t.written,
                 unattributed,
                 total,
                 max_component,
@@ -131,7 +154,7 @@ pub fn collect_local_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
         .collect();
 
     models.sort_by(|a, b| b.total.cmp(&a.total));
-    models
+    Some(models)
 }
 
 /// Exact per-(UTC day, account, project, model) Codex usage for Team sharing.
@@ -142,11 +165,13 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
     let mut acc: HashMap<Key, (Totals, i64)> = HashMap::new();
     let attributions = crate::account::attribution_snapshot();
 
+    let pricing = Pricing::loaded();
     for file in &session_files() {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
         let mut current_model: Option<String> = None;
+        let mut counter = UsageCounter::default();
         let mut current_project = "unknown".to_string();
         for line in text.lines() {
             let Ok(row) = serde_json::from_str::<Row>(line) else {
@@ -170,6 +195,11 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
                     if payload.r#type.as_deref() != Some("token_count") {
                         continue;
                     }
+                    // Advance counters even outside the requested range: otherwise
+                    // its first event would include earlier turns again.
+                    let Some(usage) = payload.info.as_ref().and_then(|i| counter.delta(i)) else {
+                        continue;
+                    };
                     let Some(ts) = row.timestamp.as_deref().and_then(parse_ts) else {
                         continue;
                     };
@@ -184,25 +214,18 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
                     let Some(model) = current_model.clone() else {
                         continue;
                     };
-                    let Some(usage) = payload
-                        .info
-                        .as_ref()
-                        .and_then(|i| i.last_token_usage.as_ref())
-                    else {
-                        continue;
-                    };
                     let attribution = attributions.attribution("codex", ts);
                     let key = (
                         day,
                         current_project.clone(),
-                        model,
+                        model.clone(),
                         attribution.account_key,
                         attribution.billing_key,
                         attribution.account_label,
                         attribution.status,
                     );
                     let entry = acc.entry(key).or_insert_with(|| (Totals::default(), 0));
-                    entry.0.add(usage);
+                    entry.0.add_priced(&usage, &model, &pricing, ts);
                     entry.1 = entry.1.max(ts);
                 }
                 _ => {}
@@ -210,22 +233,20 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
         }
     }
 
-    let pricing = Pricing::loaded();
     let mut rows = Vec::new();
     for (
         (day, project, model, account_key, billing_key, account_label, attribution_status),
         (totals, last_active),
     ) in acc
     {
-        let input = (totals.input - totals.cached).max(0);
+        let input = (totals.input - totals.cached - totals.written).max(0);
         let cache_read = totals.cached;
         let output = totals.output;
-        let tokens = totals.total.max(input + cache_read + output);
-        let unattributed = (tokens - input - cache_read - output).max(0);
-        let cost = pricing
-            .cost(&model, input, output, cache_read, 0, 0)
-            .map(|c| c.total())
-            .unwrap_or(0.0);
+        let tokens = totals
+            .total
+            .max(input + cache_read + output + totals.written);
+        let unattributed = (tokens - input - cache_read - output - totals.written).max(0);
+        let cost = totals.cost().map(|c| c.total()).unwrap_or(0.0);
         rows.push(UsageRow {
             day,
             provider: "codex".into(),
@@ -238,7 +259,7 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
             input,
             output,
             cache_read,
-            cache_create: 0,
+            cache_create: totals.written,
             unattributed,
             tokens,
             cost,
@@ -273,11 +294,7 @@ pub fn fetch_quota_with_ts(max_age_secs: i64) -> Result<(i64, UsageReport), Stri
     // Long-running sessions can remain active after a newer short-lived
     // subagent exits, so filename creation time is not sufficient. File mtime
     // identifies the rollout most recently updated by Codex.
-    files.sort_by_key(|path| {
-        std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok()
-    });
+    files.sort_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
     files.reverse(); // most recently written first
 
     for file in &files {
@@ -319,12 +336,8 @@ pub fn fetch_quota_with_ts(max_age_secs: i64) -> Result<(i64, UsageReport), Stri
 fn build_quota(limits: RateLimits) -> Result<UsageReport, String> {
     let scope = limits.limit_name.filter(|s| !s.trim().is_empty());
     let windows: Vec<UsageWindow> = [
-        limits
-            .primary
-            .map(|w| w.into_window(scope.as_deref())),
-        limits
-            .secondary
-            .map(|w| w.into_window(scope.as_deref())),
+        limits.primary.map(|w| w.into_window(scope.as_deref())),
+        limits.secondary.map(|w| w.into_window(scope.as_deref())),
     ]
     .into_iter()
     .flatten()
@@ -368,6 +381,9 @@ fn build_quota(limits: RateLimits) -> Result<UsageReport, String> {
 
 #[derive(Default)]
 struct Totals {
+    written: i64,
+    priced: ModelCost,
+    unpriced: bool,
     input: i64,
     cached: i64,
     output: i64,
@@ -375,13 +391,96 @@ struct Totals {
 }
 
 impl Totals {
+    fn cost(&self) -> Option<ModelCost> {
+        if self.unpriced {
+            None
+        } else {
+            Some(self.priced)
+        }
+    }
+
+    fn add_priced(&mut self, u: &TokenUsage, model: &str, pricing: &Pricing, at: i64) {
+        self.add(u);
+        let mut t = Totals::default();
+        t.add(u);
+        match pricing.cost_request(
+            model,
+            [
+                t.input - t.cached - t.written,
+                t.output,
+                t.cached,
+                t.written,
+                0,
+            ],
+            at,
+        ) {
+            Some(c) => self.priced.add(c),
+            None => self.unpriced = true,
+        }
+    }
+
     fn add(&mut self, u: &TokenUsage) {
-        let input = u.input_tokens.unwrap_or(0);
-        let output = u.output_tokens.unwrap_or(0);
+        let input = u.input_tokens.unwrap_or(0).max(0);
+        let output = u.output_tokens.unwrap_or(0).max(0);
         self.input += input;
-        self.cached += u.cached_input_tokens.unwrap_or(0);
+        let cached = u.cached_input_tokens.unwrap_or(0).clamp(0, input);
+        self.cached += cached;
+        self.written += u
+            .cache_write_input_tokens
+            .unwrap_or(0)
+            .clamp(0, input - cached);
         self.output += output;
-        self.total += u.total_tokens.unwrap_or(input + output);
+        self.total += u.total_tokens.unwrap_or(input + output).max(input + output);
+    }
+}
+
+/// Quota-only events repeat last_token_usage. Session counters distinguish
+/// these from new turns (including equally-sized consecutive turns).
+#[derive(Default)]
+struct UsageCounter {
+    previous: Option<TokenUsage>,
+}
+
+impl UsageCounter {
+    fn delta(&mut self, info: &Info) -> Option<TokenUsage> {
+        let Some(total) = &info.total_token_usage else {
+            return info.last_token_usage.clone();
+        };
+        let previous = self.previous.replace(total.clone());
+        let Some(previous) = previous else {
+            return info
+                .last_token_usage
+                .clone()
+                .or_else(|| Some(total.clone()));
+        };
+        let diff = |a: Option<i64>, b: Option<i64>| (a.unwrap_or(0) - b.unwrap_or(0)).max(0);
+        // Context compaction / session restart may reset cumulative counters.
+        if total.input_tokens.unwrap_or(0) < previous.input_tokens.unwrap_or(0)
+            || total.output_tokens.unwrap_or(0) < previous.output_tokens.unwrap_or(0)
+        {
+            return info.last_token_usage.clone();
+        }
+        let delta = TokenUsage {
+            cache_write_input_tokens: Some(diff(
+                total.cache_write_input_tokens,
+                previous.cache_write_input_tokens,
+            )),
+            input_tokens: Some(diff(total.input_tokens, previous.input_tokens)),
+            cached_input_tokens: Some(diff(
+                total.cached_input_tokens,
+                previous.cached_input_tokens,
+            )),
+            output_tokens: Some(diff(total.output_tokens, previous.output_tokens)),
+            total_tokens: Some(diff(total.total_tokens, previous.total_tokens)),
+            reasoning_output_tokens: None,
+        };
+        if delta.input_tokens == Some(0)
+            && delta.output_tokens == Some(0)
+            && delta.total_tokens == Some(0)
+        {
+            return None;
+        }
+        Some(delta)
     }
 }
 
@@ -408,11 +507,13 @@ struct Payload {
 
 #[derive(Deserialize)]
 struct Info {
+    total_token_usage: Option<TokenUsage>,
     last_token_usage: Option<TokenUsage>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Default)]
 struct TokenUsage {
+    cache_write_input_tokens: Option<i64>,
     input_tokens: Option<i64>,
     cached_input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -561,10 +662,77 @@ fn clamp01(v: f64) -> f64 {
 mod tests {
     use super::*;
 
+    fn info(input: i64, output: i64) -> Info {
+        Info {
+            total_token_usage: Some(TokenUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                total_tokens: Some(input + output),
+                ..Default::default()
+            }),
+            last_token_usage: Some(TokenUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                total_tokens: Some(110),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn repeated_quota_events_are_not_new_turns() {
+        let mut counter = UsageCounter::default();
+        assert_eq!(
+            counter.delta(&info(100, 10)).unwrap().total_tokens,
+            Some(110)
+        );
+        assert!(counter.delta(&info(100, 10)).is_none());
+        // Equal-sized genuine turns still count.
+        assert_eq!(
+            counter.delta(&info(200, 20)).unwrap().total_tokens,
+            Some(110)
+        );
+        assert!(counter.delta(&info(200, 20)).is_none());
+    }
+
+    #[test]
+    fn counters_before_range_and_compaction_are_handled() {
+        let mut counter = UsageCounter::default();
+        counter.delta(&info(1000, 100));
+        let inside = counter.delta(&info(1100, 110)).unwrap();
+        assert_eq!(inside.input_tokens, Some(100));
+        assert_eq!(
+            counter.delta(&info(100, 10)).unwrap().total_tokens,
+            Some(110)
+        );
+        assert!(counter.delta(&info(100, 10)).is_none());
+    }
+
+    #[test]
+    fn cache_writes_are_priced_once_as_part_of_input() {
+        let mut total = Totals::default();
+        total.add_priced(
+            &TokenUsage {
+                input_tokens: Some(100_000),
+                cached_input_tokens: Some(20_000),
+                cache_write_input_tokens: Some(30_000),
+                output_tokens: Some(10_000),
+                ..Default::default()
+            },
+            "gpt-6.1-sol",
+            &Pricing::bundled(),
+            0,
+        );
+        assert_eq!(total.total, 110_000);
+        // 50K ordinary input + 20K read + 30K write + 10K output.
+        assert!((total.cost().unwrap().total() - 0.277).abs() < 1e-9);
+    }
+
     #[test]
     fn reasoning_is_not_added_twice() {
         let mut totals = Totals::default();
         totals.add(&TokenUsage {
+            cache_write_input_tokens: None,
             input_tokens: Some(50),
             cached_input_tokens: Some(20),
             output_tokens: Some(100),

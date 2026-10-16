@@ -35,7 +35,7 @@ export function updateSectionHTML(args: {
 }): string {
   const seg = CHANNELS.map(
     (c) =>
-      `<button class="mc-btn ${c.id === args.channel ? "selected" : ""}" data-action="update-channel" data-value="${c.id}">${c.label}</button>`,
+      `<button class="mc-btn ${c.id === args.channel ? "selected" : ""}" data-action="update-channel" data-value="${c.id}" ${args.downloading ? "disabled" : ""}>${c.label}</button>`,
   ).join("");
 
   const status = args.checking
@@ -51,7 +51,7 @@ export function updateSectionHTML(args: {
       <p class="settings-help">${CHANNEL_HELP[args.channel]}</p>
 
       <div class="settings-actions">
-        <button class="mc-btn" data-action="update-check" ${args.checking ? "disabled" : ""}>Check for updates</button>
+        <button class="mc-btn" data-action="update-check" ${args.checking || args.downloading ? "disabled" : ""}>Check for updates</button>
       </div>
       ${status}
       ${args.info ? updateResultHTML(args.info, args.downloading) : ""}
@@ -91,13 +91,13 @@ function updateResultHTML(info: UpdateInfo, downloading: boolean): string {
   const size = info.asset_size ? ` · ${formatBytes(info.asset_size)}` : "";
   const btn = downloading
     ? `<button class="mc-btn selected" disabled>Downloading…</button>`
-    : `<button class="mc-btn selected" data-action="update-install">Download &amp; install v${escapeHTML(info.latest)}</button>`;
+    : `<button class="mc-btn selected" data-action="update-install">Download &amp; open v${escapeHTML(info.latest)}</button>`;
   return `
     <div class="update-result">
       <div class="update-version">v${escapeHTML(info.latest)} available <span class="update-asset">${escapeHTML(info.asset_name)}${size}</span></div>
       ${notesHTML(info.notes)}
       <div class="settings-actions">${btn}</div>
-      <p class="about-fineprint">Running v${escapeHTML(info.current)} · ${countLabel}. Downloads to your Downloads folder, then opens the installer. Builds are unsigned — see the README for the first-open caveat.</p>
+      <p class="about-fineprint">Running v${escapeHTML(info.current)} · ${countLabel}.</p>
     </div>`;
 }
 
@@ -133,7 +133,7 @@ export function aboutSectionHTML(args: { version: string }): string {
 }
 
 /** The General section: app controls relocated from the (now macOS-absent) tray
- *  menu — Open at login, Quota alerts, single-device calibration — plus Quit.
+ *  menu — Open at login, Quota alerts — plus Quit.
  *  While `controls` is null (still loading) the toggles render disabled. Each
  *  toggle carries `data-field="ctl-<key>"`; main.ts's input handler routes those
  *  to the backend. Quit fires `data-action="quit-app"`. */
@@ -166,7 +166,6 @@ export function generalSectionHTML(args: {
       ${glass}
       ${toggle("Open at login", "Launch HPBar when you sign in", "ctl-autostart", !!c?.autostart, !c)}
       ${toggle("Quota alerts", "Notify on low / critical quota", "ctl-alerts", !!c?.alerts, !c)}
-      ${toggle("Only device here", "Assume this is your only active machine", "ctl-calibrate", !!c?.calibrate, !c)}
       <div class="general-foot">
         <button class="mc-btn general-quit" data-action="quit-app">Quit HPBar</button>
       </div>

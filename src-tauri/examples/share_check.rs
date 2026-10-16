@@ -25,7 +25,7 @@ fn main() {
     keys.sort();
     for k in keys {
         let samples = &hist[&k];
-        let title = k.split('/').nth(1).unwrap_or("");
+        let title = k.split('/').last().unwrap_or("");
         let cycle = window_secs_for_title(title);
         let live_u = samples.last().map(|s| s.u).unwrap_or(0.0);
         let age = samples.last().map(|s| now - s.ts).unwrap_or(-1);

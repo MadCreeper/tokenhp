@@ -2,7 +2,7 @@
 // main.ts) — they take explicit args rather than importing app state, so main.ts
 // stays the single owner of state.
 
-import type { MemberView, TeamConfig, TeamReport } from "./types";
+import type { MemberView, TeamConfig, TeamReport, TeamModelUsage } from "./types";
 import type { Theme } from "./theme";
 import { clamp01, escapeHTML, formatDollars, formatTokens } from "./util";
 import { xpBar } from "./xpbar";
@@ -15,7 +15,7 @@ export function teamContentHTML(args: {
   report: TeamReport | null;
   model: string; // "all" or a model id
   dropdownOpen: boolean;
-  crimeMode: boolean;
+  breakdownMode: boolean;
   accountKey: string; // "all" or a stable account key
   selfName: string; // your locally-set display name (authoritative for your row)
   expanded: Set<string>; // member ids whose top-projects are shown
@@ -25,7 +25,7 @@ export function teamContentHTML(args: {
 }): string {
   if (!args.report) {
     return args.error
-      ? `<div class="msg error">${escapeHTML(args.error)}</div>`
+      ? `<div class="msg"><button class="detail-link refresh-error" data-action="refresh" title="${escapeHTML(args.error)}">Retry</button></div>`
       : `<div class="msg">Loading…</div>`;
   }
 
@@ -34,58 +34,21 @@ export function teamContentHTML(args: {
     return `<div class="msg">No members yet. Share your usage to seed the team.</div>`;
   }
 
-  const legacyCount = report.members.filter((m) => m.is_legacy).length;
-  const hiddenCount = report.members.filter((m) =>
-    m.by_account.some((a) => a.attribution_status === "hidden" || a.account_key === "hidden"),
-  ).length;
-  const notices = [
-    legacyCount > 0
-      ? `${legacyCount} member${legacyCount === 1 ? "" : "s"} still use${
-          legacyCount === 1 ? "s" : ""
-        } the legacy identity. Totals remain visible; account-level splitting starts after their upgrade.`
-      : "",
-    args.crimeMode && hiddenCount > 0
-      ? `${hiddenCount} member${hiddenCount === 1 ? " has" : "s have"} not shared account identity. Their model totals remain visible.`
-      : "",
-  ]
-    .filter(Boolean)
-    .map((text) => `<div class="team-notice">${escapeHTML(text)}</div>`)
-    .join("");
+  const modeToggle = `<button class="mc-btn breakdown-toggle ${args.breakdownMode ? "selected" : ""}"
+    data-action="team-breakdown-toggle" title="Show member → account → model usage details">Usage breakdown</button>`;
+  const selector = modelDropdownHTML(report, args.model, args.dropdownOpen)
+    + (args.breakdownMode ? accountCycleHTML(report, args.accountKey) : "");
 
-  const modeToggle = `<button class="mc-btn crime-toggle ${args.crimeMode ? "selected" : ""}"
-    data-action="team-crime-toggle" title="Show member → account → model usage details">犯罪记录</button>`;
-  const selector = args.crimeMode
-    ? accountCycleHTML(report, args.accountKey)
-    : modelDropdownHTML(report, args.model, args.dropdownOpen);
-
-  // The value to rank/show per member: the chosen model's usage, or the total.
-  const valueFor = (m: MemberView): { tokens: number; cost: number } => {
-    if (args.crimeMode) {
-      if (args.accountKey !== "all") {
-        return m.by_account
-          .filter((x) => x.account_key === args.accountKey)
-          .reduce(
-            (sum, account) => ({
-              tokens: sum.tokens + account.tokens,
-              cost: sum.cost + account.cost,
-            }),
-            { tokens: 0, cost: 0 },
-          );
-      }
-      return { tokens: m.tokens, cost: m.cost };
-    }
-    if (args.model === "all") return { tokens: m.tokens, cost: m.cost };
-    const mm = m.by_model.find((x) => x.model === args.model);
-    return { tokens: mm?.tokens ?? 0, cost: mm?.cost ?? 0 };
+  // Apply the same model filter to totals, projects, accounts and share weights.
+  const selectedModels = (m: MemberView): TeamModelUsage[] => {
+    const models = args.breakdownMode && args.accountKey !== "all"
+      ? m.by_account.filter((a) => a.account_key === args.accountKey).flatMap((a) => a.by_model)
+      : m.by_model;
+    return models.filter((x) => args.model === "all" || x.model === args.model);
   };
-
-  const ranked = report.members.map((m) => ({ m, v: valueFor(m) }));
-  // Equivalent cost is the fairer bill-split weight across model/cache mixes;
-  // fall back to raw tokens if any non-empty row lacks a price estimate.
-  const useCost =
-    args.crimeMode &&
-    ranked.some((r) => r.v.cost > 0) &&
-    !ranked.some((r) => r.v.tokens > 0 && r.v.cost <= 0);
+  const ranked = report.members.map((m) => ({ m, v: sumModels(selectedModels(m)) }));
+  const useCost = args.breakdownMode && ranked.some((r) => r.v.cost > 0)
+    && ranked.every((r) => r.v.complete);
   const weight = (v: { tokens: number; cost: number }) => (useCost ? v.cost : v.tokens);
   ranked.sort((a, b) => weight(b.v) - weight(a.v));
   const totalWeight = ranked.reduce((sum, r) => sum + weight(r.v), 0);
@@ -104,16 +67,27 @@ export function teamContentHTML(args: {
         {
           open: args.expanded.has(r.m.member_id),
           topProjects: args.topProjects,
+          model: args.model,
         },
         {
-          enabled: args.crimeMode,
+          enabled: args.breakdownMode,
           accountKey: args.accountKey,
+          model: args.model,
           share: totalWeight > 0 ? weight(r.v) / totalWeight : 0,
         },
       ),
     )
     .join("");
-  return `${notices}<div class="team-view-tools">${selector}${modeToggle}</div><div class="team-list">${rows}</div>`;
+  const shareHint = `Percentages: ${useCost ? "estimated cost share" : "token share (complete pricing unavailable)"}. Costs estimated at API rates.`;
+  return `<div class="team-view-tools">${selector}${modeToggle}</div><div class="team-list" title="${escapeHTML(shareHint)}">${rows}</div>`;
+}
+
+function sumModels(models: TeamModelUsage[]): { tokens: number; cost: number; complete: boolean } {
+  return models.reduce<{ tokens: number; cost: number; complete: boolean }>((sum, m) => ({
+    tokens: sum.tokens + m.tokens,
+    cost: sum.cost + m.cost,
+    complete: sum.complete && m.cost_complete !== false && (m.tokens === 0 || m.cost > 0),
+  }), { tokens: 0, cost: 0, complete: true });
 }
 
 function accountCycleHTML(report: TeamReport, accountKey: string): string {
@@ -168,18 +142,18 @@ function memberRow(
   maxTokens: number,
   theme: Theme,
   selfName: string,
-  expand: { open: boolean; topProjects: number },
-  crime: { enabled: boolean; accountKey: string; share: number },
+  expand: { open: boolean; topProjects: number; model: string },
+  breakdown: { enabled: boolean; accountKey: string; model: string; share: number },
 ): string {
   const bar = theme === "classic" ? classicNeutralBar : theme === "arknights" ? akBar : xpBar;
   const frac = clamp01(weight / maxTokens);
   const baseTrailing =
     cost > 0 ? `${formatTokens(tokens)} · ${formatDollars(cost)}` : formatTokens(tokens);
-  const trailing = crime.enabled ? `${baseTrailing} · ${Math.round(crime.share * 100)}%` : baseTrailing;
+  const trailing = breakdown.enabled ? `${baseTrailing} · ${Math.round(breakdown.share * 100)}%` : baseTrailing;
   // Your own row uses your locally-set name, so it can't show a stale DB value.
   const display = m.is_self && selfName ? selfName : m.display_name;
   // A chevron signals the row is expandable to its top projects.
-  const chevron = crime.enabled ? "▾" : expand.open ? "▾" : "▸";
+  const chevron = breakdown.enabled ? "▾" : expand.open ? "▾" : "▸";
   // Theme bar builders escape their title; pass plain text to avoid turning an
   // apostrophe into a visible `&#39;` after double escaping.
   const name = `${chevron} ${rank}. ${display}${m.is_self ? " (you)" : ""}${
@@ -189,18 +163,22 @@ function memberRow(
     .filter(Boolean)
     .join(" · ");
   return `
-    <div class="team-row ${m.is_stale ? "team-stale" : ""} ${expand.open || crime.enabled ? "team-open" : ""}"
-         ${crime.enabled ? "" : `data-action="team-expand" data-value="${escapeHTML(m.member_id)}"`}>
+    <div class="team-row ${m.is_stale ? "team-stale" : ""} ${expand.open || breakdown.enabled ? "team-open" : ""}"
+         ${breakdown.enabled ? "" : `data-action="team-expand" data-value="${escapeHTML(m.member_id)}"`}>
       ${bar(name, frac, trailing)}
       ${sub ? `<div class="team-sub">${escapeHTML(sub)}</div>` : ""}
-      ${crime.enabled ? accountDetailsHTML(m, crime.accountKey) : expand.open ? projectsHTML(m, expand.topProjects) : ""}
+      ${breakdown.enabled ? accountDetailsHTML(m, breakdown.accountKey, breakdown.model) : expand.open ? projectsHTML(m, expand.topProjects, expand.model) : ""}
     </div>`;
 }
 
-function accountDetailsHTML(m: MemberView, accountKey: string): string {
-  const accounts = m.by_account.filter((a) => accountKey === "all" || a.account_key === accountKey);
+function accountDetailsHTML(m: MemberView, accountKey: string, model: string): string {
+  const accounts = m.by_account.filter((a) => accountKey === "all" || a.account_key === accountKey)
+    .map((a) => {
+      const by_model = a.by_model.filter((x) => model === "all" || x.model === model);
+      return { ...a, ...sumModels(by_model), by_model };
+    }).filter((a) => a.by_model.length > 0);
   if (accounts.length === 0) {
-    return `<div class="crime-records"><div class="team-proj-empty">no usage for this account</div></div>`;
+    return `<div class="breakdown-records"><div class="team-proj-empty">no usage for this account</div></div>`;
   }
   const rows = accounts
     .map((account) => {
@@ -214,7 +192,7 @@ function accountDetailsHTML(m: MemberView, accountKey: string): string {
             model.cost > 0
               ? `${formatTokens(model.tokens)} · ${formatDollars(model.cost)}`
               : formatTokens(model.tokens);
-          return `<div class="crime-model"><span>${escapeHTML(model.display_name)}</span><span>${escapeHTML(
+          return `<div class="breakdown-model"><span>${escapeHTML(model.display_name)}</span><span>${escapeHTML(
             modelValue,
           )}</span></div>`;
         })
@@ -228,9 +206,9 @@ function accountDetailsHTML(m: MemberView, accountKey: string): string {
           : unknown
             ? "Unknown account · before tracking"
             : `${providerLabel(account.provider)} · ${account.account_label}`;
-      const uncertain = m.is_legacy || hidden || unknown ? " crime-unknown" : "";
-      return `<div class="crime-account${uncertain}">
-        <div class="crime-account-head">
+      const uncertain = m.is_legacy || hidden || unknown ? " breakdown-unknown" : "";
+      return `<div class="breakdown-account${uncertain}">
+        <div class="breakdown-account-head">
           <span>${escapeHTML(accountName)}</span>
           <span>${escapeHTML(value)}</span>
         </div>
@@ -238,7 +216,7 @@ function accountDetailsHTML(m: MemberView, accountKey: string): string {
       </div>`;
     })
     .join("");
-  return `<div class="crime-records">${rows}</div>`;
+  return `<div class="breakdown-records">${rows}</div>`;
 }
 
 function providerLabel(provider: string): string {
@@ -248,8 +226,12 @@ function providerLabel(provider: string): string {
 }
 
 // The top projects for a member (desc by tokens), shown when the row is open.
-function projectsHTML(m: MemberView, topProjects: number): string {
-  const list = m.by_project.slice(0, Math.max(1, topProjects));
+function projectsHTML(m: MemberView, topProjects: number, model: string): string {
+  const list = m.by_project.map((p) => model === "all" ? p : {
+    ...p, ...sumModels((p.by_model ?? []).filter((x) => x.model === model)),
+  }).filter((p) => p.tokens > 0 || p.cost > 0)
+    .sort((a, b) => b.tokens - a.tokens || a.project.localeCompare(b.project))
+    .slice(0, Math.max(1, topProjects));
   if (list.length === 0) {
     return `<div class="team-projects"><div class="team-proj-empty">no project activity in this range</div></div>`;
   }

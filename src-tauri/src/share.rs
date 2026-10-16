@@ -11,32 +11,11 @@
 //! this_machine = cost_this_machine / Q ,   others = U − this_machine
 //! ```
 //!
-//! We estimate the one scalar `Q` per (provider, window). Both Claude and Codex
-//! meter by model-weighted token cost, so local **dollar cost** (priced via
-//! `pricing.json`) is the bridge; `Q` absorbs the unknown credit↔dollar factor.
-//!
-//! Key trick (the "automatic calibration"): other devices can only *add* to `U`,
-//! so over any interval the ratio `r = Δlocal_cost / ΔU` is always **≤ Q**
-//! (others inflate the denominator). Its **high percentile** = `Q` — captured
-//! from the intervals where this machine was the sole/dominant contributor, with
-//! no need to know when those were. Recency weighting lets `Q` re-learn after a
-//! limit change or free reset.
-//!
-//! Which intervals, and how they're weighted, is what makes this hold up:
-//!
-//! - **Only this machine's active intervals count**, and each ratio is weighted
-//!   by this machine's spend in it. A poll where this machine spent nothing says
-//!   nothing about `Q`; whatever `U` did meanwhile was other devices (excluded
-//!   from the denominator entirely). Counting one ratio per poll instead — the
-//!   original design, over the cumulative `cost / U` since the window began —
-//!   let a long idle stretch after another device had burned repeat one
-//!   depressed ratio hundreds of times and drag `Q` down to it, which surfaced
-//!   as a confident "this machine ~15%" on a window this machine had barely
-//!   touched. The cumulative form also sank for the rest of a cycle whenever
-//!   another device went *first*: every later ratio inherited that head start.
-//! - **Intervals are merged until `U` has moved by [`MIN_DU`]** so the 1%
-//!   quantisation of the provider's figure stays a bounded error rather than
-//!   noise that swamps the slope.
+//! API-equivalent cost is a proxy, not the provider's published metering formula.
+//! Fit contiguous intervals so delayed quota updates are paired with pending
+//! local spend. Automatic robust regression uses changes in activity to separate
+//! local usage from background account usage. Unidentifiable fits stay hidden. Account,
+//! pricing, reset and duration boundaries prevent unrelated histories mixing.
 
 use crate::usage::UsageReport;
 use serde::{Deserialize, Serialize};
@@ -48,39 +27,21 @@ use tauri::{AppHandle, Manager};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ShareSample {
     pub ts: i64,
+    #[serde(default)]
+    pub reset_ts: Option<i64>,
     pub u: f64,
     pub local_cost: f64,
-    /// Recorded while the user asserted "I'm the only active device" — these
-    /// intervals are trusted as the single-device floor (weighted up in the fit).
-    /// `#[serde(default)]` so samples written before this field still load.
+    /// Legacy field retained for reading old histories; never trusted by the fit.
     #[serde(default)]
     pub calibrated: bool,
 }
 
-/// Keep ~16 days so the weekly fit always has a baseline; the file persists
-/// across restarts (the weekly/monthly fits need days of history).
-const SHARE_RETAIN_SECS: i64 = 16 * 86_400;
-/// Beyond this age, thin to one sample per `THIN_BUCKET_SECS` to bound file size.
-const RECENT_FULL_SECS: i64 = 2 * 3600;
-const THIN_BUCKET_SECS: i64 = 15 * 60;
-/// High percentile of the interval ratio `Δlocal_cost / ΔU` = the window budget
-/// `Q` (sole-device-dominant intervals sit near it; others-active ones below).
-const RATIO_PCTILE: f64 = 0.80;
-/// An interval must move `U` by at least this much before it yields a ratio;
-/// smaller moves are merged into the next. The provider quantises `U` to 1%, so
-/// this bounds a ratio's quantisation error to ±20%.
+/// Preserve interval boundaries; thinning cumulative samples changes the fit.
+const SHARE_RETAIN_SECS: i64 = 64 * 86_400;
 const MIN_DU: f64 = 0.05;
-/// Need at least this many usable ratio samples to attempt a fit.
-const MIN_RATIO_SAMPLES: usize = 3;
-/// Ratios within ±this of the fitted `Q` count as sole-device evidence *for* it.
+const MAX_SAMPLE_AGE: i64 = 15 * 60;
+const MAX_SAMPLE_GAP: i64 = 30 * 60;
 const SUPPORT_TOL: f64 = 0.25;
-/// Confidence saturates once this machine's (recency-weighted) spend observed at
-/// ratios consistent with `Q` reaches this fraction of the budget — i.e. this
-/// machine has itself moved the window by that much, well clear of the 1%
-/// quantisation of the provider's utilization figure.
-const CONF_TARGET_FRAC: f64 = 0.25;
-/// Weight multiplier for samples the user marked sole-device (calibration).
-const CALIB_BOOST: f64 = 4.0;
 
 /// Claude's ambient poll and a foreground Codex refresh can update the shared
 /// history file at the same time. Serialize the whole read/modify/write cycle;
@@ -128,107 +89,204 @@ pub fn estimate(
     live_u: f64,
     cycle_secs: i64,
 ) -> Option<ShareResult> {
-    let current_c = samples.last()?.local_cost;
+    let current = samples.last()?;
+    if cycle_secs <= 0
+        || !live_u.is_finite()
+        || !(0.0..1.0).contains(&live_u)
+        || now < current.ts
+        || now - current.ts > MAX_SAMPLE_AGE
+        || !current.local_cost.is_finite()
+        || current.local_cost < 0.0
+        || (live_u - current.u).abs() > 0.015
+        || current.reset_ts.is_some_and(|reset| reset <= now)
+    {
+        return None;
+    }
 
-    // Implied-budget ratios r = Δlocal_cost / ΔU over this machine's active
-    // intervals (see the module docs). Each is ≤ the true Q — other devices can
-    // only inflate ΔU — so the high percentile is the sole-device-dominant
-    // budget. Weighted by this machine's spend in the interval, times recency,
-    // times the calibration boost for samples the user asserted sole-device.
-    let mut ratios: Vec<(f64, f64)> = Vec::new(); // (r, weight)
-
-    // Consecutive active intervals accumulate here until U has moved enough
-    // (MIN_DU) for their ratio to be worth emitting.
+    let mut ratios = Vec::new();
     let (mut acc_c, mut acc_u) = (0.0, 0.0);
-    let mut prev: Option<&ShareSample> = None;
-    for s in samples {
-        let Some(p) = prev else {
-            prev = Some(s);
-            continue;
-        };
-        prev = Some(s);
-        // Either figure falling back means the window reset (or was
-        // re-aligned) since the last sample: nothing spans that boundary.
-        if s.local_cost + 1e-9 < p.local_cost || s.u + 1e-9 < p.u {
+    for pair in samples.windows(2) {
+        let (p, s) = (&pair[0], &pair[1]);
+        if !valid_sample(p)
+            || !valid_sample(s)
+            || s.ts <= p.ts
+            || s.ts > now
+            || s.ts - p.ts > MAX_SAMPLE_GAP
+            || s.reset_ts != p.reset_ts
+            || s.local_cost < p.local_cost
+            || s.u < p.u
+            || p.u >= 0.99
+            || s.u >= 0.99
+        {
             acc_c = 0.0;
             acc_u = 0.0;
             continue;
         }
         let dc = s.local_cost - p.local_cost;
-        if dc <= 1e-9 {
-            // This machine spent nothing here. Whatever U did was other devices
-            // (or the provider registering earlier spend late): leave it out of
-            // the denominator rather than let it depress the running ratio.
+        // Idle-only stretches provide no slope. Once spend is pending, retain
+        // ALL quota changes, including delayed updates on idle polls.
+        if acc_c == 0.0 && dc <= 1e-9 {
             continue;
         }
         acc_c += dc;
         acc_u += s.u - p.u;
-        // Epsilon: sums of 1%-quantised deltas land at 0.04999… as easily as
-        // 0.05000…, and a ratio held back by that merges a clean stretch into
-        // whatever contaminated one follows.
         if acc_u + 1e-9 < MIN_DU {
             continue;
         }
-        let r = acc_c / acc_u;
+        let ratio = acc_c / acc_u;
         let recency = 0.5_f64.powf((now - s.ts) as f64 / cycle_secs as f64);
-        let calib = if s.calibrated { CALIB_BOOST } else { 1.0 };
-        ratios.push((r, acc_c * recency * calib));
+        let evidence = (ratio, acc_u * recency);
+        ratios.push(evidence);
         acc_c = 0.0;
         acc_u = 0.0;
     }
 
-    let mut q = f64::NAN;
-    let mut confidence = 0.0;
-    if ratios.len() >= MIN_RATIO_SAMPLES {
-        if let Some(qq) = weighted_percentile(&ratios, RATIO_PCTILE) {
-            if qq > 0.0 {
-                q = qq;
-                // Support: how much of this machine's (recency-weighted) spend
-                // was observed at ratios consistent with Q — the sole-device
-                // evidence the fit actually rests on — as a fraction of the
-                // budget. Others-active samples sit far below Q; they neither
-                // support nor (as the old "is the ratio steady" score did)
-                // penalise it, since a depressed-but-steady ratio is exactly
-                // what another device's usage looks like.
-                let support: f64 = ratios
-                    .iter()
-                    .filter(|(r, _)| {
-                        *r >= qq * (1.0 - SUPPORT_TOL) && *r <= qq * (1.0 + SUPPORT_TOL)
-                    })
-                    .map(|(_, w)| w)
-                    .sum();
-                let c_support = (support / qq / CONF_TARGET_FRAC).clamp(0.0, 1.0);
-                let latest = samples.last().map(|s| s.ts).unwrap_or(now);
-                let c_rec = 0.5_f64.powf((now - latest) as f64 / cycle_secs as f64);
-                confidence = (c_support * c_rec).clamp(0.0, 1.0);
-            }
-        }
+    // The ratio envelope is a useful provisional value, but cannot distinguish
+    // two devices working in fixed proportion. Only an identifiable automatic
+    // fit may graduate into the visible split.
+    let automatic = automatic_fit(samples, now, cycle_secs);
+    let q = automatic
+        .map(|f| f.0)
+        .or_else(|| weighted_percentile(&ratios, 0.8))?;
+    if !q.is_finite() || q <= 0.0 {
+        return None;
     }
-    if !(q.is_finite() && q > 0.0) {
-        // Cold start: too little data. Assume sole device (Q = C/U) but keep
-        // confidence low so the UI stays hidden until samples accumulate.
-        if live_u > 0.01 && current_c > 0.0 {
-            q = current_c / live_u;
-            confidence = 0.15;
-        } else {
-            return None;
-        }
+    let mut confidence = automatic.map_or(0.2, |f| f.1);
+    // New evidence contradicting a previously learned budget hides the split
+    // promptly instead of continuing to attribute impossible local usage.
+    if ratios.iter().rev().take(3).count() == 3
+        && ratios.iter().rev().take(3).all(|(r, _)| *r > q * 1.5)
+    {
+        confidence = confidence.min(0.15);
     }
-
-    let raw_this = current_c / q;
+    let raw_this = current.local_cost / q;
+    // An impossible split indicates lag, a changed plan/model mix or bad local
+    // coverage. Do not conceal it by confidently clamping to "all this machine".
+    if raw_this > live_u + 0.02 {
+        confidence = confidence.min(0.15);
+    }
     let this_machine = raw_this.clamp(0.0, live_u);
-    let others = (live_u - this_machine).clamp(0.0, 1.0);
     Some(ShareResult {
         this_machine,
-        others,
+        others: live_u - this_machine,
         q,
         confidence,
     })
 }
 
+/// Ten-minute blocks absorb polling/rounding jitter. Fit quota/minute =
+/// local $/minute * slope + background quota/minute with Theil–Sen regression.
+/// Idle blocks participate as evidence, never as repeated cumulative ratios.
+/// Recent halves must independently agree: old plans or one lucky burst cannot
+/// make a confident split. This is a heuristic, not provider billing metering.
+fn automatic_fit(samples: &[ShareSample], now: i64, cycle: i64) -> Option<(f64, f64)> {
+    let mut blocks = Vec::new();
+    let (mut cost, mut quota, mut elapsed) = (0.0, 0.0, 0i64);
+    for pair in samples.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if !valid_sample(&a)
+            || !valid_sample(&b)
+            || b.ts <= a.ts
+            || b.ts > now
+            || now - a.ts > cycle.min(2 * 86400)
+            || b.ts - a.ts > MAX_SAMPLE_GAP
+            || a.reset_ts != b.reset_ts
+            || b.local_cost < a.local_cost
+            || b.u < a.u
+            || b.u >= 0.99
+        {
+            cost = 0.0;
+            quota = 0.0;
+            elapsed = 0;
+            continue;
+        }
+        cost += b.local_cost - a.local_cost;
+        quota += b.u - a.u;
+        elapsed += b.ts - a.ts;
+        if elapsed >= 600 {
+            let minutes = elapsed as f64 / 60.0;
+            blocks.push((cost / minutes, quota / minutes, quota));
+            cost = 0.0;
+            quota = 0.0;
+            elapsed = 0;
+        }
+    }
+    let blocks = &blocks[blocks.len().saturating_sub(96)..];
+    if blocks.len() < 8 || blocks.iter().filter(|b| b.0 > 1e-9).count() < 4 {
+        return None;
+    }
+    let support: f64 = blocks.iter().map(|b| b.2).sum();
+    if support < 0.10 {
+        return None;
+    }
+    let (slope, error) = robust_slope(blocks)?;
+    let mid = blocks.len() / 2;
+    let early = robust_slope(&blocks[..mid])?.0;
+    let late = robust_slope(&blocks[mid..])?.0;
+    if (early / late - 1.0).abs() > SUPPORT_TOL || (late / slope - 1.0).abs() > SUPPORT_TOL {
+        return None;
+    }
+    Some((
+        1.0 / slope,
+        (support / 0.25).min(1.0) * (1.0 - error).powi(2),
+    ))
+}
+
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    Some((values[(n - 1) / 2] + values[n / 2]) / 2.0)
+}
+
+fn robust_slope(blocks: &[(f64, f64, f64)]) -> Option<(f64, f64)> {
+    let max_x = blocks.iter().map(|b| b.0).fold(0.0_f64, f64::max);
+    let min_x = blocks.iter().map(|b| b.0).fold(f64::INFINITY, f64::min);
+    // Constant local activity is not identifiable, regardless of sample count.
+    if max_x <= 1e-9 || max_x - min_x < max_x * 0.4 {
+        return None;
+    }
+    let mut slopes = Vec::new();
+    for (i, a) in blocks.iter().enumerate() {
+        for b in &blocks[i + 1..] {
+            if (a.0 - b.0).abs() >= max_x * 0.25 {
+                slopes.push((a.1 - b.1) / (a.0 - b.0));
+            }
+        }
+    }
+    let slope = median(slopes)?;
+    if !slope.is_finite() || slope <= 0.0 {
+        return None;
+    }
+    let intercept = median(blocks.iter().map(|b| b.1 - slope * b.0).collect())?;
+    let total_y: f64 = blocks.iter().map(|b| b.1).sum();
+    if total_y <= 0.0 || intercept < -0.0005 {
+        return None;
+    }
+    let error = blocks
+        .iter()
+        .map(|b| (b.1 - slope * b.0 - intercept.max(0.0)).abs())
+        .sum::<f64>()
+        / total_y;
+    if error > 0.15 {
+        return None;
+    }
+    Some((slope, error))
+}
+
+fn valid_sample(s: &ShareSample) -> bool {
+    s.u.is_finite() && (0.0..=1.0).contains(&s.u) && s.local_cost.is_finite() && s.local_cost >= 0.0
+}
+
 /// Weighted step percentile of `(value, weight)` pairs (value ascending).
 fn weighted_percentile(pairs: &[(f64, f64)], p: f64) -> Option<f64> {
-    let mut v: Vec<(f64, f64)> = pairs.iter().copied().filter(|(_, w)| *w > 0.0).collect();
+    let mut v: Vec<(f64, f64)> = pairs
+        .iter()
+        .copied()
+        .filter(|(v, w)| v.is_finite() && w.is_finite() && *v > 0.0 && *w > 0.0)
+        .collect();
     if v.is_empty() {
         return None;
     }
@@ -261,18 +319,24 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
-fn key(provider: &str, title: &str) -> String {
-    // v1 Codex samples stamped a cached rollout snapshot with every poll's
-    // wall-clock time and paired it with cost ending at that later time. They
-    // cannot be repaired from the persisted fields alone; worse, their future
-    // timestamps can make `record_at` reject the first correctly stamped
-    // snapshot after an upgrade. Start Codex's fit clean so the UI says
-    // "estimating" rather than carrying a confident false split forward.
-    if provider == "codex" {
-        format!("codex-v2/{title}")
-    } else {
-        format!("{provider}/{title}")
+fn key(provider: &str, title: &str, account: &str, cycle: i64, pricing: &str) -> String {
+    format!("v4/{provider}/{account}/{cycle}/{pricing}/{title}")
+}
+
+fn current_account(provider: &str) -> Option<String> {
+    match provider {
+        "codex" => crate::account::codex_identity(),
+        "claude" => crate::account::claude_identity(),
+        _ => None,
     }
+    .map(|i| i.account_key)
+}
+
+fn cycle_secs(w: &crate::usage::UsageWindow) -> i64 {
+    w.window_minutes
+        .filter(|m| *m > 0)
+        .and_then(|m| m.checked_mul(60))
+        .unwrap_or_else(|| window_secs_for_title(&w.title))
 }
 
 fn history_path(app: &AppHandle) -> Option<std::path::PathBuf> {
@@ -299,46 +363,18 @@ fn save_history(app: &AppHandle, h: &HashMap<String, Vec<ShareSample>>) {
     }
 }
 
-/// Drop samples past the retention horizon, then thin everything older than the
-/// recent window to one per bucket (keeps the file small for weekly/monthly).
 fn prune_and_thin(v: &mut Vec<ShareSample>, now: i64) {
-    v.retain(|s| now - s.ts <= SHARE_RETAIN_SECS);
-    let mut out: Vec<ShareSample> = Vec::with_capacity(v.len());
-    let mut last_bucket = i64::MIN;
-    for s in v.iter() {
-        if now - s.ts <= RECENT_FULL_SECS {
-            out.push(*s);
-        } else {
-            let bucket = s.ts / THIN_BUCKET_SECS;
-            if bucket != last_bucket {
-                out.push(*s);
-                last_bucket = bucket;
-            }
-        }
-    }
-    *v = out;
+    v.retain(|s| s.ts <= now && now - s.ts <= SHARE_RETAIN_SECS && valid_sample(s));
 }
 
-/// The local time span whose cost pairs with a utilization figure reported at
-/// `at`, for a window of `window_secs` whose reset instant is `reset_ts`:
-///
-/// - reset still ahead: the window is `[reset − length, at]`;
-/// - reset already passed: the provider hasn't published the new window's clock
-///   yet (Claude keeps reporting the old `resets_at` for a while after a reset;
-///   a Codex rollout snapshot is only as fresh as the last turn). Whatever the
-///   new window holds was spent *after* the old reset, so count from there.
-///   Sliding a whole window back from a stale reset — the old behaviour —
-///   dragged the previous cycle's spend into the new one, which is how a window
-///   this machine hadn't touched since the reset came out at "this machine 15%";
-/// - a whole window or more past the reset: a cycle stale, unalignable → `None`.
+/// Align an observation with a still-active provider reset boundary. An expired
+/// or implausible reset is ambiguous; wait for a fresh report instead of pairing
+/// previous-cycle utilization with new-cycle cost.
 pub fn window_span(reset_ts: i64, window_secs: i64, at: i64) -> Option<(i64, i64)> {
-    if reset_ts > at {
-        Some(((reset_ts - window_secs).min(at - 1), at))
-    } else if at - reset_ts < window_secs {
-        Some((reset_ts, at))
-    } else {
-        None
+    if window_secs <= 0 || reset_ts <= at || reset_ts - at > window_secs {
+        return None;
     }
+    Some((reset_ts - window_secs, at))
 }
 
 /// This machine's cost over the span the provider's window covers as of `at`
@@ -347,26 +383,26 @@ pub fn window_span(reset_ts: i64, window_secs: i64, at: i64) -> Option<(i64, i64
 /// subscription).
 fn local_cost_in_window(
     provider: &str,
-    resets_at: Option<&str>,
-    title: &str,
+    account: &str,
+    reset_ts: i64,
+    cycle: i64,
     at: i64,
 ) -> Option<f64> {
-    let window_secs = window_secs_for_title(title);
-    let reset_ts = resets_at.and_then(parse_rfc3339)?;
-    let (start, end) = window_span(reset_ts, window_secs, at)?;
-    let cost = match provider {
-        "codex" => crate::codexstats::collect_local_range(start, end)
-            .iter()
-            .filter_map(|m| m.cost.as_ref())
-            .map(|c| c.total)
-            .sum(),
-        _ => crate::localstats::collect_range(start, end)
-            .iter()
-            .filter(|m| m.id.starts_with("claude"))
-            .filter_map(|m| m.cost.as_ref())
-            .map(|c| c.total)
-            .sum(),
+    let (start, end) = window_span(reset_ts, cycle, at)?;
+    // Logs use integer seconds: include the quota snapshot's own final turn.
+    let models = match provider {
+        "codex" => {
+            crate::codexstats::collect_local_range_for_account(start, end + 1, Some(account))?
+        }
+        _ => crate::localstats::collect_range_for_account(start, end + 1, Some(account))?,
     };
+    let mut cost = 0.0;
+    for model in models {
+        if model.unattributed > 0 {
+            return None;
+        }
+        cost += model.cost?.total;
+    }
     Some(cost)
 }
 
@@ -390,9 +426,14 @@ pub fn record_at(app: &AppHandle, provider: &str, report: &UsageReport, at: i64)
         .unwrap_or_else(|e| e.into_inner());
     let mut hist = load_history(app);
     let now = now_unix();
-    // Are we in a user-asserted "only active device" window? Those samples are
-    // trusted as the single-device floor by the estimator.
-    let calibrated = crate::ambient::load_settings(app).only_active_device;
+    if at > now || now - at > MAX_SAMPLE_AGE {
+        return;
+    }
+    let Some(account) = current_account(provider) else {
+        return;
+    };
+    let pricing = crate::pricing::Pricing::loaded().fingerprint();
+    let calibrated = false; // legacy user override is intentionally ignored
     for w in &report.windows {
         if w.trailing.as_deref() == Some("Off") || w.resets_at.is_none() {
             continue;
@@ -402,7 +443,11 @@ pub fn record_at(app: &AppHandle, provider: &str, report: &UsageReport, at: i64)
         if crate::usage::is_model_scoped_title(&w.title) {
             continue;
         }
-        let k = key(provider, &w.title);
+        let cycle = cycle_secs(w);
+        let Some(reset_ts) = w.resets_at.as_deref().and_then(parse_rfc3339) else {
+            continue;
+        };
+        let k = key(provider, &w.title, &account, cycle, &pricing);
         if hist
             .get(&k)
             .and_then(|v| v.last())
@@ -410,12 +455,13 @@ pub fn record_at(app: &AppHandle, provider: &str, report: &UsageReport, at: i64)
         {
             continue; // already observed this instant (or something newer)
         }
-        let Some(cost) = local_cost_in_window(provider, w.resets_at.as_deref(), &w.title, at)
-        else {
+        let Some(cost) = local_cost_in_window(provider, &account, reset_ts, cycle, at) else {
+            hist.remove(&k); // never annotate a previous, now incomplete sample
             continue;
         };
         hist.entry(k).or_default().push(ShareSample {
             ts: at,
+            reset_ts: Some(reset_ts),
             u: w.utilization,
             local_cost: cost,
             calibrated,
@@ -440,15 +486,28 @@ pub fn annotate(app: &AppHandle, provider: &str, report: &mut UsageReport) {
         .unwrap_or_else(|e| e.into_inner());
     let hist = load_history(app);
     let now = now_unix();
+    let account = current_account(provider);
+    let pricing = crate::pricing::Pricing::loaded().fingerprint();
     for w in &mut report.windows {
+        w.machine_share = None;
+        w.others_share = None;
+        w.share_confidence = None;
+        w.window_budget = None;
+        let Some(account) = &account else {
+            continue;
+        };
         if w.trailing.as_deref() == Some("Off") || crate::usage::is_model_scoped_title(&w.title) {
             continue;
         }
+        let cycle = cycle_secs(w);
         let series = hist
-            .get(&key(provider, &w.title))
+            .get(&key(provider, &w.title, account, cycle, &pricing))
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
-        let cycle = window_secs_for_title(&w.title);
+        let reset = w.resets_at.as_deref().and_then(parse_rfc3339);
+        if reset.is_none() || series.last().map(|s| s.reset_ts) != Some(reset) {
+            continue;
+        }
         if let Some(r) = estimate(series, now, w.utilization, cycle) {
             w.machine_share = Some(r.this_machine);
             w.others_share = Some(r.others);
@@ -471,6 +530,7 @@ mod tests {
     fn series_calib(now: i64, incs: &[(f64, f64)], calibrated: bool) -> Vec<ShareSample> {
         let n = incs.len();
         let mut out = vec![ShareSample {
+            reset_ts: None,
             ts: now - (n as i64) * 300,
             u: 0.0,
             local_cost: 0.0,
@@ -481,6 +541,7 @@ mod tests {
             c += dc;
             u += du;
             out.push(ShareSample {
+                reset_ts: None,
                 ts: now - (n as i64 - 1 - i as i64) * 300,
                 u,
                 local_cost: c,
@@ -488,6 +549,72 @@ mod tests {
             });
         }
         out
+    }
+
+    #[test]
+    fn delayed_quota_updates_include_idle_polls() {
+        let now = 1_000_000;
+        let mut incs = Vec::new();
+        for _ in 0..4 {
+            incs.extend([(10.0, 0.01), (0.0, 0.09)]);
+        }
+        let r = estimate(&series_calib(now, &incs, true), now, 0.40, 18_000).unwrap();
+        assert!((r.q - 100.0).abs() < 1e-6);
+        assert!((r.this_machine - 0.40).abs() < 1e-6);
+        assert!(r.confidence < 0.35);
+    }
+
+    #[test]
+    fn concurrent_devices_cannot_be_identified_from_a_stable_slope() {
+        let now = 1_000_000;
+        let r = estimate(&series(now, &[(10.0, 0.10); 5]), now, 0.50, 18_000).unwrap();
+        assert!(r.confidence < 0.35);
+    }
+
+    #[test]
+    fn stale_mismatched_saturated_and_invalid_snapshots_are_hidden() {
+        let now = 1_000_000;
+        let s = series_calib(now, &[(10.0, 0.10); 5], true);
+        assert!(estimate(&s, now + MAX_SAMPLE_AGE + 1, 0.50, 604_800).is_none());
+        assert!(estimate(&s, now, 0.10, 18_000).is_none());
+        for u in [f64::NAN, f64::INFINITY, -0.1, 1.0, 1.1] {
+            assert!(estimate(&s, now, u, 18_000).is_none());
+        }
+        assert!(estimate(&s, now - 1, 0.50, 18_000).is_none());
+    }
+
+    #[test]
+    fn reset_boundaries_are_respected_and_legacy_toggle_is_ignored() {
+        let now = 1_000_000;
+        let mut s = series_calib(now, &[(10.0, 0.10); 5], true);
+        for (i, sample) in s.iter_mut().enumerate() {
+            sample.reset_ts = Some(now + 100 + i as i64);
+        }
+        assert!(estimate(&s, now, 0.50, 18_000).is_none());
+        for (i, sample) in s.iter_mut().enumerate() {
+            sample.reset_ts = None;
+            sample.calibrated = i % 2 == 0;
+        }
+        assert!(estimate(&s, now, 0.50, 18_000).unwrap().confidence < 0.35);
+    }
+
+    #[test]
+    fn history_is_isolated_by_account_duration_and_prices() {
+        let a = key("claude", "Weekly", "a", 604800, "prices1");
+        assert_ne!(a, key("claude", "Weekly", "b", 604800, "prices1"));
+        assert_ne!(a, key("claude", "Weekly", "a", 604800, "prices2"));
+        assert_ne!(a, key("claude", "Weekly", "a", 18000, "prices1"));
+    }
+
+    #[test]
+    fn inconsistent_calibration_stays_uncertain() {
+        let now = 1_000_000;
+        let s = series_calib(
+            now,
+            &[(5.0, 0.1), (50.0, 0.1), (10.0, 0.1), (100.0, 0.1)],
+            true,
+        );
+        assert!(estimate(&s, now, 0.4, 18_000).unwrap().confidence < 0.35);
     }
 
     #[test]
@@ -508,21 +635,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_codex_history_is_not_reused() {
-        assert_eq!(key("codex", "Weekly"), "codex-v2/Weekly");
-        assert_eq!(key("claude", "Weekly"), "claude/Weekly");
-    }
-
-    #[test]
     fn steady_single_device_attributes_all_to_this_machine() {
         let now = 1_000_000;
         // cost and U rise together: Q = $100 (each $10 → 0.10 of the window).
-        let s = series(now, &[(10.0, 0.10); 5]);
+        let s = series_calib(now, &[(10.0, 0.10); 5], true);
         let r = estimate(&s, now, 0.50, 18_000).unwrap();
-        assert!((r.this_machine - 0.50).abs() < 0.02, "this={}", r.this_machine);
+        assert!(
+            (r.this_machine - 0.50).abs() < 0.02,
+            "this={}",
+            r.this_machine
+        );
         assert!(r.others < 0.02, "others={}", r.others);
         assert!((r.q - 100.0).abs() < 5.0, "q={}", r.q);
-        assert!(r.confidence > 0.35, "conf={}", r.confidence);
+        assert!(r.confidence < 0.35, "constant activity must stay uncertain");
     }
 
     #[test]
@@ -559,20 +684,86 @@ mod tests {
     }
 
     #[test]
-    fn calibration_boosts_confidence_for_sole_device() {
+    fn automatic_fit_learns_without_a_user_toggle() {
         let now = 1_000_000;
-        // A short sole-device run (Q≈100) that has only moved the window 18% —
-        // not yet enough spend for full confidence on its own.
-        let incs = [(3.0, 0.03); 6];
-        let plain = estimate(&series_calib(now, &incs, false), now, 0.18, 18_000).unwrap();
-        let calib = estimate(&series_calib(now, &incs, true), now, 0.18, 18_000).unwrap();
-        assert!((calib.this_machine - 0.18).abs() < 0.02);
+        // Repeated natural idle / light / heavy usage, with another device
+        // consuming a steady 1% per ten minutes. True budget is $200.
+        let incs: Vec<_> = [0.0, 4.0, 12.0, 2.0, 0.0, 8.0, 16.0, 4.0]
+            .into_iter()
+            .flat_map(|c| [(c / 2.0, c / 400.0 + 0.005); 2])
+            .collect();
+        let s = series(now, &incs);
+        let u = s.last().unwrap().u;
+        let r = estimate(&s, now, u, 18_000).unwrap();
+        assert!((r.q - 200.0).abs() < 1e-6);
+        assert!((r.others - 0.08).abs() < 1e-6);
+        assert!(r.confidence > 0.6);
+    }
+
+    #[test]
+    fn automatic_fit_absorbs_delayed_updates_and_small_quota_rounding() {
+        let now = 1_000_000;
+        let mut incs = Vec::new();
+        for (i, c) in [0.0, 4.0, 12.0, 2.0, 0.0, 8.0, 16.0, 4.0]
+            .into_iter()
+            .enumerate()
+        {
+            // Spend first, delayed quota on the next poll; ±0.1 percentage
+            // point provider rounding on each whole block.
+            let jitter: f64 = if i % 2 == 0 { 0.001 } else { -0.001 };
+            incs.extend([(c, 0.0), (0.0, (c / 200.0 + jitter).max(0.0))]);
+        }
+        let s = series(now, &incs);
+        let r = estimate(&s, now, s.last().unwrap().u, 18_000).unwrap();
+        assert!((r.q / 200.0 - 1.0).abs() < 0.05);
+        assert!(r.confidence > 0.6);
+        assert!(r.others < 0.02);
+    }
+
+    #[test]
+    fn gaps_do_not_manufacture_automatic_evidence() {
+        let now = 1_000_000;
+        let incs: Vec<_> = [0.0, 4.0, 12.0, 2.0, 0.0, 8.0, 16.0, 4.0]
+            .into_iter()
+            .flat_map(|c| [(c / 2.0, c / 400.0 + 0.005); 2])
+            .collect();
+        let mut s = series(now, &incs);
+        let n = s.len();
+        for (i, sample) in s.iter_mut().enumerate() {
+            sample.ts = now - ((n - 1 - i) as i64) * (MAX_SAMPLE_GAP + 1);
+        }
+        assert!(estimate(&s, now, s.last().unwrap().u, 604800).is_none());
+    }
+
+    #[test]
+    fn automatic_fit_rejects_changed_budget_and_unrelated_activity() {
+        let now = 1_000_000;
+        let costs = [0.0, 4.0, 12.0, 2.0, 0.0, 8.0, 16.0, 4.0];
+        let incs: Vec<_> = costs
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                let q = if i < 4 { 200.0 } else { 400.0 };
+                [(c / 2.0, c / q / 2.0 + 0.005); 2]
+            })
+            .collect();
+        let s = series(now, &incs);
         assert!(
-            calib.confidence > plain.confidence,
-            "calib {} should exceed plain {}",
-            calib.confidence,
-            plain.confidence
+            estimate(&s, now, s.last().unwrap().u, 18_000)
+                .unwrap()
+                .confidence
+                < 0.35
         );
+    }
+
+    #[test]
+    fn legacy_manual_assertion_cannot_force_confidence() {
+        let now = 1_000_000;
+        let incs = [(10.0, 0.10); 5];
+        let a = estimate(&series_calib(now, &incs, false), now, 0.5, 18_000).unwrap();
+        let b = estimate(&series_calib(now, &incs, true), now, 0.5, 18_000).unwrap();
+        assert_eq!(a.confidence, b.confidence);
+        assert!(b.confidence < 0.35);
     }
 
     /// The bug behind "this machine ~15% of a window it barely touched": a short
@@ -592,7 +783,11 @@ mod tests {
         // u = 0.40 now; this machine's true share is $60 / $300 = 20%.
         let r = estimate(&s, now, 0.40, 604_800).unwrap();
         assert!((r.q - 300.0).abs() < 30.0, "q={}", r.q);
-        assert!((r.this_machine - 0.20).abs() < 0.03, "this={}", r.this_machine);
+        assert!(
+            (r.this_machine - 0.20).abs() < 0.03,
+            "this={}",
+            r.this_machine
+        );
         assert!((r.others - 0.20).abs() < 0.03, "others={}", r.others);
     }
 
@@ -607,7 +802,11 @@ mod tests {
         let s = series(now, &incs);
         let r = estimate(&s, now, 0.60, 604_800).unwrap();
         assert!((r.q - 200.0).abs() < 20.0, "q={}", r.q);
-        assert!((r.this_machine - 0.30).abs() < 0.03, "this={}", r.this_machine);
+        assert!(
+            (r.this_machine - 0.30).abs() < 0.03,
+            "this={}",
+            r.this_machine
+        );
         assert!((r.others - 0.30).abs() < 0.03, "others={}", r.others);
     }
 
@@ -624,7 +823,11 @@ mod tests {
         let s = series(now, &incs);
         let r = estimate(&s, now, 0.62, 604_800).unwrap();
         assert!((r.q - 500.0).abs() < 50.0, "q={}", r.q);
-        assert!((r.this_machine - 0.18).abs() < 0.03, "this={}", r.this_machine);
+        assert!(
+            (r.this_machine - 0.18).abs() < 0.03,
+            "this={}",
+            r.this_machine
+        );
         assert!(r.others > 0.42, "others={}", r.others);
     }
 
@@ -635,10 +838,9 @@ mod tests {
         // Reset ahead: the window started a week before it.
         assert_eq!(window_span(at + 100, week, at), Some((at + 100 - week, at)));
         // Reset implausibly far ahead: never a negative span.
-        assert_eq!(window_span(at + 2 * week, week, at), Some((at - 1, at)));
-        // Reset passed but the clock not yet republished: count from the reset,
-        // not a whole window back from it (which would re-count the old cycle).
-        assert_eq!(window_span(at - 3600, week, at), Some((at - 3600, at)));
+        assert_eq!(window_span(at + 2 * week, week, at), None);
+        // A passed reset cannot safely align the provider's reported usage.
+        assert_eq!(window_span(at - 3600, week, at), None);
         // A whole cycle stale: unalignable.
         assert_eq!(window_span(at - week, week, at), None);
     }
@@ -648,7 +850,7 @@ mod tests {
         let now = 1_000_000;
         // Two cycles separated by a reset (U and cost drop back to ~0).
         let mut s = series(now - 3_000, &[(10.0, 0.10); 3]); // cycle 1
-        // cycle 2 after a reset
+                                                             // cycle 2 after a reset
         let c2 = series(now, &[(10.0, 0.10); 3]);
         s.extend(c2);
         let r = estimate(&s, now, 0.30, 18_000).unwrap();

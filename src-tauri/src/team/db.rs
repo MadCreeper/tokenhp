@@ -210,6 +210,7 @@ const VISIBLE_MEMBER: &str = "
 /// One model's usage for a member over the range (for the per-model leaderboard).
 #[derive(Serialize, Clone)]
 pub struct ModelUsage {
+    pub cost_complete: bool,
     pub model: String,
     pub display_name: String,
     pub tokens: i64,
@@ -219,13 +220,14 @@ pub struct ModelUsage {
 /// One project's usage for a member over the range (for the expandable row).
 #[derive(Serialize, Clone)]
 pub struct ProjectUsage {
+    pub by_model: Vec<ModelUsage>,
     pub project: String,
     pub tokens: i64,
     pub cost: f64,
 }
 
 /// One login account's usage inside a member row. This is the data behind the
-/// optional "Crime records" drill-down and bill split.
+/// optional "Usage breakdown" drill-down and bill split.
 #[derive(Serialize, Clone)]
 pub struct AccountUsage {
     pub provider: String,
@@ -321,6 +323,61 @@ pub async fn fetch(cfg: &TeamConfig, range: &str) -> Result<TeamReport, String> 
     .map_err(|_| "Team refresh timed out after 30s.".to_string())?
 }
 
+/// Same identity/visibility rules as the leaderboard, aggregated by UTC day.
+/// Reads stored history only; opening a calendar never triggers a backfill.
+pub async fn fetch_calendar(
+    cfg: &TeamConfig,
+    year: i32,
+) -> Result<crate::calendar::CalendarReport, String> {
+    let (start, end) = crate::calendar::year_bounds(year)?;
+    tokio::time::timeout(FETCH_TIMEOUT, async {
+        let mut conn = connect(cfg).await?;
+        migrate(&mut conn.client).await?;
+        let sql = format!(
+            "{USAGE_CTE}
+            SELECT u.day::text AS day, u.model, u.member_id, m.display_name,
+                   u.account_key, MAX(u.account_label) AS account_label,
+                   SUM(u.tokens)::bigint AS tokens,
+                   SUM(u.cost)::double precision AS cost,
+                   BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS complete
+            FROM readable_usage u JOIN members m ON m.member_id=u.member_id
+            WHERE u.day >= $1::text::date AND u.day <= $2::text::date AND {VISIBLE_MEMBER}
+            GROUP BY u.day, u.model, u.member_id, m.display_name, u.account_key"
+        );
+        let rows = conn
+            .client
+            .query(&sql, &[&start, &end])
+            .await
+            .map_err(|e| e.to_string())?;
+        let entries = rows
+            .into_iter()
+            .map(|r| {
+                let model: String = r.get("model");
+                let member_id: String = r.get("member_id");
+                crate::calendar::CalendarEntry {
+                    day: r.get("day"),
+                    display_name: crate::localstats::display_name(&model),
+                    model,
+                    tool: String::new(),
+                    member: if member_id == cfg.member_id && !cfg.display_name.is_empty() {
+                        cfg.display_name.clone()
+                    } else {
+                        r.get("display_name")
+                    },
+                    member_id,
+                    account_key: r.get("account_key"),
+                    account_label: r.get("account_label"),
+                    tokens: r.get("tokens"),
+                    cost: r.get::<_, bool>("complete").then(|| r.get("cost")),
+                }
+            })
+            .collect();
+        Ok(crate::calendar::CalendarReport { year, entries })
+    })
+    .await
+    .map_err(|_| "Team calendar timed out after 30s.".to_string())?
+}
+
 /// The handshake: connect, migrate, write our member, read the roster back.
 pub async fn handshake(
     cfg: &TeamConfig,
@@ -396,7 +453,8 @@ async fn connect(cfg: &TeamConfig) -> Result<Conn, String> {
     tokio::time::timeout(
         SESSION_SETUP_TIMEOUT,
         client.batch_execute(
-            "SET lock_timeout = '5s';
+            "SET TIME ZONE 'UTC';
+             SET lock_timeout = '5s';
              SET statement_timeout = '30s';
              SET idle_in_transaction_session_timeout = '30s';",
         ),
@@ -562,23 +620,31 @@ fn drain_stderr(child: &mut Child) -> String {
 // --- migrations + queries ----------------------------------------------------
 
 async fn migrate(client: &mut Client) -> Result<(), String> {
-    client
-        .batch_execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY, applied_at timestamptz DEFAULT now())",
+    // Normal reads/uploads on an upgraded database must not contend for the
+    // migration lock. Rapid range changes used to fail here while another read
+    // held the lock, even though neither operation had any migration to run.
+    let latest = MIGRATIONS.last().map_or(0, |(version, _)| *version);
+    match client
+        .query_one(
+            "SELECT COALESCE(MAX(version), 0)::int FROM schema_migrations",
+            &[],
         )
         .await
-        .map_err(|e| format!("migrate (init) failed: {e}"))?;
-
-    let tx = client.transaction().await.map_err(|e| e.to_string())?;
-    // Serialize concurrent migrators; auto-released at commit.
-    let lock_acquired: bool = tx
-        .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&MIGRATE_LOCK])
-        .await
-        .map_err(|e| e.to_string())?
-        .get(0);
-    if !lock_acquired {
-        return Err("Team database migration is already in progress; retry shortly.".into());
+    {
+        Ok(row) if row.get::<_, i32>(0) >= latest => return Ok(()),
+        Ok(_) => {}
+        Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::UNDEFINED_TABLE) => {}
+        Err(e) => return Err(postgres_error("schema version check failed", e)),
     }
+    let tx = client.transaction().await.map_err(|e| e.to_string())?;
+    // Wait for a real migrator (bounded by the session's 5s lock_timeout), then
+    // recheck its committed version. Serialize initialization too, so concurrent
+    // first connections cannot race on CREATE TABLE's system-catalog entries.
+    tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&MIGRATE_LOCK])
+        .await
+        .map_err(|e| postgres_error("schema migration lock failed", e))?;
+    tx.batch_execute("CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY, applied_at timestamptz DEFAULT now())")
+        .await.map_err(|e| postgres_error("schema initialization failed", e))?;
     let current: i32 = tx
         .query_one(
             "SELECT COALESCE(MAX(version), 0)::int FROM schema_migrations",
@@ -787,19 +853,18 @@ fn prepare_usage_rows(cfg: &TeamConfig, rows: &[UsageRow]) -> Vec<PreparedUsage>
             project,
             model: row.model.clone(),
         };
-        let (input, output, cache_read, cache_create, unattributed, tokens) =
-            if cfg.share_tokens {
-                (
-                    row.input,
-                    row.output,
-                    row.cache_read,
-                    row.cache_create,
-                    row.unattributed,
-                    row.tokens,
-                )
-            } else {
-                (0, 0, 0, 0, 0, 0)
-            };
+        let (input, output, cache_read, cache_create, unattributed, tokens) = if cfg.share_tokens {
+            (
+                row.input,
+                row.output,
+                row.cache_read,
+                row.cache_create,
+                row.unattributed,
+                row.tokens,
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0)
+        };
         let cost = if cfg.share_cost { row.cost } else { 0.0 };
         let entry = prepared.entry(key).or_insert_with_key(|key| PreparedUsage {
             key: UsageKey {
@@ -1007,16 +1072,20 @@ fn append_placeholders(sql: &mut String, rows: usize, columns: usize) {
 
 fn postgres_error(context: &str, error: tokio_postgres::Error) -> String {
     match error.as_db_error() {
-        Some(db) => format!("{context}: {} (SQLSTATE {})", db.message(), db.code().code()),
+        Some(db) => format!(
+            "{context}: {} (SQLSTATE {})",
+            db.message(),
+            db.code().code()
+        ),
         None => format!("{context}: {error}"),
     }
 }
 
 async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<TeamReport, String> {
     let day_filter = match range {
-        "week" => "u.day >= current_date - 6",
-        "month" => "u.day >= current_date - 29",
-        _ => "u.day = current_date",
+        "week" => "u.day BETWEEN (now() AT TIME ZONE 'UTC')::date - 6 AND (now() AT TIME ZONE 'UTC')::date",
+        "month" => "u.day BETWEEN (now() AT TIME ZONE 'UTC')::date - 29 AND (now() AT TIME ZONE 'UTC')::date",
+        _ => "u.day = (now() AT TIME ZONE 'UTC')::date",
     };
 
     // Per-(member, model) totals for the range — the frontend slices this by
@@ -1024,7 +1093,8 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
     let usage_sql = format!(
         "{USAGE_CTE}
          SELECT u.member_id, u.model, SUM(u.tokens)::bigint AS tokens,
-                COALESCE(SUM(u.cost), 0)::double precision AS cost
+                COALESCE(SUM(u.cost), 0)::double precision AS cost,
+                BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS cost_complete
          FROM readable_usage u
          JOIN members m ON m.member_id=u.member_id
          WHERE {day_filter} AND {VISIBLE_MEMBER}
@@ -1045,6 +1115,7 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         let cost: f64 = row.get("cost");
         *model_totals.entry(model.clone()).or_default() += tokens;
         by_member.entry(member_id).or_default().push(ModelUsage {
+            cost_complete: row.get("cost_complete"),
             display_name: crate::localstats::display_name(&model),
             model,
             tokens,
@@ -1055,12 +1126,13 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
     // Per-(member, project) totals for the range (the expandable "top projects").
     let project_sql = format!(
         "{USAGE_CTE}
-         SELECT u.member_id, u.project, SUM(u.tokens)::bigint AS tokens,
-                COALESCE(SUM(u.cost), 0)::double precision AS cost
+         SELECT u.member_id, u.project, u.model, SUM(u.tokens)::bigint AS tokens,
+                COALESCE(SUM(u.cost), 0)::double precision AS cost,
+                BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS cost_complete
          FROM readable_usage u
          JOIN members m ON m.member_id=u.member_id
          WHERE {day_filter} AND {VISIBLE_MEMBER}
-         GROUP BY u.member_id, u.project"
+         GROUP BY u.member_id, u.project, u.model"
     );
     let project_rows = client
         .query(&project_sql, &[])
@@ -1070,23 +1142,41 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
         std::collections::HashMap::new();
     for row in &project_rows {
         let member_id: String = row.get("member_id");
-        projects_by_member
-            .entry(member_id)
-            .or_default()
-            .push(ProjectUsage {
-                project: row.get("project"),
-                tokens: row.get("tokens"),
-                cost: row.get("cost"),
+        let project: String = row.get("project");
+        let model: String = row.get("model");
+        let projects = projects_by_member.entry(member_id).or_default();
+        let index = projects
+            .iter()
+            .position(|p| p.project == project)
+            .unwrap_or_else(|| {
+                projects.push(ProjectUsage {
+                    project,
+                    tokens: 0,
+                    cost: 0.0,
+                    by_model: Vec::new(),
+                });
+                projects.len() - 1
             });
+        let usage = ModelUsage {
+            display_name: crate::localstats::display_name(&model),
+            model,
+            tokens: row.get("tokens"),
+            cost: row.get("cost"),
+            cost_complete: row.get("cost_complete"),
+        };
+        projects[index].tokens += usage.tokens;
+        projects[index].cost += usage.cost;
+        projects[index].by_model.push(usage);
     }
 
-    // Full member → account → model detail for Crime records and bill splits.
+    // Full member → account → model detail for Usage breakdown and bill splits.
     let account_sql = format!(
         "{USAGE_CTE}
          SELECT u.member_id, u.provider, u.account_key, u.billing_key,
                 u.account_label, u.attribution_status, u.model,
                 SUM(u.tokens)::bigint AS tokens,
-                COALESCE(SUM(u.cost), 0)::double precision AS cost
+                COALESCE(SUM(u.cost), 0)::double precision AS cost,
+                BOOL_AND((u.tokens = 0 OR u.cost > 0) AND u.unattributed = 0) AS cost_complete
          FROM readable_usage u
          JOIN members m ON m.member_id=u.member_id
          WHERE {day_filter} AND {VISIBLE_MEMBER}
@@ -1116,6 +1206,7 @@ async fn read_team(client: &Client, cfg: &TeamConfig, range: &str) -> Result<Tea
             ))
             .or_default()
             .push(ModelUsage {
+                cost_complete: row.get("cost_complete"),
                 display_name: crate::localstats::display_name(&model),
                 model,
                 tokens: row.get("tokens"),
@@ -1427,7 +1518,14 @@ mod integration_tests {
             .unwrap();
         drop(seed);
 
-        upload(
+        // A real migration waits for an existing migrator instead of failing
+        // every concurrent read/upload immediately.
+        let mut migration_gate = connect(&cfg).await.unwrap();
+        let gate = migration_gate.client.transaction().await.unwrap();
+        gate.query_one("SELECT pg_advisory_xact_lock($1)", &[&MIGRATE_LOCK])
+            .await
+            .unwrap();
+        let initial_upload = upload(
             &cfg,
             None,
             vec![
@@ -1450,9 +1548,13 @@ mod integration_tests {
                     10.0,
                 ),
             ],
-        )
-        .await
-        .unwrap();
+        );
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            gate.commit().await.unwrap();
+        };
+        let (uploaded, ()) = tokio::join!(initial_upload, release);
+        uploaded.unwrap();
 
         // Simulate an installation already migrated by the early v2 build,
         // which lost its exact v1 id. A unique display-name match recovers the
@@ -1549,6 +1651,30 @@ mod integration_tests {
         drop(conn);
 
         let report = fetch(&cfg, "day").await.unwrap();
+        let calendar = fetch_calendar(&cfg, day[..4].parse().unwrap())
+            .await
+            .unwrap();
+        let own: Vec<_> = calendar
+            .entries
+            .iter()
+            .filter(|e| e.member_id == cfg.member_id)
+            .collect();
+        assert_eq!(own.len(), 2);
+        assert_eq!(own.iter().map(|e| e.tokens).sum::<i64>(), 300);
+        assert_eq!(own.iter().filter_map(|e| e.cost).sum::<f64>(), 30.0);
+        assert!(own.iter().all(|e| e.day == day));
+        assert!(calendar
+            .entries
+            .iter()
+            .any(|e| e.member_id == "legacy-teammate" && e.tokens == 80));
+        assert!(!calendar
+            .entries
+            .iter()
+            .any(|e| e.member_id == "integration-member-v1" || e.member_id == "lost-legacy-id"));
+        assert_eq!(
+            calendar.entries.iter().map(|e| e.tokens).sum::<i64>(),
+            report.members.iter().map(|m| m.tokens).sum::<i64>()
+        );
         let member = report
             .members
             .iter()
@@ -1557,6 +1683,21 @@ mod integration_tests {
         assert_eq!(member.tokens, 300);
         assert!(!member.is_legacy);
         assert_eq!(member.by_account.len(), 2);
+        let project = member
+            .by_project
+            .iter()
+            .find(|p| p.project == "tokenhp")
+            .unwrap();
+        assert_eq!(project.tokens, 300);
+        assert_eq!(project.by_model.len(), 2);
+        let codex = project
+            .by_model
+            .iter()
+            .find(|m| m.model == "gpt-5.6-sol")
+            .unwrap();
+        assert_eq!(codex.tokens, 100);
+        assert_eq!(codex.cost, 10.0);
+        assert!(codex.cost_complete);
         assert_eq!(report.accounts.len(), 3);
         assert!(report
             .members
@@ -1592,5 +1733,135 @@ mod integration_tests {
         assert_eq!(hidden.by_project.len(), 1);
         assert_eq!(hidden.by_project[0].project, "(hidden)");
         assert_eq!(hidden.by_project[0].tokens, 120);
+
+        let history = vec![
+            row(
+                &day,
+                "claude",
+                "shared-claude",
+                "tokenhp",
+                "claude-fable-5",
+                300,
+                30.0,
+            ),
+            row(
+                &(Utc::now() - chrono::Duration::days(3))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                "claude",
+                "shared-claude",
+                "tokenhp",
+                "claude-fable-5",
+                50,
+                5.0,
+            ),
+            row(
+                &(Utc::now() - chrono::Duration::days(14))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                "claude",
+                "shared-claude",
+                "tokenhp",
+                "claude-fable-5",
+                100,
+                10.0,
+            ),
+            row(
+                &(Utc::now() - chrono::Duration::days(45))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                "claude",
+                "shared-claude",
+                "tokenhp",
+                "claude-fable-5",
+                900,
+                90.0,
+            ),
+        ];
+        upload(&cfg, None, history.clone()).await.unwrap();
+        // An up-to-date schema must support rapid range reads and uploads even
+        // while another connection holds the advisory migration lock.
+        let mut lock_conn = connect(&cfg).await.unwrap();
+        let lock = lock_conn.client.transaction().await.unwrap();
+        lock.query_one("SELECT pg_advisory_xact_lock($1)", &[&MIGRATE_LOCK])
+            .await
+            .unwrap();
+        let (day_report, week_report, month_report, uploaded) = tokio::join!(
+            fetch(&cfg, "day"),
+            fetch(&cfg, "week"),
+            fetch(&cfg, "month"),
+            upload(&cfg, None, history)
+        );
+        uploaded.unwrap();
+        for (report, range, expected) in [
+            (day_report, "day", 300),
+            (week_report, "week", 350),
+            (month_report, "month", 450),
+        ] {
+            let report = report.unwrap();
+            assert_eq!(report.range, range);
+            let own = report
+                .members
+                .iter()
+                .find(|m| m.member_id == cfg.member_id)
+                .unwrap();
+            assert_eq!(own.tokens, expected);
+            assert_eq!(
+                own.by_project.iter().map(|p| p.tokens).sum::<i64>(),
+                expected
+            );
+            assert_eq!(
+                own.by_account.iter().map(|a| a.tokens).sum::<i64>(),
+                expected
+            );
+        }
+        lock.rollback().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pricing_audit {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "read-only audit of the configured team's model pricing"]
+    async fn live_team_model_inventory() {
+        let path = dirs::data_dir().unwrap().join("HPBar/team-config.json");
+        let cfg: TeamConfig = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let conn = connect(&cfg).await.unwrap();
+        conn.client.batch_execute("BEGIN READ ONLY").await.unwrap();
+        let sql = format!("{USAGE_CTE}
+            SELECT u.model, SUM(u.tokens)::bigint AS tokens,
+                COUNT(*)::bigint AS rows, COUNT(*) FILTER (WHERE u.cost=0 AND u.tokens>0)::bigint AS unpriced_rows,
+                SUM(u.unattributed)::bigint AS unattributed,
+                SUM(u.input+u.output+u.cache_read+u.cache_create)::bigint AS components,
+                MIN(u.day)::text AS first_day, MAX(u.day)::text AS last_day
+            FROM readable_usage u JOIN members m ON m.member_id=u.member_id
+            WHERE {VISIBLE_MEMBER} GROUP BY u.model ORDER BY tokens DESC");
+        let rows = conn.client.query(&sql, &[]).await.unwrap();
+        let pricing = crate::pricing::Pricing::bundled();
+        let mut missing = Vec::new();
+        for row in rows {
+            let model: String = row.get("model");
+            if pricing.cost(&model, 1, 1, 1, 1, 0).is_none() {
+                missing.push(model.clone());
+            }
+            println!(
+                "{}",
+                serde_json::json!({"model": model,
+                "has_bundled_rate": pricing.cost(&model, 1, 1, 1, 1, 0).is_some(),
+                "tokens": row.get::<_, i64>("tokens"), "rows": row.get::<_, i64>("rows"),
+                "zero_cost_rows": row.get::<_, i64>("unpriced_rows"),
+                "unattributed": row.get::<_, i64>("unattributed"),
+                "components": row.get::<_, i64>("components"),
+                "first_day": row.get::<_, String>("first_day"), "last_day": row.get::<_, String>("last_day")})
+            );
+        }
+        conn.client.batch_execute("ROLLBACK").await.unwrap();
+        assert_eq!(
+            missing,
+            vec!["codex-auto-review"],
+            "Unexpected missing rates: {missing:?}"
+        );
     }
 }

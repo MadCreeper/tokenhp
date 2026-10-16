@@ -5,7 +5,7 @@
 //! breakdown (input / cache_creation / cache_read / output). We aggregate every
 //! model id seen within the time window and price each via the bundled table.
 
-use crate::pricing::Pricing;
+use crate::pricing::{ModelCost, Pricing};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,6 +53,15 @@ pub fn collect(window_secs: i64) -> Vec<ModelUsageDTO> {
 /// end` (unix seconds). The device-share fit uses this to price the span a
 /// provider window covered *as of* an observation, which need not end now.
 pub fn collect_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
+    collect_range_for_account(start, end, None).unwrap_or_default()
+}
+
+pub fn collect_range_for_account(
+    start: i64,
+    end: i64,
+    account: Option<&str>,
+) -> Option<Vec<ModelUsageDTO>> {
+    let attribution = account.map(|_| crate::account::attribution_snapshot());
     let projects = crate::credentials::claude_config_dir()
         .map(|d| d.join("projects"))
         .unwrap_or_default();
@@ -60,37 +69,42 @@ pub fn collect_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
     let files = session_files(&projects);
     let mut totals: HashMap<String, Totals> = HashMap::new();
 
+    let pricing = Pricing::loaded();
     for event in collect_events(&files) {
         if event.ts < start || event.ts >= end {
             continue;
         }
-        totals
-            .entry(event.model)
-            .or_default()
-            .add_totals(event.usage);
+        if let (Some(key), Some(snapshot)) = (account, &attribution) {
+            if !event.model.starts_with("claude") {
+                continue;
+            }
+            let identity = snapshot.attribution("claude", event.ts);
+            if identity.status != "exact" {
+                return None;
+            }
+            if identity.account_key != key {
+                continue;
+            }
+        }
+        totals.entry(event.model.clone()).or_default().add_priced(
+            event.usage,
+            &event.model,
+            &pricing,
+            event.ts,
+        );
     }
 
-    let pricing = Pricing::loaded();
     let mut models: Vec<ModelUsageDTO> = totals
         .into_iter()
         .map(|(id, t)| {
             let cache_create = t.cache_create_5m + t.cache_create_1h;
-            let cost = pricing
-                .cost(
-                    &id,
-                    t.input,
-                    t.output,
-                    t.cache_read,
-                    t.cache_create_5m,
-                    t.cache_create_1h,
-                )
-                .map(|c| ModelCostDTO {
-                    input: c.input,
-                    output: c.output,
-                    cache_read: c.cache_read,
-                    cache_create: c.cache_create,
-                    total: c.total(),
-                });
+            let cost = t.cost().map(|c| ModelCostDTO {
+                input: c.input,
+                output: c.output,
+                cache_read: c.cache_read,
+                cache_create: c.cache_create,
+                total: c.total(),
+            });
             let total = t.input + t.output + t.cache_read + cache_create;
             let max_component = t.input.max(t.output).max(t.cache_read).max(cache_create);
             ModelUsageDTO {
@@ -109,7 +123,7 @@ pub fn collect_range(start: i64, end: i64) -> Vec<ModelUsageDTO> {
         .collect();
 
     models.sort_by(|a, b| b.total.cmp(&a.total));
-    models
+    Some(models)
 }
 
 /// One project's pooled token + $ usage over the window — "which repo ate my
@@ -133,6 +147,7 @@ pub fn collect_by_project(window_secs: i64) -> Vec<ProjectUsageDTO> {
     // project -> (model -> token totals) so each model prices at its own rate.
     let mut acc: HashMap<String, HashMap<String, Totals>> = HashMap::new();
 
+    let pricing = Pricing::loaded();
     for event in collect_events(&files) {
         let age = now - event.ts;
         if age < 0 || age >= window_secs {
@@ -140,28 +155,20 @@ pub fn collect_by_project(window_secs: i64) -> Vec<ProjectUsageDTO> {
         }
         acc.entry(event.project)
             .or_default()
-            .entry(event.model)
+            .entry(event.model.clone())
             .or_default()
-            .add_totals(event.usage);
+            .add_priced(event.usage, &event.model, &pricing, event.ts);
     }
 
-    let pricing = Pricing::loaded();
     let mut out: Vec<ProjectUsageDTO> = acc
         .into_iter()
         .map(|(project, models)| {
             let mut tokens = 0i64;
             let mut cost = 0f64;
-            for (model, t) in models {
+            for (_, t) in models {
                 let cache_create = t.cache_create_5m + t.cache_create_1h;
                 tokens += t.input + t.output + t.cache_read + cache_create;
-                if let Some(c) = pricing.cost(
-                    &model,
-                    t.input,
-                    t.output,
-                    t.cache_read,
-                    t.cache_create_5m,
-                    t.cache_create_1h,
-                ) {
+                if let Some(c) = t.cost() {
                     cost += c.total();
                 }
             }
@@ -178,6 +185,8 @@ pub fn collect_by_project(window_secs: i64) -> Vec<ProjectUsageDTO> {
 
 #[derive(Default, Clone, Copy)]
 struct Totals {
+    priced: ModelCost,
+    unpriced: bool,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -186,6 +195,32 @@ struct Totals {
 }
 
 impl Totals {
+    fn cost(&self) -> Option<ModelCost> {
+        if self.unpriced {
+            None
+        } else {
+            Some(self.priced)
+        }
+    }
+
+    fn add_priced(&mut self, other: Totals, model: &str, pricing: &Pricing, at: i64) {
+        self.add_totals(other);
+        match pricing.cost_request(
+            model,
+            [
+                other.input,
+                other.output,
+                other.cache_read,
+                other.cache_create_5m,
+                other.cache_create_1h,
+            ],
+            at,
+        ) {
+            Some(c) => self.priced.add(c),
+            None => self.unpriced = true,
+        }
+    }
+
     fn add(&mut self, u: Option<&Usage>) {
         let Some(u) = u else { return };
         self.input += u.input_tokens.unwrap_or(0);
@@ -401,6 +436,7 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
     let mut acc: HashMap<(String, String, String, String, String, String), ProjAcc> =
         HashMap::new();
 
+    let pricing = Pricing::loaded();
     for event in collect_events(&files) {
         let Some(day) = day_string(event.ts) else {
             continue;
@@ -419,33 +455,24 @@ pub fn collect_rows(start_day: &str, end_day: &str) -> Vec<UsageRow> {
                 attribution.status,
             ))
             .or_default();
-        e.models
-            .entry(event.model)
-            .or_default()
-            .add_totals(event.usage);
+        e.models.entry(event.model.clone()).or_default().add_priced(
+            event.usage,
+            &event.model,
+            &pricing,
+            event.ts,
+        );
         if event.ts > e.last_active {
             e.last_active = event.ts;
         }
     }
 
-    let pricing = Pricing::loaded();
     let mut rows: Vec<UsageRow> = Vec::new();
     for ((day, project, account_key, billing_key, account_label, attribution_status), pa) in acc {
         let last_active = pa.last_active;
         for (model, t) in pa.models {
             let cache_create = t.cache_create_5m + t.cache_create_1h;
             let tokens = t.input + t.output + t.cache_read + cache_create;
-            let cost = pricing
-                .cost(
-                    &model,
-                    t.input,
-                    t.output,
-                    t.cache_read,
-                    t.cache_create_5m,
-                    t.cache_create_1h,
-                )
-                .map(|c| c.total())
-                .unwrap_or(0.0);
+            let cost = t.cost().map(|c| c.total()).unwrap_or(0.0);
             rows.push(UsageRow {
                 day: day.clone(),
                 provider: "claude".into(),
@@ -565,6 +592,21 @@ fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_requests_do_not_become_one_long_context_request() {
+        let mut total = Totals::default();
+        let request = Totals {
+            input: 100_000,
+            output: 10_000,
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            total.add_priced(request, "claude-haiku-5-5", &Pricing::bundled(), 0);
+        }
+        assert_eq!(total.input, 1_000_000);
+        assert!((total.cost().unwrap().total() - 0.15).abs() < 1e-9);
+    }
 
     #[test]
     fn project_name_takes_final_path_component() {

@@ -7,6 +7,7 @@
 pub mod account;
 pub mod ambient;
 pub mod burn;
+pub mod calendar;
 pub mod codexquota;
 pub mod codexstats;
 pub mod credentials;
@@ -22,9 +23,9 @@ pub mod update;
 pub mod usage;
 
 use credentials::CredentialCache;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{
     image::Image,
@@ -84,14 +85,23 @@ async fn fetch_usage(
     app: tauri::AppHandle,
     cache: tauri::State<'_, CredentialCache>,
 ) -> Result<usage::UsageReport, String> {
-    let mut report = usage::fetch(cache.inner()).await.map_err(|e| e.to_string())?;
+    let mut report = usage::fetch(cache.inner())
+        .await
+        .map_err(|e| e.to_string())?;
     // Add the "you'll run out before reset" projection from recorded history.
     let account_key = account::claude_identity()
         .map(|i| i.account_key)
         .unwrap_or_else(|| "unknown".into());
     ambient::annotate(&app, "claude", &account_key, &mut report);
     ambient::record_history(&app, "claude", &account_key, &report);
-    // Add the this-machine vs other-devices split from the recorded series.
+    // Pair foreground quota with local usage observed at the same instant.
+    let observed_at = chrono::Utc::now().timestamp();
+    let app2 = app.clone();
+    let report2 = report.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        share::record_at(&app2, "claude", &report2, observed_at)
+    })
+    .await;
     share::annotate(&app, "claude", &mut report);
     // Bring the tray heart along: the ambient poll can lag minutes behind this
     // fetch, and a popover showing full bars next to a tray still flagging "12%"
@@ -123,9 +133,18 @@ fn fetch_codex_account() -> account::AccountInfo {
     account::fetch_codex()
 }
 
-/// The API axis: per-tool + pooled token usage over the last `window_secs`,
-/// aggregating every local tool (Claude Code, Codex, …). Scans logs on a
-/// blocking thread so the UI stays responsive.
+/// UTC calendar history, fetched on demand without scanning once per day.
+#[tauri::command]
+async fn fetch_calendar(source: String, year: i32) -> Result<calendar::CalendarReport, String> {
+    match source.as_str() {
+        "local" => tokio::task::spawn_blocking(move || calendar::fetch_local(year))
+            .await
+            .map_err(|e| e.to_string())?,
+        "team" => team::fetch_calendar(year).await,
+        _ => Err("Unknown calendar source.".into()),
+    }
+}
+
 #[tauri::command]
 async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
     tokio::task::spawn_blocking(move || tools::fetch_local(window_secs))
@@ -145,14 +164,12 @@ async fn fetch_codex_quota(app: tauri::AppHandle) -> Result<usage::UsageReport, 
     // carry that stamp so a stale snapshot never poses as a fresh reading.
     let (observed_at, mut report) = match codexquota::fetch().await {
         Ok(r) => (chrono::Utc::now().timestamp(), r),
-        Err(live_err) => {
-            tokio::task::spawn_blocking(|| {
-                codexstats::fetch_quota_with_ts(codexstats::SNAPSHOT_MAX_AGE_SECS)
-            })
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|_| live_err)?
-        }
+        Err(live_err) => tokio::task::spawn_blocking(|| {
+            codexstats::fetch_quota_with_ts(codexstats::SNAPSHOT_MAX_AGE_SECS)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|_| live_err)?,
     };
     let account_key = account::codex_identity()
         .map(|i| i.account_key)
@@ -190,7 +207,6 @@ fn set_tray_theme(app: tauri::AppHandle, theme: String) {
 struct AppControls {
     autostart: bool,
     alerts: bool,
-    calibrate: bool,
 }
 
 #[tauri::command]
@@ -199,7 +215,6 @@ fn get_app_controls(app: tauri::AppHandle) -> AppControls {
     AppControls {
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         alerts: s.alerts_enabled,
-        calibrate: s.only_active_device,
     }
 }
 
@@ -213,13 +228,6 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) {
 fn set_alerts_enabled(app: tauri::AppHandle, enabled: bool) {
     let mut s = ambient::load_settings(&app);
     s.alerts_enabled = enabled;
-    ambient::save_settings(&app, &s);
-}
-
-#[tauri::command]
-fn set_calibrate(app: tauri::AppHandle, enabled: bool) {
-    let mut s = ambient::load_settings(&app);
-    s.only_active_device = enabled;
     ambient::save_settings(&app, &s);
 }
 
@@ -251,9 +259,7 @@ fn set_team_config(mut config: team::TeamConfig) -> Result<(), String> {
 /// write this member's row, and return the current roster — the "handshake"
 /// shown in settings.
 #[tauri::command]
-async fn test_team_connection(
-    mut config: team::TeamConfig,
-) -> Result<team::TeamHandshake, String> {
+async fn test_team_connection(mut config: team::TeamConfig) -> Result<team::TeamHandshake, String> {
     let email = account::read_email();
     config.normalize(email.as_deref());
     team::test_connection(&config, email.as_deref()).await
@@ -322,6 +328,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             fetch_local,
+            fetch_calendar,
             fetch_codex_quota,
             fetch_account,
             fetch_codex_account,
@@ -332,7 +339,6 @@ pub fn run() {
             get_app_controls,
             set_autostart,
             set_alerts_enabled,
-            set_calibrate,
             quit_app,
             get_team_config,
             set_team_config,
@@ -420,13 +426,13 @@ fn build_popover(app: &tauri::AppHandle) -> tauri::Result<()> {
     {
         debug_query.push(format!("source={source}"));
     }
-    if let Ok(provider @ ("claude" | "codex")) =
-        std::env::var("HPBAR_DEBUG_PROVIDER").as_deref()
-    {
+    if let Ok(provider @ ("claude" | "codex")) = std::env::var("HPBAR_DEBUG_PROVIDER").as_deref() {
         debug_query.push(format!("provider={provider}"));
     }
-    if std::env::var_os("HPBAR_DEBUG_CRIME").is_some() {
-        debug_query.push("crime=1".to_string());
+    if std::env::var_os("HPBAR_DEBUG_BREAKDOWN").is_some()
+        || std::env::var_os("HPBAR_DEBUG_CRIME").is_some()
+    {
+        debug_query.push("breakdown=1".to_string());
     }
     let page = if debug_query.is_empty() {
         "index.html".to_string()
@@ -480,7 +486,8 @@ fn build_popover(app: &tauri::AppHandle) -> tauri::Result<()> {
                     return;
                 }
                 let _: () = msg_send![wk, setOpaque: Bool::new(false)];
-                let responds: Bool = msg_send![wk, respondsToSelector: sel!(setUnderPageBackgroundColor:)];
+                let responds: Bool =
+                    msg_send![wk, respondsToSelector: sel!(setUnderPageBackgroundColor:)];
                 if responds.as_bool() {
                     let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
                     let _: () = msg_send![wk, setUnderPageBackgroundColor: clear];
@@ -676,16 +683,6 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             settings.alerts_enabled,
             None::<&str>,
         )?;
-        // Device-share calibration: assert this is the only active device so the
-        // fit trusts current usage as the single-device floor. Persisted, off.
-        let calib = CheckMenuItem::with_id(
-            app,
-            "calib",
-            "Only Device Here",
-            true,
-            settings.only_active_device,
-            None::<&str>,
-        )?;
         let quit = MenuItem::with_id(app, "quit", "Quit HPBar", true, None::<&str>)?;
         // Linux trays (libappindicator/StatusNotifierItem) don't deliver
         // left-click events, so a menu item is the only reliable way to open the
@@ -698,7 +695,6 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 &PredefinedMenuItem::separator(app)?,
                 &autostart,
                 &alerts,
-                &calib,
                 &PredefinedMenuItem::separator(app)?,
                 &quit,
             ],
@@ -706,7 +702,6 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         // Captured so the toggle handlers reflect the new state in the checkmark.
         let autostart_item = autostart.clone();
         let alerts_item = alerts.clone();
-        let calib_item = calib.clone();
 
         // Linux: menu on left click (see above). Windows: menu on right click,
         // left-click reserved for the popover.
@@ -736,12 +731,6 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     s.alerts_enabled = !s.alerts_enabled;
                     ambient::save_settings(app, &s);
                     let _ = alerts_item.set_checked(s.alerts_enabled);
-                }
-                "calib" => {
-                    let mut s = ambient::load_settings(app);
-                    s.only_active_device = !s.only_active_device;
-                    ambient::save_settings(app, &s);
-                    let _ = calib_item.set_checked(s.only_active_device);
                 }
                 _ => {}
             });
@@ -925,7 +914,10 @@ fn position_under_tray(win: &WebviewWindow, rect: Rect) {
         let ms = monitor.size();
         let (mx, my) = (mp.x as f64, mp.y as f64);
         x = x.clamp(mx + 8.0, (mx + ms.width as f64 - win_w - 8.0).max(mx + 8.0));
-        y = y.clamp(my + 8.0, (my + ms.height as f64 - win_h - 8.0).max(my + 8.0));
+        y = y.clamp(
+            my + 8.0,
+            (my + ms.height as f64 - win_h - 8.0).max(my + 8.0),
+        );
     }
 
     let _ = win.set_position(PhysicalPosition::new(x, y));

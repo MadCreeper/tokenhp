@@ -368,6 +368,15 @@ pub async fn fetch_team(range: &str) -> Result<TeamReport, String> {
     db::fetch(&cfg, range).await
 }
 
+/// Calendar history uses the same configured team and opt-in gate as bars.
+pub async fn fetch_calendar(year: i32) -> Result<crate::calendar::CalendarReport, String> {
+    let cfg = TeamConfig::load();
+    if !cfg.enabled || !cfg.has_endpoint() {
+        return Err("Team sync is not configured.".into());
+    }
+    db::fetch_calendar(&cfg, year).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

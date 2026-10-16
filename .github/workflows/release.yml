@@ -64,6 +64,9 @@ jobs:
             build-essential \
             file wget
 
+      - name: Validate release version
+        run: node scripts/release-version.mjs
+
       - name: Install frontend dependencies
         run: npm ci
 

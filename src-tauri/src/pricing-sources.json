@@ -1,0 +1,81 @@
+{
+  "checked_on": "2026-10-16",
+  "currency": "USD",
+  "unit": "per million tokens",
+  "basis": "Current first-party standard API rates, applied to historical requests as an equivalent-cost estimate; not historical invoices or subscription charges.",
+  "sources": {
+    "openai": [
+      "https://developers.openai.com/api/docs/pricing",
+      "https://developers.openai.com/api/docs/models/gpt-6-sol",
+      "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+      "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+      "https://developers.openai.com/api/docs/models/gpt-5.5",
+      "https://developers.openai.com/api/docs/models/gpt-6-astra",
+      "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+      "https://developers.openai.com/api/docs/models/gpt-6-luna",
+      "https://developers.openai.com/api/docs/models/gpt-5.1-codex-max"
+    ],
+    "anthropic": [
+      "https://platform.claude.com/docs/en/about-claude/pricing"
+    ],
+    "kimi": [
+      "https://platform.kimi.ai/",
+      "https://platform.kimi.ai/docs/pricing/chat"
+    ],
+    "zai": [
+      "https://docs.z.ai/guides/overview/pricing"
+    ],
+    "deepseek": [
+      "https://api-docs.deepseek.com/quick_start/pricing/"
+    ],
+    "minimax": [
+      "https://platform.minimax.io/docs/pricing/overview"
+    ],
+    "qwen": [
+      "https://www.alibabacloud.com/help/en/model-studio/qwen3-7-max",
+      "https://www.alibabacloud.com/help/en/model-studio/qwen3-7-plus"
+    ]
+  },
+  "assumptions": [
+    "Qwen uses Singapore International rates with explicit-cache reads. Implicit-cache reads and other regions have different rates.",
+    "DeepSeek base prices are peak rates; requests outside 01:00\u201304:00 and 06:00\u201310:00 UTC Monday\u2013Friday get the published 50% discount.",
+    "Context tiers are selected per request, including cached input and writes, before summing usage.",
+    "Fast, priority, batch, flex, residency, tax, third-party hosting and tool charges are not inferred from model names.",
+    "Kimi K3 cache writes use the published default write rate; no separate one-hour rate was available in the retrieved price table.",
+    "Legacy models retain their last published rates when no current price is listed.",
+    "No default USD rate is assigned to Doubao Seed Code (region/currency not established). Use an explicit local pricing override.",
+    "The observed route-qualified IDs ATXC44Y9/gpt-6-astra and 8TZQGKP5/gpt-6-astra use first-party GPT-6 Astra equivalent rates; hosting or routing markups are not included.",
+    "codex-auto-review remains unpriced at the user's request: no verified public token price or underlying-model mapping was found. Do not substitute another model's rates."
+  ],
+  "coverage": {
+    "audited_on": "2026-10-16",
+    "scope": "All model IDs visible in stored Team history, queried read-only.",
+    "model_ids": [
+      "gpt-5.6-sol",
+      "claude-opus-5-5",
+      "claude-opus-4-8",
+      "gpt-6-astra",
+      "codex-auto-review",
+      "claude-opus-5",
+      "claude-fable-5-1",
+      "gpt-6.1-sol",
+      "gpt-5.6-terra",
+      "ATXC44Y9/gpt-6-astra",
+      "gpt-6-sol",
+      "8TZQGKP5/gpt-6-astra",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001",
+      "deepseek-v4-flash",
+      "claude-fable-5",
+      "gpt-5.5",
+      "claude-opus-4-7",
+      "claude-sonnet-5",
+      "deepseek-flash",
+      "gpt-5.1-codex-max"
+    ],
+    "historical_costs": "Team reads costs previously uploaded by each member. A rate-table update applies when clients rescan and upload; it does not rewrite other members' stored costs. Rows with missing input/output/cache token components remain incomplete.",
+    "intentionally_unpriced": [
+      "codex-auto-review"
+    ]
+  }
+}

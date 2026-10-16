@@ -1,144 +1,71 @@
-# Device-share usage fitting
+# Automatic device-share fitting
 
-How HPBar estimates **"what % of this subscription window is *this* machine using"**
-versus other devices on the same account — without any device id.
+HPBar estimates the part of an account-wide quota used by this machine from
+local session logs. Providers do not report device shares. API-equivalent cost
+is a proxy, not the provider's subscription metering formula.
 
-Code: [`src-tauri/src/share.rs`](../src-tauri/src/share.rs) ·
-inspect a live fit with `cargo run --example share_check`.
+Code: [`src-tauri/src/share.rs`](../src-tauri/src/share.rs).
+Run `cargo run --example share_check` for local fit diagnostics.
 
-## The problem
+## No setup or calibration switch
 
-The provider only tells us **account-wide** utilization `U` (0..1) for each window
-(Claude 5-Hour / Weekly; Codex 5-Hour / Weekly / Monthly). Our local logs only see
-**this machine's** usage. There's no per-device breakdown anywhere, so other
-devices (a second laptop, claude.ai, the mobile app) can only be *inferred*.
+Fitting runs automatically during ordinary use, including background polling.
+The old **Only Device Here** control has been removed; previously saved assertions
+cannot force confidence. Changing local activity and idle periods provide the
+variation needed to distinguish local usage from background account usage.
 
-We need a bridge between "utilization %" and "tokens", because the limit isn't a
-raw token count. Luckily both Claude and Codex meter by **model-weighted token
-cost**, so this machine's **dollar cost** `C` (priced from `pricing.json`) is a sound
-proxy. Define one unknown per window:
-
-> **`Q` = the dollar-cost that equals 100% of the window** ("the budget").
-
-Then, with `C_others` the (unseen) cost from other devices:
+Contiguous observations are accumulated into at least ten-minute blocks to
+reduce polling lag and quota rounding. A robust Theil–Sen regression fits:
 
 ```
-U ≈ (C + C_others) / Q
-this_machine = C / Q          others = U − this_machine
+quota per minute ≈ local API-equivalent dollars per minute × slope
+                   + background account quota per minute
+window budget Q ≈ 1 / slope
+this machine ≈ local window cost / Q
+other usage ≈ reported utilization − this machine
 ```
 
-Everything reduces to estimating the single number **`Q`**. `Q` quietly absorbs
-every conversion constant (credits↔dollars, compute-hours↔tokens), so we never
-need to know the provider's exact formula.
+A visible split requires at least eight blocks, four with local spend, ten
+percentage points of observed quota movement, substantial variation in local
+activity, low prediction error, and agreement between independent fits of the
+earlier and later halves. Only the latest 96 blocks, within two days or one
+quota cycle (whichever is shorter), contribute. Constant activity cannot
+identify the split regardless of how many samples are collected.
 
-## The key idea
+**Learning device split** means usable observations exist but the fit is not
+identifiable or stable yet. **Split unavailable** means fresh, complete
+observations are missing. Neither displays an invented percentage. The displayed
+percentages are fractions of the whole quota window, not just consumed usage.
 
-At any moment, look at the ratio
+## Data alignment and change detection
 
-```
-r = C / U      (this machine's cost ÷ account-wide utilization)
-```
+- Both sides describe the same observation time and reset window, including
+  the event at a Codex quota snapshot's timestamp.
+- Pending local spend includes subsequent idle polls' quota increases.
+- Blocks never cross reset IDs, counter decreases, non-increasing timestamps,
+  or gaps longer than 30 minutes.
+- History is isolated by provider, account, window duration, pricing fingerprint
+  and estimator version. Updating accounting/rates starts fresh history.
+- Only usage attributed to the current account is included. Unknown historical
+  attribution, unknown prices and unclassified tokens prevent a split. After
+  installation or account-observation gaps, the window may need to roll over
+  before local coverage is complete.
+- Observations older than 15 minutes, expired/implausible resets, saturated quota
+  and a live reading that disagrees with recorded data are rejected.
+- Impossible local shares and contradictory recent slopes suppress the split.
+  Fits must agree across recent halves, so a changed budget requires new evidence.
+- Up to 64 days of observations are retained without thinning interval endpoints.
 
-Other devices only ever **add** to `U`, never to `C`. So `r` is always **≤ Q**, and
-`r = Q` exactly when this machine was the *only* contributor. In fact
-`r = Q × (this machine's share at that moment)`.
+## Remaining uncertainty
 
-So the budget is the **upper edge** of the observed ratios:
+The regression models background usage as approximately steady within its
+recent evidence. Irregular concurrent usage, changed model mixes or delayed
+provider accounting can prevent a fit. Other devices working in proportion to
+this machine are fundamentally indistinguishable from a different quota budget.
+Web/mobile use also appears as inferred other usage. Even a stable fit is an
+estimate, never a billing measurement or proof of which device consumed quota.
 
-> **`Q` ≈ a high percentile (80th) of the recent `r` values.**
-
-The high percentile catches the moments when this machine dominated (`r ≈ Q`) and
-ignores the moments when other devices were also busy (`r` well below `Q`) — with no
-need to know *which* moments were which. Using the cumulative ratio `C/U` (rather
-than per-interval slopes `ΔU/ΔC`) makes it steady and robust: it isn't fooled by
-this machine's own non-linearity (e.g. cheap cache tokens that cost `$` but barely
-move the limit).
-
-## The algorithm (per provider × window)
-
-Every 5 minutes the background poller records a sample `(timestamp, U, C)` to
-`share_history.json`. To produce an estimate:
-
-1. Take all samples with `U ≥ 3%` and `C > 0`; compute `r = C / U` for each.
-2. Weight each by **recency** (half-life = one window length) so the estimate
-   re-learns after a limit change or a free reset; weight **calibrated** samples
-   (see below) ×4.
-3. **`Q` = 80th weighted percentile of `r`.**
-4. `this_machine = clamp(C_now / Q, 0, U)`, `others = U − this_machine`.
-5. **Confidence** ∈ [0,1] = `enough-samples × ratio-is-steady × fresh`. The UI
-   shows the split only above ~0.35, shows "estimating…" below it, and hides it
-   entirely with no data. (Cold start, < 3 samples: assume sole device, `Q = C/U`,
-   low confidence.)
-
-**Calibration shortcut.** The tray's *"Only Device Here"* toggle marks samples as
-trusted sole-device data (`r = Q` by assertion). A few minutes of that makes the
-fit confident almost immediately.
-
-## How fast does it converge?
-
-Convergence hinges on one thing: **how often is this machine the dominant user?**
-The 80th percentile needs some samples where your share was high. Human usage
-naturally bursts (devices rarely run in lockstep), so this usually happens on its
-own. Rough times, assuming **2–4 devices** on the account and ~5-minute samples:
-
-| Window | This machine is the *main* device | Genuinely balanced across devices |
-|---|---|---|
-| **5-Hour** | shows in **~15–30 min** of active use | **~1–3 h** (needs a few of your own busy bursts) |
-| **Weekly** | **~1–3 days** | up to a week |
-| **Monthly** (Codex) | **~1–2 weeks** | longer |
-| **Any** with *"Only Device Here"* on | **~10–15 min** (one or two polls) | same |
-
-It never "finishes" — with the recency half-life it keeps re-estimating, so it
-tracks changing usage and adapts within ~2 window cycles to limit changes.
-
-## Where it breaks (honest limits)
-
-- **No solo moments.** If several devices run in near-constant proportion and *this*
-  machine is never dominant, the ratios never reach the true `Q`, so it over-credits
-  this machine and stays low-confidence. Identifiability is fundamentally limited
-  without device ids; the calibration toggle is the escape hatch.
-- **Different model mix per device.** The split assumes devices use a similar model
-  mix; if one runs mostly Opus and another mostly Haiku, the cost-weighting skews it.
-- **Local logs only.** claude.ai web, mobile, IDE extensions and API-key tools all
-  count as "others" — by design.
-- **Coarse data.** 5-minute polling and percent-granular `U` mean tiny usage produces
-  no estimate; near 100% / overage the absolute split is unreliable.
-
-## Is there a name for this? Better versions?
-
-There's no single famous algorithm — it's a pragmatic combination — but it sits at
-the intersection of a few well-studied ideas:
-
-- **The problem** is *usage disaggregation* / *blind source separation*: split one
-  aggregate signal into per-source parts. The classic instance is **Non-Intrusive
-  Load Monitoring (NILM)** / *energy disaggregation* — inferring each appliance's
-  draw from a single household meter. Our version is easier: we observe **one** of
-  the sources (this machine) directly.
-- **The estimator** — "the budget is the upper edge of `C/U`" — is **frontier /
-  endpoint estimation**: estimating the boundary of a distribution's support, made
-  robust with a **high quantile (order statistic)** instead of the raw maximum.
-  Related named methods: *stochastic frontier analysis (SFA)*, *data envelopment
-  analysis (DEA)*, *quantile regression*, and *extreme-value endpoint estimation*.
-  (An earlier version used the **lower envelope of `ΔU/ΔC` slopes** — that's robust
-  regression-through-origin, à la *Theil–Sen* / least-quantile regression — but the
-  cumulative ratio proved steadier.)
-
-**Better versions, roughly in order of payoff:**
-
-1. **Cooperative disaggregation (exact).** If other devices also run HPBar and report
-   their local cost to a shared store — the repo already has the opt-in team DB for
-   exactly this kind of sharing — you *know* each cooperating device's contribution
-   and only fit the truly-unobserved remainder (web/mobile). No identifiability
-   problem, near-exact.
-2. **Bayesian state-space filter (Kalman / particle).** Model `Q_t` as a slowly
-   drifting latent state and `C_other,t` as a non-negative latent process, and infer
-   both jointly online. This is the principled version that our recency-weighted
-   quantile hack approximates: cleaner non-stationarity handling, proper uncertainty,
-   faster convergence.
-3. **Quantile regression of `U` on cumulative `C`** — a more standard estimator than
-   "80th percentile of the ratio," with a real confidence interval.
-4. **Learn the weights (non-negative least squares).** Instead of using `$` cost as a
-   fixed bridge, fit per-token-type weights (`input`/`output`/`cache`) so the proxy
-   matches the provider's actual metering — at the cost of needing more data.
-5. **Explicit change-point detection** for limit changes, instead of leaning only on
-   the recency half-life.
+Codex cumulative deltas prevent duplicate token events; cached input, cache
+writes and reasoning output are not counted twice. Claude messages are
+deduplicated before request-level pricing. These accounting safeguards apply
+to both the fit and the usage calendar.
