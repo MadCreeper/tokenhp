@@ -15,8 +15,9 @@ distribution alongside applications.
 
 ## Lucide (icons)
 
-The Arknights theme's header icons (settings gear, refresh) are Lucide line
-icons, embedded as inline SVG.
+The Classic settings gear and the Classic/Arknights pin icons are Lucide line
+icons, embedded as inline SVG. The refresh icons and game-style gears are
+authored SVG drawings.
 
 - Source: <https://lucide.dev>
 - License: ISC — <https://github.com/lucide-icons/lucide/blob/main/LICENSE>

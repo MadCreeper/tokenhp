@@ -1,13 +1,19 @@
 //! Shared outbound HTTP setup for GUI launches.
 //!
 //! Finder/launchd applications do not inherit proxy variables exported from a
-//! login shell. Callers still try the direct route first and consult this
-//! module only after an auth/permission response suggests a route difference.
+//! login shell. Callers can mirror the configured shell proxy up front, so
+//! they do not depend on system DNS resolving public domains successfully.
 
 use std::time::Duration;
 
-pub fn client(proxy_url: Option<&str>, timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
-    let mut builder = reqwest::Client::builder().timeout(timeout);
+pub fn client(
+    proxy_url: Option<&str>,
+    timeout: Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    // Bound DNS/TCP/TLS setup separately, including an unavailable local proxy.
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(timeout.min(Duration::from_secs(5)))
+        .timeout(timeout);
     if let Some(url) = proxy_url {
         builder = builder.proxy(reqwest::Proxy::all(url)?);
     }

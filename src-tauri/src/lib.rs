@@ -17,6 +17,8 @@ pub mod network;
 pub mod openclawstats;
 pub mod platform;
 mod placement;
+#[cfg(target_os = "macos")]
+mod mac_popup;
 pub mod pricing;
 pub mod share;
 pub mod team;
@@ -45,7 +47,12 @@ use tauri_plugin_autostart::ManagerExt;
 /// header pin button; not persisted here — the frontend re-syncs it on launch
 /// from its own stored preference.
 static PINNED: AtomicBool = AtomicBool::new(false);
-static TRAY_ANCHOR: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+#[cfg(target_os = "macos")]
+type TrayAnchor = mac_popup::Anchor;
+#[cfg(not(target_os = "macos"))]
+type TrayAnchor = Rect;
+static TRAY_ANCHOR: std::sync::Mutex<Option<TrayAnchor>> = std::sync::Mutex::new(None);
+#[cfg(not(target_os = "macos"))]
 static POPOVER_PLACED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
@@ -762,6 +769,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 button,
                 button_state: MouseButtonState::Up,
                 rect,
+                position,
                 ..
             } = event
             {
@@ -771,7 +779,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     || (cfg!(target_os = "macos") && button == MouseButton::Right);
                 if opens_popover {
                     if let Some(win) = tray.app_handle().get_webview_window("popover") {
-                        toggle_popover(&win, rect);
+                        toggle_popover(&win, rect, position);
                     }
                 }
             }
@@ -781,9 +789,52 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Explicit tray clicks always anchor on the clicked display, including when
+/// pinned. Clicking a visible popup's own display toggles it off; clicking a
+/// different display summons it there instead of hiding it on the old display.
+#[cfg(target_os = "macos")]
+fn toggle_popover(win: &WebviewWindow, rect: Rect, position: tauri::PhysicalPosition<f64>) {
+    let popup = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        let Some(anchor) = mac_popup::clicked_anchor(rect, position) else {
+            return;
+        };
+        if let Ok(mut saved) = TRAY_ANCHOR.lock() {
+            *saved = Some(anchor);
+        }
+        if popup.is_visible().unwrap_or(false)
+            && mac_popup::window_on_screen(&popup, anchor.screen_id)
+        {
+            let _ = popup.hide();
+            return;
+        }
+        if !mac_popup::position(&popup, anchor) {
+            return;
+        }
+        mark_shown();
+        let _ = popup.show();
+        let _ = popup.set_focus();
+        let _ = popup.emit("refresh", ());
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn position_under_tray(win: &WebviewWindow, anchor: TrayAnchor) {
+    let popup = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        // A resize queued before a click on another display must not restore
+        // the previous anchor after that newer click has placed the popup.
+        let current = TRAY_ANCHOR.lock().ok().and_then(|saved| *saved);
+        if current == Some(anchor) && !PINNED.load(Ordering::Relaxed) {
+            mac_popup::position(&popup, anchor);
+        }
+    });
+}
+
 /// Show the popover anchored beneath the clicked tray icon, or hide it if it's
 /// already visible.
-fn toggle_popover(win: &WebviewWindow, rect: Rect) {
+#[cfg(not(target_os = "macos"))]
+fn toggle_popover(win: &WebviewWindow, rect: Rect, _position: tauri::PhysicalPosition<f64>) {
     if win.is_visible().unwrap_or(false) {
         let _ = win.hide();
         return;
@@ -886,6 +937,7 @@ fn shown_recently() -> bool {
 /// so it works regardless of where the tray lives. All math is in global
 /// physical pixels, which span the whole multi-display layout (offsets can be
 /// negative), so we never floor coordinates to 0.
+#[cfg(not(target_os = "macos"))]
 fn position_under_tray(win: &WebviewWindow, rect: Rect) {
     use tauri::{PhysicalPosition, Position, Size};
 

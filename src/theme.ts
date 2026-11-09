@@ -21,21 +21,15 @@ export function isTheme(s: string | null): s is Theme {
 export function getTheme(): Theme {
   if (override) return override;
   const t = localStorage.getItem(KEY);
-  return isTheme(t) ? t : "minecraft";
+  return isTheme(t) ? t : "classic";
 }
 
-export function cycleTheme(): Theme {
-  const next = ORDER[(ORDER.indexOf(getTheme()) + 1) % ORDER.length];
-  localStorage.setItem(KEY, next);
-  applyTheme(next);
-  return next;
+export function setTheme(theme: Theme): void {
+  override = null;
+  localStorage.setItem(KEY, theme);
+  applyTheme(theme);
 }
 
 export function applyTheme(t: Theme = getTheme()): void {
   document.body.className = `theme-${t}`;
-}
-
-/** Short label for the theme-cycle button. */
-export function themeLabel(t: Theme): string {
-  return { minecraft: "MC", classic: "HP", arknights: "AK" }[t];
 }

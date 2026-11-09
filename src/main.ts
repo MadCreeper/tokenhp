@@ -31,7 +31,7 @@ import { heartsRow, heartsRowSplit, heartsRefillHTML } from "./hearts";
 import { xpBar } from "./xpbar";
 import { clamp01, escapeHTML, formatDollars, formatDuration, formatTokens, nowTime } from "./util";
 import { installStoneTexture } from "./texture";
-import { applyTheme, cycleTheme, getTheme, isTheme, setThemeOverride, themeLabel } from "./theme";
+import { applyTheme, setTheme, getTheme, isTheme, setThemeOverride } from "./theme";
 import { classicNeutralBar, classicQuotaBar, classicRefillBar } from "./classicbar";
 import { akBar, akResource, akRefillBar } from "./arknights";
 import { mockTeam, mockCalendar, mockCodexLive, mockLive, MOCK_LOCAL, MOCK_TEAM_CONFIG } from "./mock";
@@ -44,7 +44,7 @@ const params = new URLSearchParams(location.search);
 const MOCK = params.has("mock");
 // macOS has no native tray menu (Tahoe would show it on left-click), so the
 // popover hosts its controls in a "General" settings section. Linux/Windows keep
-// the native tray menu, so they don't show that section. The webview UA reliably
+// the native tray menu, so their General section only shows appearance. The webview UA reliably
 // carries the OS; `?os=mac` forces it on for showcase pages.
 const IS_MAC = /Mac/i.test(navigator.userAgent) || params.get("os") === "mac";
 // In the browser there's no Tauri window to fix the width, so pin it to match.
@@ -233,7 +233,7 @@ const state: State = {
   teamExpanded: new Set(),
   teamDraft: null,
   settingsTab: "ssh",
-  settingsSection: "update",
+  settingsSection: "general",
   teamTesting: false,
   teamStatus: "",
   teamStatusOk: false,
@@ -419,7 +419,7 @@ async function refresh(): Promise<void> {
     state.selectedModelId = state.selectedModelId ?? MOCK_LOCAL.combined[0].id;
     state.error = "";
     state.updatedAt = nowTime();
-    state.loading = false;
+    state.loading = params.get("loading") === "1";
     render();
     return;
   }
@@ -683,13 +683,11 @@ function headerHTML(): string {
     <header class="header${state.pinned ? " pinned-draggable" : ""}">
       ${state.pinned ? '<span class="window-drag-handle" title="Drag window" aria-label="Drag window"></span>' : ""}
       ${titleHTML}
-      ${state.loading ? `<span class="spinner">…</span>` : ""}
-      <button class="mc-btn icon ${state.pinned ? "selected" : ""}" data-action="pin" title="${
+      <button class="mc-btn icon ${state.pinned ? "selected" : ""}" data-action="pin" aria-pressed="${state.pinned}" title="${
         state.pinned ? "Unpin" : "Pin as floating widget"
       }">${pinIcon(getTheme())}</button>
-      <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
-      <button class="mc-btn icon" data-action="settings" title="Settings">${settingsIcon(getTheme())}</button>
-      <button class="mc-btn icon ${state.error ? "refresh-error" : ""}" data-action="refresh" aria-label="${state.error ? "Refresh failed. Retry" : "Refresh"}" title="${state.error ? escapeHTML(state.error) : "Refresh"}">${refreshIcon(getTheme())}</button>
+      <button class="mc-btn icon" data-action="settings" aria-label="Settings" title="Settings">${settingsIcon(getTheme())}</button>
+      <button class="mc-btn icon refresh-control ${state.loading ? "is-loading" : state.error ? "refresh-error" : ""}" data-action="refresh" aria-label="${state.loading ? "Refreshing" : state.error ? "Refresh failed. Retry" : "Refresh"}" aria-busy="${state.loading}" aria-disabled="${state.loading}" title="${state.loading ? "Refreshing…" : state.error ? escapeHTML(state.error) : "Refresh"}">${refreshIcon(getTheme())}</button>
     </header>`;
 }
 
@@ -698,17 +696,13 @@ function settingsHeaderHTML(): string {
     <header class="header${state.pinned ? " pinned-draggable" : ""}">
       ${state.pinned ? '<span class="window-drag-handle" title="Drag window" aria-label="Drag window"></span>' : ""}
       <span class="title">Settings</span>
-      <button class="mc-btn icon" data-action="theme" title="Theme">${themeLabel(getTheme())}</button>
       <button class="mc-btn icon" data-action="settings-close" title="Back">✕</button>
     </header>`;
 }
 
-// Top-level settings sections. General (app controls + Quit) leads on macOS,
-// where it replaces the tray menu; then Update (universally useful), Team
-// (opt-in), About. General is macOS-only — elsewhere the tray menu still owns
-// those toggles, so showing them here too would desync the menu's checkmarks.
+// Appearance is available everywhere; native app controls remain macOS-only.
 const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
-  ...(IS_MAC ? [{ id: "general" as const, label: "General" }] : []),
+  { id: "general", label: "General" },
   { id: "update", label: "Update" },
   { id: "team", label: "Team" },
   { id: "about", label: "About" },
@@ -726,11 +720,19 @@ function settingsSectionSegHTML(): string {
 // SSH/DB/Team sub-tabs); Update and About come from about.ts.
 function settingsBodyHTML(): string {
   if (state.settingsSection === "general") {
-    return generalSectionHTML({
+    const themePicker = `<div class="settings theme-settings">
+      <div class="settings-share-title" id="theme-label">Theme</div>
+      <div class="seg" role="group" aria-labelledby="theme-label">
+        ${(["classic", "minecraft", "arknights"] as const).map(theme =>
+          `<button class="mc-btn ${getTheme() === theme ? "selected" : ""}" data-action="theme" data-value="${theme}" aria-pressed="${getTheme() === theme}">${{ classic: "Classic", minecraft: "Minecraft", arknights: "Arknights" }[theme]}</button>`
+        ).join("")}
+      </div>
+    </div>`;
+    return themePicker + (IS_MAC ? generalSectionHTML({
       controls: state.appControls,
       // Liquid Glass toggle is macOS-only.
-      glass: IS_MAC ? glassEnabled() : undefined,
-    });
+      glass: glassEnabled(),
+    }) : "");
   }
   if (state.settingsSection === "team") {
     return settingsContentHTML({
@@ -1437,6 +1439,7 @@ app.addEventListener("click", (e) => {
       break;
     }
     case "refresh":
+      if (state.loading) break;
       // An explicit click is the one moment we're allowed to look at Claude
       // Code's credential storage again even if it appears unchanged — a
       // background poll must never do that (it can raise a Keychain prompt).
@@ -1444,6 +1447,9 @@ app.addEventListener("click", (e) => {
       if (MOCK || state.source !== "live" || state.provider !== "claude") {
         void refresh();
       } else {
+        state.loading = true;
+        state.error = "";
+        render();
         void invoke("recheck_credentials")
           .catch(() => {})
           .then(() => refresh());
@@ -1472,7 +1478,8 @@ app.addEventListener("click", (e) => {
       break;
     }
     case "theme":
-      cycleTheme();
+      if (!value || !isTheme(value)) break;
+      setTheme(value);
       syncTrayTheme(); // recolor the menu-bar heart to match
       render();
       break;
@@ -1671,7 +1678,7 @@ app.addEventListener("input", (e) => {
 function openSettings(): void {
   state.teamDraft = { ...defaultTeamDraft() };
   state.settingsTab = "ssh";
-  state.settingsSection = "update";
+  state.settingsSection = "general";
   state.teamStatus = "";
   state.teamStatusOk = false;
   state.teamTesting = false;
@@ -1680,9 +1687,7 @@ function openSettings(): void {
   render();
   void loadAppVersion();
   if (IS_MAC) void loadAppControls(); // General section (macOS)
-  // Land on Update with a check already in flight, so there's nothing to click
-  // for the common "is there a new version?" case.
-  void checkUpdate();
+  // Update checks start when the Update section is opened.
 }
 
 // The relocated tray-menu toggles' current state (macOS). Loaded when settings

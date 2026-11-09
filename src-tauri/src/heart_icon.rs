@@ -62,13 +62,13 @@ pub enum TrayTheme {
 }
 
 impl TrayTheme {
-    /// Parse the localStorage theme id; unknown / default → Minecraft (the app's
+    /// Parse the localStorage theme id; unknown / default → Classic (the app's
     /// default theme).
     pub fn from_id(s: &str) -> Self {
         match s {
-            "classic" => TrayTheme::Classic,
+            "minecraft" => TrayTheme::Minecraft,
             "arknights" => TrayTheme::Arknights,
-            _ => TrayTheme::Minecraft,
+            _ => TrayTheme::Classic,
         }
     }
 }
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(TrayTheme::from_id("classic"), TrayTheme::Classic);
         assert_eq!(TrayTheme::from_id("arknights"), TrayTheme::Arknights);
         assert_eq!(TrayTheme::from_id("minecraft"), TrayTheme::Minecraft);
-        assert_eq!(TrayTheme::from_id("garbage"), TrayTheme::Minecraft);
+        assert_eq!(TrayTheme::from_id("garbage"), TrayTheme::Classic);
     }
 
     #[test]

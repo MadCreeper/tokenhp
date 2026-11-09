@@ -131,7 +131,7 @@ fn default_alerts() -> bool {
     true
 }
 fn default_theme() -> String {
-    "minecraft".into()
+    "classic".into()
 }
 
 #[derive(Serialize, Deserialize, Clone)]

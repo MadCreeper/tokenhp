@@ -245,10 +245,6 @@ html.glass.blurred body.theme-classic .header {
 .tool-cycle:hover .title-swap {
   opacity: 1;
 }
-.spinner {
-  font-size: 12px;
-  color: var(--panel-text-dim);
-}
 
 /* --- Buttons: shared layout; skin per theme --- */
 .mc-btn {
@@ -274,6 +270,8 @@ html.glass.blurred body.theme-classic .header {
 }
 .mc-btn.icon svg {
   display: block;
+  width: 16px;
+  height: 16px;
 }
 .theme-minecraft .mc-btn.icon svg {
   width: 16px;
@@ -1690,3 +1688,86 @@ html.glass.blurred body.theme-classic {
 .source-line .usage-view-switch button { font-size: 10px; padding: 5px; }
 
 .refresh-error { color: var(--error) !important; }
+
+/* Refresh action and progress share one stable header slot. */
+.header .mc-btn.icon {
+  min-width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+.header .refresh-control { width: 34px; }
+/* Compact toolbar chrome; Minecraft retains its native pixel sizing.
+   AK's circular frame needs a slightly larger canvas than the solid gear
+   to give their visible silhouettes similar weight. */
+.theme-classic .header .mc-btn.icon,
+.theme-arknights .header .mc-btn.icon {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  padding: 4px;
+  font-size: 10px;
+}
+.theme-classic .header .mc-btn.icon { border-radius: 7px; }
+.theme-classic .header .mc-btn.icon svg,
+.theme-arknights .header .mc-btn.icon svg {
+  width: 14px;
+  height: 14px;
+}
+.theme-classic .header .mc-btn.refresh-control svg {
+  width: 15px;
+  height: 15px;
+}
+.header .mc-btn:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.refresh-control[aria-disabled="true"] { cursor: progress; }
+.refresh-control.is-loading { color: var(--panel-text-dim); }
+.refresh-control.is-loading > svg { animation: refresh-turn 1s linear infinite; }
+.theme-minecraft .refresh-control.is-loading { color: #fff; }
+.theme-minecraft .refresh-control.is-loading > svg {
+  animation: refresh-turn 1.2s steps(4, end) infinite;
+}
+.theme-arknights .header .mc-btn.icon[data-action="settings"] svg {
+  width: 14px; height: 14px;
+}
+.theme-arknights .header .refresh-control {
+  color: #fff;
+  background: transparent;
+  border-color: transparent;
+  padding: 0;
+}
+.theme-arknights .header .mc-btn.refresh-control > svg { width: 17px; height: 17px; }
+.theme-arknights .refresh-control:hover > svg { filter: brightness(1.2); }
+.theme-arknights .refresh-control.is-loading > svg { animation: none; }
+.ak-refresh-arrows { transform-box: view-box; transform-origin: 14px 14px; }
+.is-loading .ak-refresh-arrows { animation: refresh-turn 1.2s linear infinite; }
+@keyframes refresh-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .refresh-control.is-loading > svg,
+  .is-loading .ak-refresh-arrows { animation: none !important; }
+  .refresh-control.is-loading { opacity: .5; }
+}
+
+/* Plain toolbar glyphs in the two non-pixel themes. Keep hit areas and focus
+   outlines, but let icons carry the hierarchy instead of permanent boxes. */
+.theme-classic .header .mc-btn.icon,
+.theme-arknights .header .mc-btn.icon,
+html.glass.blurred body.theme-classic .header .mc-btn.icon {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.theme-classic .header .mc-btn.icon:hover,
+.theme-arknights .header .mc-btn.icon:hover {
+  background: rgba(0, 0, 0, .055);
+}
+.theme-classic .header .mc-btn.icon.selected { color: #0a84ff; }
+.theme-arknights .header .mc-btn.icon.selected { color: var(--panel-text); }
+.theme-classic .header .mc-btn.icon.selected[data-action="pin"] svg,
+.theme-arknights .header .mc-btn.icon.selected[data-action="pin"] svg { fill: currentColor; }
+html.glass.blurred body.theme-classic .header .mc-btn.icon:hover {
+  background: rgba(255, 255, 255, .12);
+}
+.theme-settings { padding-bottom: 12px; }
+.theme-settings + .general { border-top: 1px solid var(--panel-text-dim); padding-top: 12px; }

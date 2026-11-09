@@ -104,25 +104,13 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
         return Err(FetchError::TokenExpired);
     }
 
-    let mut client = build_client(None)?;
-    let first = fetch_payload(&client, &credentials).await;
-    let response = match first {
-        // Finder-launched macOS apps do not inherit proxy variables from the
-        // login shell. If direct access is rejected, mirror the shell's HTTPS
-        // proxy for this client and retry with the already-read token. This
-        // neither changes system proxy settings nor touches credential storage.
-        Err(error) if should_retry_same_token(&error) => {
-            if let Some(proxy_url) = crate::network::login_shell_proxy() {
-                client = build_client(Some(&proxy_url))?;
-            } else {
-                // Also cover a brief auth propagation delay when no proxy is
-                // configured. The retry is the same read-only GET.
-                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            }
-            fetch_payload(&client, &credentials).await
-        }
-        other => other,
-    };
+    // Match Codex/update requests: GUI launches do not inherit shell proxies.
+    // Using an explicitly configured proxy also avoids a broken system DNS
+    // forwarder (for example, Tailscale forwarding public domains).
+    let proxy_url = crate::network::login_shell_proxy();
+    let mut client = build_client(proxy_url.as_deref())?;
+    let response =
+        fetch_with_route_fallback(&mut client, &credentials, USAGE_URL, proxy_url.is_some()).await;
     let payload = match response {
         Ok(payload) => payload,
         Err(error) if is_credential_rejection(&error) => {
@@ -135,7 +123,7 @@ pub async fn fetch(creds: &CredentialCache) -> Result<UsageReport, FetchError> {
                 Ok(fresh) if fresh.access_token != credentials.access_token => fresh,
                 Ok(_) | Err(_) => return Err(error),
             };
-            match fetch_payload(&client, &replacement).await {
+            match fetch_payload(&client, &replacement, USAGE_URL).await {
                 Ok(payload) => payload,
                 Err(retry_error) => {
                     if is_credential_rejection(&retry_error) {
@@ -160,12 +148,40 @@ fn build_client(proxy_url: Option<&str>) -> Result<reqwest::Client, FetchError> 
         .map_err(|e| FetchError::Network(e.to_string()))
 }
 
+async fn fetch_with_route_fallback(
+    client: &mut reqwest::Client,
+    credentials: &crate::credentials::ClaudeCredentials,
+    url: &str,
+    has_explicit_proxy: bool,
+) -> Result<Payload, FetchError> {
+    match fetch_payload(client, credentials, url).await {
+        // A configured proxy may have stopped while TUN/direct access still
+        // works. Bypass environment proxies as well, so this is a new route.
+        Err(FetchError::Network(_)) if has_explicit_proxy => {
+            *client = reqwest::Client::builder()
+                .no_proxy()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+                .map_err(|e| FetchError::Network(e.to_string()))?;
+            fetch_payload(client, credentials, url).await
+        }
+        Err(error) if should_retry_same_token(&error) => {
+            // Preserve the bounded retry for a brief auth propagation delay.
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            fetch_payload(client, credentials, url).await
+        }
+        other => other,
+    }
+}
+
 async fn fetch_payload(
     client: &reqwest::Client,
     credentials: &crate::credentials::ClaudeCredentials,
+    url: &str,
 ) -> Result<Payload, FetchError> {
     let resp = client
-        .get(USAGE_URL)
+        .get(url)
         .header(
             "Authorization",
             format!("Bearer {}", credentials.access_token),
@@ -215,9 +231,7 @@ fn should_retry_same_token(error: &FetchError) -> bool {
 fn forbidden_is_oauth_rejection(challenge: &str, body: &str) -> bool {
     let text = format!("{challenge}\n{body}").to_ascii_lowercase();
     // A new token cannot fix an organization-level ban, so preserve that 403.
-    if text.contains("not allowed for this organization")
-        || text.contains("organization policy")
-    {
+    if text.contains("not allowed for this organization") || text.contains("organization policy") {
         return false;
     }
     let token_rejected = (text.contains("token") || text.contains("bearer"))
@@ -396,6 +410,108 @@ fn clamp01(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_credentials() -> crate::credentials::ClaudeCredentials {
+        crate::credentials::ClaudeCredentials {
+            access_token: "test-token".into(),
+            expires_at: None,
+            subscription_type: None,
+            rate_limit_tier: None,
+        }
+    }
+
+    fn http_server(status: u16, body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "request never arrived"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("accept: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn configured_proxy_resolves_usage_host_without_system_dns() {
+        let (proxy, server) = http_server(200, r#"{"five_hour":{"utilization":25}}"#);
+        let mut client = build_client(Some(&proxy)).unwrap();
+        let payload = fetch_with_route_fallback(
+            &mut client,
+            &test_credentials(),
+            "http://usage.invalid/api/oauth/usage",
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(payload.into_windows()[0].utilization, 0.25);
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET http://usage.invalid/api/oauth/usage "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-token"));
+    }
+
+    #[tokio::test]
+    async fn proxy_timeout_falls_back_to_direct_with_same_token() {
+        // Leave the proxy listener unserviced, reproducing a request timeout.
+        let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://{}", stalled.local_addr().unwrap());
+        let (url, server) = http_server(200, r#"{"seven_day":{"utilization":10}}"#);
+        let mut client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(&proxy).unwrap())
+            .timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let payload = fetch_with_route_fallback(&mut client, &test_credentials(), &url, true)
+            .await
+            .unwrap();
+        assert_eq!(payload.into_windows()[0].utilization, 0.1);
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET / HTTP/1.1"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-token"));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_does_not_switch_routes() {
+        let (proxy, server) = http_server(429, "{}");
+        let mut client = build_client(Some(&proxy)).unwrap();
+        let result = fetch_with_route_fallback(
+            &mut client,
+            &test_credentials(),
+            "http://usage.invalid/api/oauth/usage",
+            true,
+        )
+        .await;
+        assert!(matches!(result, Err(FetchError::RateLimited)));
+        server.join().unwrap();
+    }
 
     fn parse(json: &str) -> Vec<UsageWindow> {
         serde_json::from_str::<Payload>(json)

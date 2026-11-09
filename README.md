@@ -50,7 +50,7 @@ Cross-platform (macOS · Linux · Windows) · Tauri 2 · tiny (~6 MB)
 - **Opt-in Team usage view** — share aggregate usage through your own SSH-accessible Postgres. Model selection filters member totals, expanded projects, and **Usage breakdown / 用量明细** together. Usage breakdown shows member → account → model usage and each member's share of the selected usage. Dollars estimate API-equivalent cost, not subscription bills; percentages use costs only when pricing is complete, otherwise tokens. Account labels can be masked, shown, or hidden. Legacy members remain visible without invented account attribution.
 - **Usage calendar** — switch Local or Team from Bars to Calendar. View daily squares within a month or monthly squares within a year; hover or focus a square for token totals, API-rate cost estimates, model usage and team contributors. Both totals stay visible; a shared Tokens/Cost selector controls the heatmap colors across tabs. Filters apply to every square and summary. Dates use UTC; empty team dates mean no synced records.
 - **Pricing** — rates checked on **2026-10-16** against official provider pages. GPT/Claude, Kimi, GLM, DeepSeek, MiniMax and Qwen coverage includes request-level context tiers and DeepSeek peak/off-peak rates. See [sources and assumptions](src-tauri/src/pricing-sources.json). 20 of the 21 model IDs observed in Team history are covered, including the two routed GPT-6 Astra IDs. `codex-auto-review` remains unpriced because no public rate or confirmed underlying model is available. Unknown model variants stay unpriced instead of inheriting an unrelated model's rate; local `HPBar/pricing.json` overrides remain supported. Team costs refresh as each member uploads recalculated logs (older clients retain their uploaded estimates).
-- **Three switchable themes**, remembered across launches:
+- **Three switchable themes**, remembered across launches; new installs default to Classic (macOS style):
   | Theme | Live quota | Local activity |
   |-------|-----------|----------------|
   | 🟩 **Minecraft** | draining pixel hearts | Bedrock-style XP bars |
@@ -119,6 +119,15 @@ Token is read from `%USERPROFILE%\.claude\.credentials.json` — **no prompt**.
 `$CLAUDE_CONFIG_DIR` is honoured everywhere Claude Code honours it — the
 credentials file and session logs move with it.
 
+On macOS, GUI launches also read simple HTTP(S) proxy assignments from your
+zsh startup files, matching the terminal's configured proxy without running a
+shell. Claude quota requests use that proxy first, so a broken system DNS
+forwarder does not block usage lookup. If the proxy request fails at the network
+layer, HPBar retries once through the direct/TUN route. Connection setup is
+limited to 5 seconds; each request has a 20-second overall timeout. This does
+not change system DNS or VPN settings. Without a configured HTTP(S) proxy,
+HPBar still depends on the system's working DNS/TUN route.
+
 HPBar never logs in itself — it reuses your Claude Code login and **only reads**
 it: it never writes the item, never deletes it, and never refreshes the token
 (refreshing would rotate the CLI's refresh token and log you out for real). It
@@ -138,6 +147,12 @@ npm run tauri build    # .dmg / .deb+.rpm+.AppImage / .msi+.exe
 
 If `cargo` downloads fail with an HTTP/2 framing error: `CARGO_HTTP_MULTIPLEXING=false npm run tauri dev`.
 Headless data-path checks (no GUI): `cargo run --example check` (live) · `cargo run --example local_check` (local).
+On macOS, `cargo run --example placement_check` checks native popup positioning
+on every attached display using a hidden blank window (no credentials/network).
+Tray clicks anchor to the clicked display even when pinned; clicking a different
+display moves an already-visible popup there. Geometry uses AppKit points to
+handle negative screen origins and differing display scales.
+
 
 **Theme showcase / mock mode** — preview every theme with canned data; no Keychain, no network, no Tauri:
 
@@ -215,7 +230,7 @@ Three themes complete and verified on macOS; Linux/Windows bundles build in CI. 
 - **额度提醒（Quota alerts）**：窗口首次进入「偏低 / 临界」时弹一条系统通知（默认开启，托盘菜单可关）。
 - **本地活动（Local activity）**：从本地 Claude Code、Codex 与 OpenClaw 会话日志统计每个模型的 token 用量与估算花费，支持 24 小时 / 7 天 / 30 天；在汇总的「All」视图下还会按**项目排名**（「哪个仓库吃了我的 token」）。
 - **可选 Team 分账**：通过你自己的 SSH + Postgres 同步汇总数据。即便多人共用登录，每个安装仍是独立成员；「**用量明细**」下钻展示成员 → 账号 → 模型明细与分摊比例，账号标签可选掩码、完整或隐藏。滚动升级期间仍显示旧版成员并明确标记，但不会假装旧日志具有不存在的账号归属。
-- **三种可切换主题**（自动记住上次选择）：
+- **三种可切换主题**（自动记住上次选择；新安装默认使用 macOS 风格的 Classic）：
   | 主题 | 实时额度 | 本地活动 |
   |------|---------|---------|
   | 🟩 **我的世界** | 逐格扣血的像素红心 | 基岩版风格经验条 |
