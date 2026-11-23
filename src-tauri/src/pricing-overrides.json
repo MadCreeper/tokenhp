@@ -13,6 +13,12 @@
   },
   "deepseek_off_peak_discount": 0.5,
   "models": {
+    "qwen3.7-max": {
+      "input": 2.5,
+      "output": 7.5,
+      "cache_read": 0.25,
+      "cache_create": 3.125
+    },
     "qwen3.7-plus": {
       "input": 0.4,
       "output": 1.6,

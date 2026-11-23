@@ -663,8 +663,24 @@ export function syncPricing({
   }
 
   // 3. models.dev (first-party Alibaba/Qwen, DeepSeek v4.1, etc.)
+  //    Do not let models.dev clobber an entry that already carries DeepSeek's
+  //    peak/off-peak schedule or a more specific non-200k long-context tier.
   const mdTable = modelsDev ? extractModelsDev(modelsDev, { warnings }) : {};
   for (const [k, v] of Object.entries(mdTable)) {
+    const prev = merged[k];
+    if (prev?.off_peak_discount && !v.off_peak_discount) continue;
+    if (
+      prev?.long_context_above &&
+      prev.long_context_above !== 200000 &&
+      (!v.long_context_above || v.long_context_above === 200000)
+    ) {
+      merged[k] = {
+        ...v,
+        long_context_above: prev.long_context_above,
+        long_context: prev.long_context,
+      };
+      continue;
+    }
     merged[k] = v;
   }
 
