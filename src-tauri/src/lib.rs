@@ -163,10 +163,23 @@ async fn fetch_calendar(source: String, year: i32) -> Result<calendar::CalendarR
 }
 
 #[tauri::command]
-async fn fetch_local(window_secs: i64) -> Result<tools::LocalReport, String> {
-    tokio::task::spawn_blocking(move || tools::fetch_local(window_secs))
+async fn fetch_local(
+    app: tauri::AppHandle,
+    window_secs: i64,
+) -> Result<tools::LocalReport, String> {
+    let report = tokio::task::spawn_blocking(move || tools::fetch_local(window_secs))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    let unpriced: Vec<String> = report
+        .combined
+        .iter()
+        .filter(|m| m.cost.is_none())
+        .map(|m| m.id.clone())
+        .collect();
+    if !unpriced.is_empty() {
+        pricing::trigger_refresh_for_unknown_models(app, &unpriced);
+    }
+    Ok(report)
 }
 
 /// Codex's live rate-limit quota (backend usage endpoint, read-only auth —
@@ -365,7 +378,8 @@ pub fn run() {
             update::app_version,
             update::check_update,
             update::download_and_install_update,
-            update::open_external
+            update::open_external,
+            pricing::refresh_pricing
         ])
         .setup(|app| {
             // macOS: run as a menu-bar accessory — no Dock icon, no app menu.
@@ -425,6 +439,7 @@ pub fn run() {
             account::start_observer_run();
             spawn_account_observer();
             spawn_team_uploader();
+            pricing::spawn_refresher(app.handle().clone());
             // Ambient HP: keep the menu-bar heart + tooltip live, and alert on
             // low/critical quota. Runs for the app's lifetime; no-op when signed out.
             ambient::spawn(app.handle().clone());

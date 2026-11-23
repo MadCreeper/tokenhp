@@ -9,8 +9,9 @@ telemetry, analytics, hosted backend, or HPBar account, and it never extracts,
 stores, or transmits prompt/response content.
 
 Network access is limited to clearly scoped features: Anthropic for Claude
-quota; GitHub when you check/download an update; and, only when you enable Team,
-the SSH/Postgres host you configured. Team is off by default.
+quota; GitHub for periodic rate-table refreshes and when you check/download an
+update; and, only when you enable Team, the SSH/Postgres host you configured.
+Team is off by default.
 
 ---
 
@@ -156,6 +157,10 @@ account history and, subject to Team privacy settings, aggregate Team rows.
 
 - **`api.anthropic.com`** — automatic Claude quota polling, authorized with the
   existing Claude token.
+- **`raw.githubusercontent.com`** — periodic (at most once per 24 hours, or once
+  per hour if local logs contain an unrecognized model) conditional `ETag` fetch
+  of HPBar's curated `pricing.json` table. Carries no usage, model, or account
+  data; falls back silently to the bundled table offline.
 - **`api.github.com` and GitHub release asset hosts** — only when you open the
   Update page to check, or explicitly download an installer.
 - **Your configured SSH/Postgres host** — only when Team is enabled or you press
@@ -183,6 +188,8 @@ HPBar writes small local state needed for its features:
 - `account-history.json`, described above;
 - `team-config.json` when Team settings are saved. SSH-key use stores no secret,
   but an optional SSH password is stored there in plaintext if you enter one;
+- `pricing-cache.json` and `pricing-cache-meta.json` — the locally cached copy
+  and `ETag` metadata of the curated model rate table fetched from GitHub;
 - a downloaded installer when you explicitly choose Download & Install;
 - an OS autostart entry when you enable Open at Login.
 
@@ -227,9 +234,10 @@ opt-in Team path above. Update checks are separate and carry no usage data.
 HPBar is open source and unsigned by design — you can check every claim here:
 
 - **Network:** provider quota HTTP is in
-  [src-tauri/src/usage.rs](src-tauri/src/usage.rs), GitHub update HTTP is in
-  [src-tauri/src/update.rs](src-tauri/src/update.rs), and Team SSH/Postgres code
-  is in [src-tauri/src/team/db.rs](src-tauri/src/team/db.rs).
+  [src-tauri/src/usage.rs](src-tauri/src/usage.rs), GitHub pricing refresh HTTP
+  is in [src-tauri/src/pricing.rs](src-tauri/src/pricing.rs), GitHub update HTTP
+  is in [src-tauri/src/update.rs](src-tauri/src/update.rs), and Team SSH/Postgres
+  code is in [src-tauri/src/team/db.rs](src-tauri/src/team/db.rs).
 - **Local parsing:** the adapters in [src-tauri/src/tools.rs](src-tauri/src/tools.rs)
   (→ `localstats.rs`, `codexstats.rs`, `openclawstats.rs`) show exactly which
   fields are read (token counts, model id, timestamp) and that content fields are

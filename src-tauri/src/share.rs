@@ -437,7 +437,7 @@ pub fn record_at(app: &AppHandle, provider: &str, report: &UsageReport, at: i64)
     let Some(account) = current_account(provider) else {
         return;
     };
-    let pricing = crate::pricing::Pricing::loaded().fingerprint();
+    let pricing = crate::pricing::Pricing::loaded().fingerprint_for_provider(provider);
     let calibrated = false; // legacy user override is intentionally ignored
     for w in &report.windows {
         if w.trailing.as_deref() == Some("Off") || w.resets_at.is_none() {
@@ -492,7 +492,7 @@ pub fn annotate(app: &AppHandle, provider: &str, report: &mut UsageReport) {
     let hist = load_history(app);
     let now = now_unix();
     let account = current_account(provider);
-    let pricing = crate::pricing::Pricing::loaded().fingerprint();
+    let pricing = crate::pricing::Pricing::loaded().fingerprint_for_provider(provider);
     for w in &mut report.windows {
         w.machine_share = None;
         w.others_share = None;

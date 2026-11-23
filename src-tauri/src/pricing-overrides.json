@@ -1,0 +1,30 @@
+{
+  "notes": "Curated overrides applied on top of upstream registries by scripts/sync-pricing.mjs. Keep this file small: only exclusions, route/shorthand aliases, regional policies, and day-0/legacy entries absent from upstream feeds.",
+  "exclude": [
+    "codex-auto-review"
+  ],
+  "aliases": {
+    "atxc44y9/gpt-6-astra": "gpt-6-astra",
+    "8tzqgkp5/gpt-6-astra": "gpt-6-astra",
+    "kimi-k2.7": "kimi-k2.7-code"
+  },
+  "fallback_aliases": {
+    "deepseek-v4.1-flash": "deepseek-v4-flash"
+  },
+  "deepseek_off_peak_discount": 0.5,
+  "models": {
+    "qwen3.7-plus": {
+      "input": 0.4,
+      "output": 1.6,
+      "cache_read": 0.04,
+      "cache_create": 0.5,
+      "long_context_above": 256000,
+      "long_context": {
+        "input": 1.2,
+        "output": 4.8,
+        "cache_read": 0.12,
+        "cache_create": 1.5
+      }
+    }
+  }
+}

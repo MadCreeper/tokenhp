@@ -1,5 +1,5 @@
 {
-  "checked_on": "2026-10-16",
+  "checked_on": "2026-11-23",
   "currency": "USD",
   "unit": "per million tokens",
   "basis": "Current first-party standard API rates, applied to historical requests as an equivalent-cost estimate; not historical invoices or subscription charges.",
@@ -38,7 +38,7 @@
   },
   "assumptions": [
     "Qwen uses Singapore International rates with explicit-cache reads. Implicit-cache reads and other regions have different rates.",
-    "DeepSeek base prices are peak rates; requests outside 01:00\u201304:00 and 06:00\u201310:00 UTC Monday\u2013Friday get the published 50% discount.",
+    "DeepSeek base prices are peak rates; requests outside 01:00–04:00 and 06:00–10:00 UTC Monday–Friday get the published 50% discount.",
     "Context tiers are selected per request, including cached input and writes, before summing usage.",
     "Fast, priority, batch, flex, residency, tax, third-party hosting and tool charges are not inferred from model names.",
     "Kimi K3 cache writes use the published default write rate; no separate one-hour rate was available in the retrieved price table.",
